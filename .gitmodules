@@ -21,3 +21,10 @@
 [submodule "kbuild"]
 	path = kbuild
 	url = https://github.com/osvunikernel/kbuild-standalone.git
+[submodule "musl_1.2.5"]
+	path = musl_1.2.5
+	url = https://git.musl-libc.org/git/musl
+[submodule "external/openzfs"]
+	path = external/openzfs
+	url = https://github.com/openzfs/zfs
+	branch = zfs-2.3.6
