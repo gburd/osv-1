@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "osv-sys",
+    "crucible-osv",
+]
+
+[workspace.package]
+edition = "2021"
+license = "BSD-3-Clause"
