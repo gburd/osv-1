@@ -8,7 +8,7 @@
 
 #include <boost/program_options.hpp>
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/io_service.hpp>
+#include <boost/asio/io_context.hpp>
 #include <string>
 #include <thread>
 #include <mutex>
@@ -58,7 +58,7 @@ private:
     private:
         tcp_test_client& _client;
         unique_lock<mutex> _lock;
-        boost::asio::io_service _io;
+        boost::asio::io_context _io;
         thread _thread;
     };
     friend class test_thread;
