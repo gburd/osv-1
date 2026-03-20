@@ -986,6 +986,13 @@ ifeq ($(conf_drivers_ena),1)
 drivers += drivers/ena.o
 endif
 endif
+ifeq ($(conf_drivers_crucible),1)
+drivers += drivers/crucible-connection.o
+drivers += drivers/crucible-request.o
+drivers += drivers/crucible-hash.o
+drivers += drivers/crucible-client.o
+drivers += drivers/crucible-blk.o
+endif
 endif # x64
 
 ifeq ($(arch),aarch64)
