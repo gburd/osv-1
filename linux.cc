@@ -695,6 +695,14 @@ static long sys_brk(void *addr)
 #define __NR_utimensat4 __NR_utimensat
 extern int utimensat4(int dirfd, const char *pathname, const struct timespec times[2], int flags);
 #endif
+
+// Forward declarations for io_uring syscalls
+struct io_uring_params;
+extern long sys_io_uring_setup(unsigned entries, struct io_uring_params *params);
+extern int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+                               unsigned flags, const void *sig, size_t sigsz);
+extern int sys_io_uring_register(int fd, unsigned opcode, void *arg, unsigned nr_args);
+
 TRACEPOINT(trace_syscall_futex, "%d <= %p %d %d %p %p %d", int, int *, int, int, const struct timespec *, int *, uint32_t);
 #if CONF_core_syscall
 #include <osv/syscall_tracepoints.cc>

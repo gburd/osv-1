@@ -30,6 +30,43 @@ static constexpr size_t MIN_ENTRIES = 1;
 // Forward declaration
 class io_uring_file;
 
+// io_uring context structure
+struct io_uring_ctx {
+    mutex mtx;
+
+    // Submission queue state
+    struct {
+        uint32_t head;
+        uint32_t tail;
+        uint32_t mask;
+        uint32_t entries;
+    } sq;
+
+    // Completion queue state
+    struct {
+        uint32_t head;
+        uint32_t tail;
+        uint32_t mask;
+        uint32_t entries;
+    } cq;
+
+    // SQE and CQE arrays (kernel-owned)
+    struct io_uring_sqe *sqes;
+    struct io_uring_cqe *cqes;
+
+    // Shared memory regions (mapped to userspace)
+    void *sq_ring;
+    void *cq_ring;
+
+    // State tracking
+    uint32_t pending_ops;
+    bool shutdown;
+
+    // Wait queues
+    waitqueue wait_sq;
+    waitqueue wait_cq;
+};
+
 struct io_uring_work {
     struct io_uring_ctx *ctx;
     struct io_uring_sqe sqe;
@@ -61,7 +98,7 @@ private:
 static void io_uring_complete_op(struct io_uring_ctx *ctx, uint64_t user_data,
                                   int32_t res, uint32_t flags)
 {
-    WITH_LOCK(ctx->mutex) {
+    WITH_LOCK(ctx->mtx) {
         unsigned int head, tail;
 
         // Read head/tail from shared memory if available
@@ -102,7 +139,7 @@ static void io_uring_complete_op(struct io_uring_ctx *ctx, uint64_t user_data,
         ctx->cq.tail = next;
         ctx->pending_ops--;
 
-        ctx->wait_cq.wake_all(ctx->mutex);
+        ctx->wait_cq.wake_all(ctx->mtx);
     }
 }
 
@@ -214,7 +251,7 @@ static int io_uring_submit_sqes(struct io_uring_ctx *ctx, unsigned count)
 {
     unsigned int submitted = 0;
 
-    WITH_LOCK(ctx->mutex) {
+    WITH_LOCK(ctx->mtx) {
         if (ctx->shutdown) {
             return -EINVAL;
         }
@@ -278,7 +315,7 @@ static int io_uring_submit_sqes(struct io_uring_ctx *ctx, unsigned count)
 
 static int io_uring_wait_cqe(struct io_uring_ctx *ctx, unsigned min_complete)
 {
-    WITH_LOCK(ctx->mutex) {
+    WITH_LOCK(ctx->mtx) {
         while (true) {
             unsigned int head, tail;
 
@@ -305,7 +342,7 @@ static int io_uring_wait_cqe(struct io_uring_ctx *ctx, unsigned min_complete)
                 return 0;
             }
 
-            ctx->wait_cq.wait(ctx->mutex);
+            ctx->wait_cq.wait(ctx->mtx);
         }
     }
     return 0;
@@ -423,10 +460,10 @@ int io_uring_file::close()
         return 0;
     }
 
-    WITH_LOCK(_ctx->mutex) {
+    WITH_LOCK(_ctx->mtx) {
         _ctx->shutdown = true;
-        _ctx->wait_cq.wake_all(_ctx->mutex);
-        _ctx->wait_sq.wake_all(_ctx->mutex);
+        _ctx->wait_cq.wake_all(_ctx->mtx);
+        _ctx->wait_sq.wake_all(_ctx->mtx);
     }
 
     while (_ctx->pending_ops > 0) {
