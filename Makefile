@@ -444,6 +444,7 @@ ifeq ($(arch),aarch64)
 # to the bootfs.manifest.skel atm to get it to work.
 #
 tools += tests/tst-hello.so
+tools += tests/tst-io_uring.so
 cmdline = --nomount tests/tst-hello.so
 endif
 

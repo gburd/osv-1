@@ -611,6 +611,7 @@ std::unique_ptr<mmu::file_vma> io_uring_file::mmap(addr_range range, unsigned fl
     return mmu::default_file_mmap(this, range, flags, perm, offset);
 }
 
+extern "C"
 OSV_LIBC_API
 long sys_io_uring_setup(unsigned entries, struct io_uring_params *params)
 {
@@ -696,6 +697,7 @@ long sys_io_uring_setup(unsigned entries, struct io_uring_params *params)
     }
 }
 
+extern "C"
 OSV_LIBC_API
 int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
                        unsigned flags, const void *sig, size_t sigsz)
@@ -734,6 +736,7 @@ int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
     return 0;
 }
 
+extern "C"
 OSV_LIBC_API
 int sys_io_uring_register(int fd, unsigned opcode, void *arg, unsigned nr_args)
 {
