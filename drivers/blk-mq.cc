@@ -29,7 +29,7 @@ int blk_mq_init_tag_set(struct blk_mq_tag_set* set)
         set->queue_map[i] = hctx;
     }
 
-    debug("blk_mq: initialized %u hardware queues\n", set->nr_hw_queues);
+    kprintf("blk_mq: initialized %u hardware queues\n", set->nr_hw_queues);
     return 0;
 }
 
