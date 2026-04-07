@@ -1,0 +1,146 @@
+{
+  "version": "1.0",
+  "description": "OSv-specific modifications to ZFS (based on illumos/FreeBSD ZFS port)",
+  "base_version": "illumos ZFS as ported to FreeBSD ~2013 (pre-OpenZFS unification)",
+  "files": [
+    {
+      "path": "uts/common/fs/zfs/vdev_disk.c",
+      "patch": "001-vdev-disk-osv-bio.patch",
+      "type": "complete_rewrite",
+      "description": "Complete rewrite of vdev_disk for OSv bio layer integration. Replaces FreeBSD GEOM/devfs with OSv device/bio APIs."
+    },
+    {
+      "path": "uts/common/fs/zfs/arc.c",
+      "patch": "002-arc-memory-management.patch",
+      "type": "conditional_compilation",
+      "description": "ARC memory management adaptations: disable DNLC purge, add vm_throttling_needed() check, disable FreeBSD-specific memory throttle and prefetch tuning, skip ru_inblock accounting."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_ioctl.c",
+      "patch": "003-zfs-ioctl-stubs.patch",
+      "type": "conditional_compilation",
+      "description": "Stub out unsupported ioctl operations (destroy, rollback, recv, send, diff, userspace, jail/unjail). Disable security policy checks. Skip onexit cleanup registration."
+    },
+    {
+      "path": "uts/common/fs/zfs/sys/zfs_context.h",
+      "patch": "004-zfs-context-logging.patch",
+      "type": "conditional_compilation",
+      "description": "Replace FreeBSD ZFS_LOG macro (mtx-locked printf with optional kdb_backtrace) with simple kprintf-based logging."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_vnops.c",
+      "patch": "005-zfs-vnops-adaptations.patch",
+      "type": "conditional_compilation",
+      "description": "Disable mandatory lock checks, mapped read path, xvattr handling, and vrecycle in zfs_inactive. OSv VFS layer lacks these features."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_vfsops.c",
+      "patch": "006-zfs-vfsops-integration.patch",
+      "type": "conditional_compilation",
+      "description": "Disable sync, skip security policy on unmount, use release_mp_dentries instead of vflush, abort on snapshot ctl operations, sync all pools on last dataset unmount."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_znode.c",
+      "patch": "007-zfs-znode-refcounting.patch",
+      "type": "conditional_compilation",
+      "description": "Add manual reference counting (z_ref_cnt) to znodes since OSv lacks vnode-level reference counting. Simplify device number conversion macros."
+    },
+    {
+      "path": "uts/common/fs/zfs/sys/zfs_znode.h",
+      "patch": "007-zfs-znode-refcounting.patch",
+      "type": "conditional_compilation",
+      "description": "Add z_ref_cnt field to znode_t struct for OSv reference counting."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_dir.c",
+      "patch": "008-zfs-dir-no-dnlc.patch",
+      "type": "conditional_compilation",
+      "description": "Remove all DNLC (Directory Name Lookup Cache) operations. OSv does not have DNLC. Also disable vnode mount point locking (vn_vfswlock/vn_vfsunlock). Align with FreeBSD for xattr error codes (ENOATTR)."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_acl.c",
+      "patch": "009-zfs-acl-freebsd-compat.patch",
+      "type": "conditional_compilation",
+      "description": "Follow FreeBSD behavior for ACL: group ID inheritance from parent dir, skip ADS permission checks, skip xattr vnode release, device vnode write check."
+    },
+    {
+      "path": "uts/common/fs/zfs/zfs_replay.c",
+      "patch": "010-zfs-replay-stubs.patch",
+      "type": "conditional_compilation",
+      "description": "Stub out ZIL replay functions that depend on unsupported features: TX_CREATE_ACL, TX_LINK, TX_SETATTR, TX_ACL_V0, TX_ACL. Also disable vattr init and xvattr replay helpers."
+    },
+    {
+      "path": "uts/common/fs/zfs/spa.c",
+      "patch": "011-spa-root-config.patch",
+      "type": "conditional_compilation",
+      "description": "Provide OSv-specific zpool_get_config() and spa_generate_rootconf() using vdev_disk_read_rootlabel(). Also follow FreeBSD pattern for reguid history logging."
+    },
+    {
+      "path": "uts/common/fs/zfs/spa_history.c",
+      "patch": "012-spa-history-zone.patch",
+      "type": "conditional_compilation",
+      "description": "Disable jail-based zone hostname lookup in spa_history_zone()."
+    },
+    {
+      "path": "uts/common/fs/zfs/zvol.c",
+      "patch": "013-zvol-stubs.patch",
+      "type": "conditional_compilation",
+      "description": "Stub out GEOM-based zvol operations: DECLARE_GEOM_CLASS, zvol_size_changed, zvol_minor_lookup, zvol_remove_minors, zvol_geom_create, zvol_create_minors, zvol_rename_minors."
+    },
+    {
+      "path": "uts/common/fs/zfs/zio.c",
+      "patch": "014-zio-alignment.patch",
+      "type": "conditional_compilation",
+      "description": "Force PAGESIZE alignment for zio data buffer cache allocation."
+    },
+    {
+      "path": "uts/common/fs/zfs/dsl_dir.c",
+      "patch": "015-dsl-disable-zvol-rename.patch",
+      "type": "conditional_compilation",
+      "description": "Skip zfsvfs_update_fromname and zvol_rename_minors calls on dataset rename."
+    },
+    {
+      "path": "uts/common/fs/zfs/dsl_dataset.c",
+      "patch": "016-dsl-dataset-stubs.patch",
+      "type": "conditional_compilation",
+      "description": "Skip zfs_unmount_snap, zvol_rename_minors, zfs_secpolicy_rename_perms, onexit hold cleanup, and onexit fd release. Abort on temporary snapshot creation with cleanup_fd."
+    },
+    {
+      "path": "uts/common/fs/zfs/dmu_objset.c",
+      "patch": "017-dmu-objset-stubs.patch",
+      "type": "conditional_compilation",
+      "description": "Skip zfs_secpolicy_snapshot permission check on recursive snapshots. Abort on temporary snapshot with cleanup_fd. Skip onexit hold registration and fd release."
+    },
+    {
+      "path": "uts/common/fs/zfs/dmu.c",
+      "patch": "018-dmu-skip-accounting.patch",
+      "type": "conditional_compilation",
+      "description": "Skip ru_oublock accounting (curthread->td_ru.ru_oublock++) on DMU write."
+    },
+    {
+      "path": "common/zfs/zfs_prop.c",
+      "patch": "019-prop-kernel-visibility.patch",
+      "type": "conditional_compilation",
+      "description": "Make zfs_prop_values() available in kernel mode on OSv (normally userspace-only)."
+    },
+    {
+      "path": "common/zfs/zpool_prop.c",
+      "patch": "020-zpool-prop-kernel-visibility.patch",
+      "type": "conditional_compilation",
+      "description": "Make zpool_prop_values() available in kernel mode on OSv (normally userspace-only)."
+    },
+    {
+      "path": "common/zfs/zprop_common.c",
+      "patch": "021-zprop-common-kernel-visibility.patch",
+      "type": "conditional_compilation",
+      "description": "Make zprop_width() available in kernel mode on OSv (normally userspace-only)."
+    }
+  ],
+  "external_files": [
+    {
+      "path": "fs/zfs/zfs_initialize.c",
+      "type": "osv_specific",
+      "description": "Constructor-based ZFS initialization. Registers callbacks for ioctl, ARC shrinker, pagecache, VFS ops. Uses .note.osv-mlock section for pre-faulting."
+    }
+  ]
+}
