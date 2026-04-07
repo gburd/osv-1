@@ -1,17 +1,17 @@
 [submodule "external/x64/acpica"]
 	path = external/x64/acpica
-	url = ../../cloudius-systems/acpica
+	url = https://github.com/cloudius-systems/acpica
 	ignore = dirty
 [submodule "apps"]
 	path = apps
-	url = ../../cloudius-systems/osv-apps
+	url = https://github.com/cloudius-systems/osv-apps
 	ignore = dirty
 [submodule "modules/httpserver/swagger-ui"]
 	path = modules/httpserver-html5-gui/swagger-ui
-	url = ../../cloudius-systems/swagger-ui.git
+	url = https://github.com/cloudius-systems/swagger-ui.git
 [submodule "modules/httpserver/osv-gui"]
 	path = modules/httpserver-html5-gui/osv-gui
-	url = ../../cloudius-systems/osv-gui.git
+	url = https://github.com/cloudius-systems/osv-gui.git
 [submodule "musl_0.9.12"]
 	path = musl_0.9.12
 	url = https://github.com/cloudius-systems/musl
@@ -21,10 +21,9 @@
 [submodule "kbuild"]
 	path = kbuild
 	url = https://github.com/osvunikernel/kbuild-standalone.git
-[submodule "musl_1.2.5"]
-	path = musl_1.2.5
-	url = https://git.musl-libc.org/git/musl
 [submodule "external/openzfs"]
 	path = external/openzfs
-	url = https://github.com/openzfs/zfs
+	url = https://github.com/openzfs/zfs.git
 	branch = zfs-2.3.6
+	# OpenZFS 2.3.6 (commit c840612ee) + OSv platform patches
+	# Patches applied from patches/openzfs/ during build
