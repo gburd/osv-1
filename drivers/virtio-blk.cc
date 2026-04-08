@@ -308,6 +308,8 @@ int blk::make_request(struct bio* bio)
             }
         }
 
+        // TODO: Implement per-CPU queue assignment for multiqueue I/O
+        // Currently all requests use queue 0, even when multiple queues available
         auto* queue = get_virt_queue(0);
         blk_request_type type;
 
