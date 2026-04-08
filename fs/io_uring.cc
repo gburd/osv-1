@@ -65,6 +65,14 @@ struct io_uring_ctx {
     // Wait queues
     waitqueue wait_sq;
     waitqueue wait_cq;
+
+    // Registered buffers for fixed I/O
+    void **registered_buffers;
+    unsigned nr_registered_buffers;
+
+    // Registered files for fixed I/O
+    struct file **registered_files;
+    unsigned nr_registered_files;
 };
 
 struct io_uring_work {
@@ -89,7 +97,9 @@ public:
     virtual int chmod(mode_t mode) override;
     virtual std::unique_ptr<mmu::file_vma> mmap(addr_range range, unsigned flags, unsigned perm, off_t offset) override;
     virtual bool map_page(uintptr_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pte, bool write, bool shared) override;
+    virtual bool map_page(uintptr_t offset, mmu::hw_ptep<1> ptep, mmu::pt_element<1> pte, bool write, bool shared) override;
     virtual bool put_page(void *addr, uintptr_t offset, mmu::hw_ptep<0> ptep) override;
+    virtual bool put_page(void *addr, uintptr_t offset, mmu::hw_ptep<1> ptep) override;
 
 private:
     struct io_uring_ctx *_ctx;
@@ -414,11 +424,72 @@ bool io_uring_file::map_page(uintptr_t offset, mmu::hw_ptep<0> ptep, mmu::pt_ele
     return true;
 }
 
+bool io_uring_file::map_page(uintptr_t offset, mmu::hw_ptep<1> ptep,
+                              mmu::pt_element<1> pte, bool write, bool shared)
+{
+    if (!_ctx) {
+        return false;
+    }
+
+    // Determine which region this offset belongs to
+    constexpr off_t IORING_OFF_SQ_RING = 0ULL;
+    constexpr off_t IORING_OFF_CQ_RING = 0x8000000ULL;
+    constexpr off_t IORING_OFF_SQES = 0x10000000ULL;
+
+    void *kernel_mem = nullptr;
+
+    if (offset >= IORING_OFF_SQES) {
+        // SQE array region
+        size_t array_offset = offset - IORING_OFF_SQES;
+        kernel_mem = reinterpret_cast<char*>(_ctx->sqes) + array_offset;
+    } else if (offset >= IORING_OFF_CQ_RING) {
+        // CQ ring region
+        size_t ring_offset = offset - IORING_OFF_CQ_RING;
+        kernel_mem = reinterpret_cast<char*>(_ctx->cq_ring) + ring_offset;
+    } else if (offset >= IORING_OFF_SQ_RING) {
+        // SQ ring region
+        size_t ring_offset = offset - IORING_OFF_SQ_RING;
+        kernel_mem = reinterpret_cast<char*>(_ctx->sq_ring) + ring_offset;
+    } else {
+        return false;
+    }
+
+    if (!kernel_mem) {
+        return false;
+    }
+
+    // Get the physical address of the kernel memory page
+    mmu::phys phys_addr = mmu::virt_to_phys(kernel_mem);
+    if (!phys_addr) {
+        return false;
+    }
+
+    // Determine permissions
+    unsigned perm = mmu::perm_read;
+    if (write) {
+        perm |= mmu::perm_write;
+    }
+
+    // Create a leaf PTE mapping the 2MB physical address
+    pte = mmu::make_leaf_pte(ptep, phys_addr, perm);
+
+    ptep.write(pte);
+    return true;
+}
+
 bool io_uring_file::put_page(void *addr, uintptr_t offset, mmu::hw_ptep<0> ptep)
 {
     // io_uring pages are managed by the context, not by individual mappings
     // Don't free the page, just unmap it
     ptep.write(mmu::pt_element<0>());
+    return true;
+}
+
+bool io_uring_file::put_page(void *addr, uintptr_t offset, mmu::hw_ptep<1> ptep)
+{
+    // io_uring pages are managed by the context, not by individual mappings
+    // Don't free the page, just unmap it
+    ptep.write(mmu::pt_element<1>());
     return true;
 }
 
@@ -480,6 +551,23 @@ int io_uring_file::close()
         size_t cq_ring_size = sizeof(struct io_uring_cq_ring) +
                               _ctx->cq.entries * sizeof(struct io_uring_cqe);
         mmu::munmap(_ctx->cq_ring, cq_ring_size);
+    }
+
+    // Cleanup registered buffers
+    if (_ctx->registered_buffers) {
+        delete[] _ctx->registered_buffers;
+        _ctx->registered_buffers = nullptr;
+    }
+
+    // Cleanup registered files
+    if (_ctx->registered_files) {
+        for (unsigned i = 0; i < _ctx->nr_registered_files; i++) {
+            if (_ctx->registered_files[i]) {
+                fdrop(_ctx->registered_files[i]);
+            }
+        }
+        delete[] _ctx->registered_files;
+        _ctx->registered_files = nullptr;
     }
 
     delete[] _ctx->sqes;
@@ -670,6 +758,10 @@ long sys_io_uring_setup(unsigned entries, struct io_uring_params *params)
     // Initialize remaining fields (mutex and condvar are default-constructed)
     ctx->shutdown = false;
     ctx->pending_ops = 0;
+    ctx->registered_buffers = nullptr;
+    ctx->nr_registered_buffers = 0;
+    ctx->registered_files = nullptr;
+    ctx->nr_registered_files = 0;
 
     try {
         fileref f = make_file<io_uring_file>(O_RDWR, ctx);
@@ -740,7 +832,130 @@ extern "C"
 OSV_LIBC_API
 int sys_io_uring_register(int fd, unsigned opcode, void *arg, unsigned nr_args)
 {
-    return -ENOSYS;
+    struct file *fp;
+    int error = fget(fd, &fp);
+    if (error) {
+        return -errno;
+    }
+
+    auto* io_uring_fp = dynamic_cast<io_uring_file*>(fp);
+    if (!io_uring_fp) {
+        fdrop(fp);
+        return -EINVAL;
+    }
+
+    struct io_uring_ctx *ctx = static_cast<struct io_uring_ctx*>(fp->f_data);
+    int ret = 0;
+
+    WITH_LOCK(ctx->mtx) {
+        switch (opcode) {
+        case IORING_REGISTER_BUFFERS: {
+            if (ctx->registered_buffers != nullptr) {
+                ret = -EINVAL;
+                break;
+            }
+
+            if (nr_args == 0 || nr_args > 1024) {
+                ret = -EINVAL;
+                break;
+            }
+
+            struct iovec *iovecs = static_cast<struct iovec*>(arg);
+            ctx->registered_buffers = new void*[nr_args];
+            if (!ctx->registered_buffers) {
+                ret = -ENOMEM;
+                break;
+            }
+
+            for (unsigned i = 0; i < nr_args; i++) {
+                ctx->registered_buffers[i] = iovecs[i].iov_base;
+            }
+            ctx->nr_registered_buffers = nr_args;
+            io_uring_debug("io_uring: registered %u buffers\n", nr_args);
+            break;
+        }
+
+        case IORING_UNREGISTER_BUFFERS: {
+            if (!ctx->registered_buffers) {
+                ret = -EINVAL;
+                break;
+            }
+
+            delete[] ctx->registered_buffers;
+            ctx->registered_buffers = nullptr;
+            ctx->nr_registered_buffers = 0;
+            io_uring_debug("io_uring: unregistered buffers\n");
+            break;
+        }
+
+        case IORING_REGISTER_FILES: {
+            if (ctx->registered_files != nullptr) {
+                ret = -EINVAL;
+                break;
+            }
+
+            if (nr_args == 0 || nr_args > 1024) {
+                ret = -EINVAL;
+                break;
+            }
+
+            int *fds = static_cast<int*>(arg);
+            ctx->registered_files = new file*[nr_args];
+            if (!ctx->registered_files) {
+                ret = -ENOMEM;
+                break;
+            }
+
+            for (unsigned i = 0; i < nr_args; i++) {
+                struct file *f;
+                int err = fget(fds[i], &f);
+                if (err) {
+                    // Cleanup already registered files
+                    for (unsigned j = 0; j < i; j++) {
+                        if (ctx->registered_files[j]) {
+                            fdrop(ctx->registered_files[j]);
+                        }
+                    }
+                    delete[] ctx->registered_files;
+                    ctx->registered_files = nullptr;
+                    ret = -errno;
+                    goto register_files_done;
+                }
+                ctx->registered_files[i] = f;
+            }
+            ctx->nr_registered_files = nr_args;
+            io_uring_debug("io_uring: registered %u files\n", nr_args);
+
+register_files_done:
+            break;
+        }
+
+        case IORING_UNREGISTER_FILES: {
+            if (!ctx->registered_files) {
+                ret = -EINVAL;
+                break;
+            }
+
+            for (unsigned i = 0; i < ctx->nr_registered_files; i++) {
+                if (ctx->registered_files[i]) {
+                    fdrop(ctx->registered_files[i]);
+                }
+            }
+            delete[] ctx->registered_files;
+            ctx->registered_files = nullptr;
+            ctx->nr_registered_files = 0;
+            io_uring_debug("io_uring: unregistered files\n");
+            break;
+        }
+
+        default:
+            ret = -EINVAL;
+            break;
+        }
+    }
+
+    fdrop(fp);
+    return ret;
 }
 
 extern "C"
