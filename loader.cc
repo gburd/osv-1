@@ -147,8 +147,8 @@ static bool opt_extra_zfs_pools = false;
 static bool opt_zfs_auto_upgrade_internal = true;  // Auto-upgrade ZFS pools by default
 static bool opt_disable_rofs_cache = false;
 
-// C-compatible export for ZFS auto-upgrade (defined in zfs_vfsops.c)
-extern "C" bool opt_zfs_auto_upgrade;
+// C-compatible export for ZFS auto-upgrade (accessible from libsolaris.so)
+bool opt_zfs_auto_upgrade = true;
 #if CONF_memory_tracker
 static bool opt_leak = false;
 #endif
