@@ -202,17 +202,17 @@ def start_osv_qemu(options):
         "-hda", options.image_file]
     else:
         args += [
-        "-device", "virtio-blk-pci,id=blk0,drive=hd0%s%s" % (boot_index, options.virtio_device_suffix),
+        "-device", "virtio-blk-pci,id=blk0,drive=hd0%s%s%s" % (boot_index, options.virtio_device_suffix, options.virtio_blk_queue_suffix),
         "-drive", "file=%s,if=none,id=hd0,%s" % (options.image_file, aio)]
 
     if options.cloud_init_image:
         args += [
-        "-device", "virtio-blk-pci,id=blk1,bootindex=1,drive=hd1%s" % options.virtio_device_suffix,
+        "-device", "virtio-blk-pci,id=blk1,bootindex=1,drive=hd1%s%s" % (options.virtio_device_suffix, options.virtio_blk_queue_suffix),
         "-drive", "file=%s,if=none,id=hd1" % (options.cloud_init_image)]
 
     if options.second_disk_image:
         args += [
-        "-device", "virtio-blk-pci,id=blk1,drive=hd1%s" % options.virtio_device_suffix,
+        "-device", "virtio-blk-pci,id=blk1,drive=hd1%s%s" % (options.virtio_device_suffix, options.virtio_blk_queue_suffix),
         "-drive", "file=%s,if=none,id=hd1" % (options.second_disk_image)]
 
     if options.virtio_fs_tag:
@@ -685,6 +685,8 @@ if __name__ == "__main__":
                         help="Crucible block size (default: 512)")
     parser.add_argument("--crucible-read-only", action="store_true",
                         help="Mount Crucible device as read-only")
+    parser.add_argument("--virtio-blk-queues", action="store", type=int, default=1,
+                        help="Number of queues for VirtIO-BLK device (default: 1)")
 
     # Multi-volume Crucible support (crucible0-7)
     for i in range(8):
@@ -729,6 +731,12 @@ if __name__ == "__main__":
         cmdargs.virtio_device_suffix = ",disable-legacy=on,disable-modern=off"
     else:
         cmdargs.virtio_device_suffix = ""
+
+    # Add multiqueue support for virtio-blk if specified
+    if cmdargs.virtio_blk_queues > 1:
+        cmdargs.virtio_blk_queue_suffix = ",num-queues=%d" % cmdargs.virtio_blk_queues
+    else:
+        cmdargs.virtio_blk_queue_suffix = ""
 
     if cmdargs.networking and cmdargs.tap and (cmdargs.execute == None or '--ip=' not in cmdargs.execute):
         process = subprocess.run(["ip", "address", "show", cmdargs.tap], stdout=subprocess.PIPE)
