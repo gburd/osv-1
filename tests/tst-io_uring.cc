@@ -44,10 +44,12 @@ static int test_ring_init(struct test_ring *ring, unsigned entries)
                     ring->params.cq_entries * sizeof(struct io_uring_cqe);
     ring->sqe_size = ring->params.sq_entries * sizeof(struct io_uring_sqe);
 
-    /* Note: Current OSv io_uring implementation has incomplete mmap support.
-     * The SQE array is not properly shared with userspace via mmap.
-     * These mmaps will succeed but won't provide functional ring access.
-     * Full io_uring functionality requires completing the mmap implementation.
+    /* Note: mmap implementation is COMPLETE and functional.
+     * All three regions (SQ ring, CQ ring, SQE array) are properly mapped.
+     * Known limitations:
+     * - Large page (2MB) support available but not fully tested
+     * - io_uring_register() implemented for buffers and files
+     * - Thread-per-op model (not thread pool) - acceptable for current use
      */
 
     /* Try to mmap SQ ring (offset 0) */
@@ -159,20 +161,65 @@ static void test_io_uring_enter_basic(void)
     printf("  PASSED - enter syscall works\n");
 }
 
-static void test_io_uring_register_stub(void)
+static void test_io_uring_register_buffers(void)
 {
-    printf("Testing io_uring_register syscall...\n");
+    printf("Testing io_uring_register syscall with buffers...\n");
 
     struct test_ring ring;
     int ret = test_ring_init(&ring, 8);
     assert(ret == 0);
 
-    /* io_uring_register is currently a stub returning ENOSYS */
-    ret = sys_io_uring_register(ring.fd, 0, NULL, 0);
-    assert(ret == -ENOSYS);
+    /* Test registering buffers */
+    struct iovec bufs[2];
+    char buf1[256], buf2[512];
+    bufs[0].iov_base = buf1;
+    bufs[0].iov_len = sizeof(buf1);
+    bufs[1].iov_base = buf2;
+    bufs[1].iov_len = sizeof(buf2);
+
+    ret = sys_io_uring_register(ring.fd, IORING_REGISTER_BUFFERS, bufs, 2);
+    assert(ret == 0);
+
+    /* Test unregistering buffers */
+    ret = sys_io_uring_register(ring.fd, IORING_UNREGISTER_BUFFERS, NULL, 0);
+    assert(ret == 0);
 
     test_ring_cleanup(&ring);
-    printf("  PASSED - register syscall stub works\n");
+    printf("  PASSED - buffer registration works\n");
+}
+
+static void test_io_uring_register_files(void)
+{
+    printf("Testing io_uring_register syscall with files...\n");
+
+    struct test_ring ring;
+    int ret = test_ring_init(&ring, 8);
+    assert(ret == 0);
+
+    /* Create temporary files */
+    int test_fd1 = open("/tmp/io_uring_test1.txt", O_RDWR | O_CREAT, 0644);
+    assert(test_fd1 >= 0);
+
+    int test_fd2 = open("/tmp/io_uring_test2.txt", O_RDWR | O_CREAT, 0644);
+    assert(test_fd2 >= 0);
+
+    int fds[2] = { test_fd1, test_fd2 };
+
+    /* Test registering files */
+    ret = sys_io_uring_register(ring.fd, IORING_REGISTER_FILES, fds, 2);
+    assert(ret == 0);
+
+    /* Test unregistering files */
+    ret = sys_io_uring_register(ring.fd, IORING_UNREGISTER_FILES, NULL, 0);
+    assert(ret == 0);
+
+    close(test_fd1);
+    close(test_fd2);
+    unlink("/tmp/io_uring_test1.txt");
+    unlink("/tmp/io_uring_test2.txt");
+
+    test_ring_cleanup(&ring);
+    printf("  PASSED - file registration works\n");
 }
 
 static void test_io_uring_multiple_rings(void)
@@ -403,7 +450,8 @@ int main(int argc, char **argv)
     test_io_uring_setup();
     test_io_uring_init();
     test_io_uring_enter_basic();
-    test_io_uring_register_stub();
+    test_io_uring_register_buffers();
+    test_io_uring_register_files();
     test_io_uring_multiple_rings();
     test_io_uring_invalid_params();
     test_io_uring_fd_operations();
