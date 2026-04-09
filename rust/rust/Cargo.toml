@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "osv-sys",
-    "crucible-osv",
-]
+members = []
 
 [workspace.package]
 edition = "2021"

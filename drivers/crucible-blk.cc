@@ -1,9 +1,17 @@
 /*
+ * Crucible distributed block device driver for OSv
+ *
  * Copyright (C) 2024 Waldemar Kozaczuk
  * Copyright (C) 2024 OSv Contributors
  *
  * This work is open source software, licensed under the terms of the
  * BSD license as described in the LICENSE file in the top-level directory.
+ *
+ * Implementation: Pure C++ (no Rust dependencies)
+ * Protocol: v13 compatible with Oxide Crucible downstairs
+ * Features: Triple replication, snapshots, DISCARD, pipelining
+ *
+ * Note: Includes custom C++ implementation of Rust's bincode serialization.
  */
 
 #include "crucible-blk.hh"
