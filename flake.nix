@@ -11,6 +11,36 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
+        # Crucible distributed block storage from Oxide Computer
+        # Using latest commit from main branch
+        crucible = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "crucible";
+          version = "unstable-2024-12-15";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "oxidecomputer";
+            repo = "crucible";
+            rev = "main";  # Or specific commit
+            sha256 = pkgs.lib.fakeSha256;  # Will fail first time, then use real hash
+          };
+
+          cargoLock = {
+            lockFile = "${src}/Cargo.lock";
+          };
+
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.openssl ];
+
+          # Build only the downstairs binary for testing
+          cargoBuildFlags = [ "--bin" "crudd" "--bin" "crucible-downstairs" ];
+
+          meta = with pkgs.lib; {
+            description = "Distributed block storage system from Oxide Computer";
+            homepage = "https://github.com/oxidecomputer/crucible";
+            license = licenses.mpl20;
+          };
+        };
+
         # Cross-compilation package sets
         pkgsAarch64 = import nixpkgs {
           inherit system;
@@ -26,22 +56,16 @@
           };
         };
 
-        # Use boost 1.77 - last version before boost::system became header-only
-        # OSv requires libboost_system.a which was removed in later versions
-        boostStatic = pkgs.boost177.override {
-          enableStatic = true;
-          enableShared = false;
-        };
+        # Boost headers for OSv build. boost::system became header-only in Boost 1.78
+        # and libboost_system.a was removed in 1.78+. The OSv Makefile handles this
+        # gracefully: it links the static library only if present, otherwise headers
+        # suffice. We use the current Boost from nixpkgs (no version pin required).
+        # nixpkgs splits boost into runtime (pkgs.boost) and headers (pkgs.boost.dev).
+        boostHeaders = pkgs.boost.dev;
 
-        boostStaticAarch64 = pkgsAarch64.boost177.override {
-          enableStatic = true;
-          enableShared = false;
-        };
+        boostHeadersAarch64 = pkgsAarch64.boost.dev;
 
-        boostStaticX86_64 = pkgsX86_64.boost177.override {
-          enableStatic = true;
-          enableShared = false;
-        };
+        boostHeadersX86_64 = pkgsX86_64.boost.dev;
 
         # Common build inputs for all shells
         commonBuildInputs = with pkgs; [
@@ -58,6 +82,7 @@
 
           # Development tools
           qemu
+          firecracker
           gdb
           genromfs
           tcpdump
@@ -96,11 +121,11 @@
             llvmPackages.libclang.lib
 
             # Required libraries (native)
-            boostStatic
+            boostHeaders
             libedit
             openssl
             yaml-cpp
-            lua5_4
+            lua5_3
           ]);
 
           shellHook = ''
@@ -112,7 +137,7 @@
             echo "Host architecture: ${system}"
 
             # Set boost path for OSv Makefile
-            export boost_base="${boostStatic}"
+            export boost_base="${boostHeaders}"
 
             # Set LIBCLANG_PATH for Rust bindgen
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
@@ -133,11 +158,11 @@
             pkgsCross.aarch64-multiplatform.buildPackages.binutils
           ]) ++ [
             # Target architecture libraries
-            boostStaticAarch64
+            boostHeadersAarch64
             pkgsAarch64.libedit
             pkgsAarch64.openssl
             pkgsAarch64.yaml-cpp
-            pkgsAarch64.lua5_4
+            pkgsAarch64.lua5_3
           ];
 
           shellHook = ''
@@ -152,7 +177,7 @@
             export ARCH=aarch64
 
             # Set boost path for target architecture
-            export boost_base="${boostStaticAarch64}"
+            export boost_base="${boostHeadersAarch64}"
           '';
 
           OSV_ROOT = builtins.toString ./.;
@@ -167,11 +192,11 @@
             pkgsCross.gnu64.buildPackages.binutils
           ]) ++ [
             # Target architecture libraries
-            boostStaticX86_64
+            boostHeadersX86_64
             pkgsX86_64.libedit
             pkgsX86_64.openssl
             pkgsX86_64.yaml-cpp
-            pkgsX86_64.lua5_4
+            pkgsX86_64.lua5_3
           ];
 
           shellHook = ''
@@ -186,7 +211,7 @@
             export ARCH=x64
 
             # Set boost path for target architecture
-            export boost_base="${boostStaticX86_64}"
+            export boost_base="${boostHeadersX86_64}"
           '';
 
           OSV_ROOT = builtins.toString ./.;
