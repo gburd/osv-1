@@ -1694,7 +1694,6 @@ $(out)/musl/src/stdio/__stdio_seek.o: CFLAGS += --include libc/syscall_to_functi
 musl += stdio/__stdio_write.o
 $(out)/musl/src/stdio/__stdio_write.o: CFLAGS += --include libc/syscall_to_function.h
 libc += stdio/__stdout_write.o
-musl += stdio/__string_read.o
 musl += stdio/__toread.o
 musl += stdio/__towrite.o
 musl += stdio/__uflow.o
