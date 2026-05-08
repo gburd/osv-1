@@ -56,7 +56,7 @@ public:
     }
 };
 
-ssl_acceptor::ssl_acceptor(boost::asio::io_service& io_service,
+ssl_acceptor::ssl_acceptor(boost::asio::io_context& io_service,
             boost::asio::ssl::context&& ctx,
             tcp::acceptor&& tcp_acceptor)
     : _io_service(io_service)

@@ -52,7 +52,7 @@ public:
     }
 };
 
-plain_acceptor::plain_acceptor(boost::asio::io_service& io_service,
+plain_acceptor::plain_acceptor(boost::asio::io_context& io_service,
             tcp::acceptor&& tcp_acceptor)
     : _io_service(io_service)
     , _tcp_acceptor(std::move(tcp_acceptor))
