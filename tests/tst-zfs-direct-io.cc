@@ -28,6 +28,84 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dlfcn.h>
+
+/* --------------------------------------------------------------------------
+ * libzfs runtime binding — no build-time dependency on libzfs headers.
+ * -------------------------------------------------------------------------- */
+typedef struct libzfs_handle libzfs_handle_t;
+typedef struct zfs_handle    zfs_handle_t;
+typedef struct zpool_handle  zpool_handle_t;
+
+#define ZFS_TYPE_FILESYSTEM (1 << 0)
+
+typedef libzfs_handle_t *(*fn_libzfs_init)(void);
+typedef void             (*fn_libzfs_fini)(libzfs_handle_t *);
+typedef zpool_handle_t * (*fn_zpool_open)(libzfs_handle_t *, const char *);
+typedef void             (*fn_zpool_close)(zpool_handle_t *);
+typedef int              (*fn_zfs_create)(libzfs_handle_t *, const char *, int, void *);
+typedef zfs_handle_t *   (*fn_zfs_open)(libzfs_handle_t *, const char *, int);
+typedef int              (*fn_zfs_prop_set)(zfs_handle_t *, const char *, const char *);
+typedef int              (*fn_zfs_destroy)(zfs_handle_t *, int);
+typedef void             (*fn_zfs_close)(zfs_handle_t *);
+
+static fn_libzfs_init  p_libzfs_init;
+static fn_libzfs_fini  p_libzfs_fini;
+static fn_zpool_open   p_zpool_open;
+static fn_zpool_close  p_zpool_close;
+static fn_zfs_create   p_zfs_create;
+static fn_zfs_open     p_zfs_open;
+static fn_zfs_prop_set p_zfs_prop_set;
+static fn_zfs_destroy  p_zfs_destroy;
+static fn_zfs_close    p_zfs_close;
+
+static bool load_libzfs(void)
+{
+    void *h = dlopen("libzfs.so", RTLD_LAZY | RTLD_GLOBAL);
+    if (!h) {
+        fprintf(stderr, "SKIP: cannot load libzfs.so: %s\n", dlerror());
+        return false;
+    }
+#define L(name) \
+    p_##name = (fn_##name)dlsym(h, #name); \
+    if (!p_##name) { fprintf(stderr, "SKIP: symbol " #name " not found\n"); return false; }
+    L(libzfs_init) L(libzfs_fini)
+    L(zpool_open) L(zpool_close)
+    L(zfs_create) L(zfs_open) L(zfs_prop_set) L(zfs_destroy) L(zfs_close)
+#undef L
+    return true;
+}
+
+static const char *detect_pool(libzfs_handle_t *zfsh)
+{
+    static const char *cands[] = { "rpool", "osv", "data", nullptr };
+    for (int i = 0; cands[i]; i++) {
+        zpool_handle_t *ph = p_zpool_open(zfsh, cands[i]);
+        if (ph) { p_zpool_close(ph); return cands[i]; }
+    }
+    return nullptr;
+}
+
+static int create_dataset(libzfs_handle_t *zfsh, const char *name,
+                           const char *mountpoint)
+{
+    int rc = p_zfs_create(zfsh, name, ZFS_TYPE_FILESYSTEM, nullptr);
+    if (rc != 0)
+        return rc;
+    zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
+    if (!zh)
+        return -1;
+    if (mountpoint)
+        p_zfs_prop_set(zh, "mountpoint", mountpoint);
+    p_zfs_close(zh);
+    return 0;
+}
+
+static void destroy_dataset(libzfs_handle_t *zfsh, const char *name)
+{
+    zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
+    if (zh) { p_zfs_destroy(zh, /*defer=*/0); p_zfs_close(zh); }
+}
 
 /* O_DIRECT must be aligned to 512 bytes for most block devices. */
 static const size_t ALIGN     = 512;
@@ -271,24 +349,29 @@ int main(void)
 {
     printf("=== ZFS direct I/O validation test ===\n\n");
 
-    /* Detect the ZFS pool and create a test dataset. */
-    const char *pool;
-    if (system("zfs list rpool >/dev/null 2>&1") == 0) {
-        pool = "rpool";
-    } else if (system("zfs list osv >/dev/null 2>&1") == 0) {
-        pool = "osv";
-    } else {
-        fprintf(stderr, "SKIP: no ZFS pool found (rpool or osv)\n");
+    /* Load libzfs and detect the ZFS pool. */
+    if (!load_libzfs())
+        return 1;
+
+    libzfs_handle_t *zfsh = p_libzfs_init();
+    if (!zfsh) {
+        fprintf(stderr, "SKIP: libzfs_init() failed\n");
+        return 1;
+    }
+
+    const char *pool = detect_pool(zfsh);
+    if (!pool) {
+        p_libzfs_fini(zfsh);
+        fprintf(stderr, "SKIP: no ZFS pool found (tried rpool, osv, data)\n");
         return 1;
     }
     printf("Using pool: %s\n", pool);
 
     /* Create a dedicated dataset for direct I/O tests. */
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd),
-        "zfs create -p -o mountpoint=/zfs-dio-test %s/dio-test 2>/dev/null",
-        pool);
-    system(cmd);
+    char ds_name[256];
+    snprintf(ds_name, sizeof(ds_name), "%s/dio-test", pool);
+    if (create_dataset(zfsh, ds_name, "/zfs-dio-test") != 0)
+        fprintf(stderr, "warning: could not create dataset %s\n", ds_name);
 
     const char *test1 = "/zfs-dio-test/direct-write.dat";
     const char *test2 = "/zfs-dio-test/buffered-write.dat";
@@ -302,8 +385,7 @@ int main(void)
     unlink(test1);
     unlink(test2);
     unlink(test3);
-    snprintf(cmd, sizeof(cmd), "zfs destroy %s/dio-test 2>/dev/null", pool);
-    system(cmd);
+    destroy_dataset(zfsh, ds_name);
 
     printf("\n=== Results: %d/%d passed", tests_passed, tests_run);
     if (tests_skipped > 0) {
@@ -311,6 +393,8 @@ int main(void)
                tests_skipped);
     }
     printf(" ===\n");
+
+    p_libzfs_fini(zfsh);
 
     if (tests_run == tests_skipped) {
         /* All tests were skipped — O_DIRECT unsupported, but no failures. */
