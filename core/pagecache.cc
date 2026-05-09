@@ -466,6 +466,22 @@ void map_read_cached_page(hashkey *key, void *page)
     read_cache.emplace(*key, pc);
 }
 
+// C-linkage helpers used by ZFS vop_cache (zfs_vnops_os.c is a C file).
+extern "C" void osv_pagecache_map_page(void *key, void *page)
+{
+    map_read_cached_page(static_cast<hashkey*>(key), page);
+}
+
+extern "C" void *osv_alloc_page(void)
+{
+    return memory::alloc_page();
+}
+
+extern "C" void osv_free_page(void *p)
+{
+    memory::free_page(p);
+}
+
 static int create_read_cached_page(vfs_file* fp, hashkey& key)
 {
     return fp->read_page_from_cache(&key, key.offset);
