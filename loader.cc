@@ -580,7 +580,7 @@ static int load_zfs_library_and_mount_zfs_root(bool pivot_when_error = false)
     return load_fs_library(libsolaris_path, [pivot_when_error]() {
         zfsdev::zfsdev_init();
 
-        auto error = mount_rootfs("/zfs", "/dev/vblk0.1", "zfs", 0, (void *)"osv/zfs", opt_pivot);
+        auto error = mount_rootfs("/zfs", "/dev/vblk0.1", "zfs", 0, (void *)"osv", opt_pivot);
         if (!error && opt_pivot && opt_extra_zfs_pools) {
             import_extra_zfs_pools();
         }
@@ -729,8 +729,8 @@ void* do_main_thread(void *_main_args)
                                       opt_defaultgw.c_str());
             }
             if (opt_nameserver.size() != 0) {
-                auto addr = boost::asio::ip::address_v4::from_string(opt_nameserver);
-                osv::set_dns_config({addr}, std::vector<std::string>());
+                auto addr = boost::asio::ip::make_address_v4(opt_nameserver);
+                osv::set_dns_config({boost::asio::ip::address(addr)}, std::vector<std::string>());
             }
 #if CONF_networking_dhcp
         }
