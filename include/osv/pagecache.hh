@@ -23,12 +23,6 @@ struct hashkey {
     }
 };
 
-struct arc_hashkey {
-    uint64_t key[4];
-    bool operator==(const arc_hashkey& a) const noexcept {
-        return memcmp(key, a.key, sizeof(key));
-    }
-};
 
 bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pte, bool write, bool shared);
 bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep);
