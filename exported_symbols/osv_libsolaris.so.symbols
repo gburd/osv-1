@@ -36,6 +36,9 @@ mmu_map
 mmu_unmap
 _msleep
 nmount
+osv_alloc_page
+osv_free_page
+osv_pagecache_map_page
 osv_reclaimer_thread
 physmem
 proc0
