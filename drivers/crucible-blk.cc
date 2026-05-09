@@ -120,34 +120,6 @@ static std::vector<std::string> parse_targets(const std::string& targets_str)
 }
 
 /**
- * Convert Crucible error to errno value.
- */
-__attribute__((unused))
-static int crucible_error_to_errno(CrucibleError error)
-{
-    switch (error) {
-        case CrucibleError::IoError:
-            return EIO;
-        case CrucibleError::GenNumberMismatch:
-        case CrucibleError::DecryptionError:
-        case CrucibleError::HashMismatch:
-            return EIO;
-        case CrucibleError::InvalidBlockSize:
-        case CrucibleError::InvalidOffset:
-            return EINVAL;
-        case CrucibleError::ConnectionError:
-        case CrucibleError::ProtocolError:
-            return ENOTCONN;
-        case CrucibleError::QuorumFailed:
-            return EIO;
-        case CrucibleError::Timeout:
-            return ETIMEDOUT;
-        default:
-            return EIO;
-    }
-}
-
-/**
  * Read operation.
  */
 static int crucible_read(struct device *dev, struct uio *uio, int ioflags)

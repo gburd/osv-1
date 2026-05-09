@@ -211,14 +211,6 @@ private:
     void query_region_info(int downstairs_idx);
 
     /**
-     * Send a frame (length prefix + data).
-     *
-     * @param downstairs_idx Index of downstairs (0-2)
-     * @param data Data to send
-     */
-    void send_frame(int downstairs_idx, const std::vector<uint8_t>& data);
-
-    /**
      * Receive a frame (length prefix + data).
      *
      * @param downstairs_idx Index of downstairs (0-2)

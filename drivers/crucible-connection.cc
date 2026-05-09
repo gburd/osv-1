@@ -10,6 +10,7 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -64,6 +65,77 @@ Connection::Connection(const std::string& host, uint16_t port)
         throw ConnectionError("Failed to connect to " + host + ":" +
                             port_str + ": " + strerror(saved_errno));
     }
+
+    // Enable TCP keepalive so the OS detects a dead downstairs connection
+    // and unblocks blocked recv() calls rather than hanging indefinitely.
+    int opt = 1;
+    setsockopt(fd_, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
+
+    // First keepalive probe after 10 s of inactivity.
+    opt = 10;
+    setsockopt(fd_, IPPROTO_TCP, TCP_KEEPIDLE, &opt, sizeof(opt));
+
+    // Subsequent probes every 5 s.
+    opt = 5;
+    setsockopt(fd_, IPPROTO_TCP, TCP_KEEPINTVL, &opt, sizeof(opt));
+
+    // Declare the connection dead after 3 unanswered probes (≈25 s total).
+    opt = 3;
+    setsockopt(fd_, IPPROTO_TCP, TCP_KEEPCNT, &opt, sizeof(opt));
+
+    connected_ = true;
+}
+
+void Connection::reconnect()
+{
+    close();
+
+    fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd_ < 0) {
+        throw ConnectionError("Failed to create socket: " +
+                              std::string(strerror(errno)));
+    }
+
+    struct addrinfo hints{};
+    struct addrinfo *result = nullptr;
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    std::string port_str = std::to_string(port_);
+    int rv = getaddrinfo(host_.c_str(), port_str.c_str(), &hints, &result);
+    if (rv != 0) {
+        ::close(fd_);
+        fd_ = -1;
+        throw ConnectionError("Failed to resolve host: " +
+                              std::string(gai_strerror(rv)));
+    }
+
+    bool ok = false;
+    for (struct addrinfo *rp = result; rp != nullptr; rp = rp->ai_next) {
+        if (::connect(fd_, rp->ai_addr, rp->ai_addrlen) == 0) {
+            ok = true;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+
+    if (!ok) {
+        int saved_errno = errno;
+        ::close(fd_);
+        fd_ = -1;
+        throw ConnectionError("Reconnect failed to " + host_ + ":" +
+                              port_str + ": " + strerror(saved_errno));
+    }
+
+    // Re-apply keepalive on the new socket.
+    int opt = 1;
+    setsockopt(fd_, SOL_SOCKET,  SO_KEEPALIVE,  &opt, sizeof(opt));
+    opt = 10;
+    setsockopt(fd_, IPPROTO_TCP, TCP_KEEPIDLE,  &opt, sizeof(opt));
+    opt = 5;
+    setsockopt(fd_, IPPROTO_TCP, TCP_KEEPINTVL, &opt, sizeof(opt));
+    opt = 3;
+    setsockopt(fd_, IPPROTO_TCP, TCP_KEEPCNT,   &opt, sizeof(opt));
 
     connected_ = true;
 }
@@ -134,6 +206,20 @@ ssize_t Connection::recv(void* buf, size_t len)
     }
 
     return received;
+}
+
+void Connection::send_exact(const void* buf, size_t len)
+{
+    size_t total_sent = 0;
+    const uint8_t* ptr = static_cast<const uint8_t*>(buf);
+
+    while (total_sent < len) {
+        ssize_t n = send(ptr + total_sent, len - total_sent);
+        if (n == 0) {
+            throw ConnectionError("Connection closed before sending all data");
+        }
+        total_sent += n;
+    }
 }
 
 void Connection::recv_exact(void* buf, size_t len)
