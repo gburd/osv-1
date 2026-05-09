@@ -227,7 +227,7 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
-                connections_[i]->send(frame.data(), frame.size());
+                connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
                 kprintf("[Crucible] Sent read job_id=%lu to downstairs %zu\n", job_id, i);
             } catch (const std::exception& e) {
@@ -360,7 +360,7 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
-                connections_[i]->send(frame.data(), frame.size());
+                connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
                 kprintf("[Crucible] Sent write job_id=%lu to downstairs %zu\n", job_id, i);
             } catch (const std::exception& e) {
@@ -427,9 +427,9 @@ int UpsairsClient::flush_sync()
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
-                connections_[i]->send(frame.data(), frame.size());
+                connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
-                kprintf("[Crucible] Sent flush job_id=%lu flush_num=%lu to downstairs %zu",
+                kprintf("[Crucible] Sent flush job_id=%lu flush_num=%lu to downstairs %zu\n",
                       job_id, flush_number_, i);
             } catch (const std::exception& e) {
                 kprintf("[Crucible] Failed to send flush to downstairs %zu: %s\n", i, e.what());
@@ -502,7 +502,7 @@ int UpsairsClient::create_snapshot(uint64_t snapshot_id)
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
-                connections_[i]->send(frame.data(), frame.size());
+                connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
                 kprintf("[Crucible] Sent snapshot flush job_id=%lu snap_id=%lu to downstairs %zu\n",
                       job_id, snapshot_id, i);
@@ -578,7 +578,7 @@ int UpsairsClient::discard_sync(uint64_t offset, uint64_t length)
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
-                connections_[i]->send(frame.data(), frame.size());
+                connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
                 kprintf("[Crucible] Sent discard job_id=%lu offset=%lu length=%lu to downstairs %zu\n",
                       job_id, offset, length, i);
@@ -661,18 +661,39 @@ void UpsairsClient::io_loop()
                         try {
                             process_responses(i);
                         } catch (const std::exception& e) {
-                            kprintf("[Crucible] Response processing error on downstairs %zu: %s",
-                                  i, e.what());
-                            // Mark connection as failed
+                            kprintf("[Crucible] Downstairs %zu connection lost: %s\n",
+                                    i, e.what());
                             connections_[i]->close();
                             connected_count_--;
+
+                            // Attempt reconnect with exponential backoff.
+                            // I/O thread stays alive so other downstairs keep working.
+                            sched::thread::make([this, i] {
+                                int delay_ms = 100;
+                                while (running_) {
+                                    sched::thread::sleep(
+                                        std::chrono::milliseconds(delay_ms));
+                                    try {
+                                        connections_[i]->reconnect();
+                                        handshake(i);
+                                        query_region_info(i);
+                                        connected_count_++;
+                                        kprintf("[Crucible] Downstairs %zu reconnected\n", i);
+                                        return;
+                                    } catch (const std::exception& re) {
+                                        kprintf("[Crucible] Downstairs %zu reconnect failed"
+                                                " (retry in %d ms): %s\n",
+                                                i, delay_ms, re.what());
+                                        delay_ms = std::min(delay_ms * 2, 30000);
+                                    }
+                                }
+                            }, sched::thread::attr().detached())->start();
                         }
                     }
                 }
             }
         }
 
-        // TODO: Check for timed-out requests periodically
     }
 
     kprintf("[Crucible] I/O thread stopped\n");
@@ -757,7 +778,7 @@ void UpsairsClient::process_responses(int downstairs_idx)
         }
 
         default:
-            kprintf("[Crucible] Unexpected message type from downstairs %d: %u",
+            kprintf("[Crucible] Unexpected message type from downstairs %d: %u\n",
                   downstairs_idx, static_cast<uint32_t>(type));
             break;
     }
@@ -781,7 +802,7 @@ void UpsairsClient::handshake(int downstairs_idx)
     here_msg.alternate_region = false;
 
     auto frame = encode_message(here_msg);
-    conn->send(frame.data(), frame.size());
+    conn->send_exact(frame.data(), frame.size());
 
     kprintf("[Crucible] Sent HereIAm to downstairs %d\n", downstairs_idx);
 
@@ -830,7 +851,7 @@ void UpsairsClient::query_region_info(int downstairs_idx)
     // Send RegionInfoPlease
     RegionInfoPlease req_msg;
     auto frame = encode_message(req_msg);
-    conn->send(frame.data(), frame.size());
+    conn->send_exact(frame.data(), frame.size());
 
     kprintf("[Crucible] Sent RegionInfoPlease to downstairs %d\n", downstairs_idx);
 
@@ -854,23 +875,14 @@ void UpsairsClient::query_region_info(int downstairs_idx)
                                 std::to_string(region_def_.block_size));
     }
 
-    kprintf("[Crucible] Region info: block_size=%u, extent_size=%lu, extents=%lu",
-          region_def_.block_size, region_def_.extent_size, region_def_.extent_count);
-}
-
-void UpsairsClient::send_frame(int downstairs_idx, const std::vector<uint8_t>& data)
-{
-    auto& conn = connections_[downstairs_idx];
-    if (!conn || !conn->is_connected()) {
-        throw ConnectionError("Downstairs not connected");
+    // Update total_blocks_ from region definition if it was unset (0).
+    // query_region_info() is called once per downstairs; only set on the first.
+    if (total_blocks_ == 0) {
+        total_blocks_ = region_def_.extent_size * region_def_.extent_count;
     }
 
-    // Send length prefix (4 bytes, little-endian)
-    uint32_t length = data.size();
-    conn->send(&length, 4);
-
-    // Send data
-    conn->send(data.data(), data.size());
+    kprintf("[Crucible] Region info: block_size=%u, extent_size=%lu, extents=%lu\n",
+          region_def_.block_size, region_def_.extent_size, region_def_.extent_count);
 }
 
 std::vector<uint8_t> UpsairsClient::receive_frame(int downstairs_idx)

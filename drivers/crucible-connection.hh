@@ -48,14 +48,23 @@ public:
     Connection& operator=(Connection&&) noexcept;
 
     /**
-     * Send data over the connection.
+     * Send data over the connection (single syscall, may be partial).
      *
      * @param buf Buffer to send
      * @param len Length of buffer
      * @return Number of bytes sent
-     * @throws std::system_error on send failure
+     * @throws ConnectionError on send failure
      */
     ssize_t send(const void* buf, size_t len);
+
+    /**
+     * Send exact amount of data, looping until all bytes are sent.
+     *
+     * @param buf Buffer to send
+     * @param len Exact number of bytes to send
+     * @throws ConnectionError on send failure or EOF
+     */
+    void send_exact(const void* buf, size_t len);
 
     /**
      * Receive data from the connection.
@@ -86,6 +95,14 @@ public:
      * @return true if connected, false otherwise
      */
     bool is_connected() const;
+
+    /**
+     * Close and reconnect to the same host:port.
+     *
+     * Re-applies SO_KEEPALIVE settings.  Throws ConnectionError on failure.
+     * After this returns successfully, is_connected() is true.
+     */
+    void reconnect();
 
     /**
      * Close the connection.
