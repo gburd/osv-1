@@ -4,6 +4,19 @@
  *
  * This work is open source software, licensed under the terms of the
  * BSD license as described in the LICENSE file in the top-level directory.
+ *
+ * Crucible is Oxide Computer's distributed block storage system.
+ * This driver is NOT part of the default build profile because it targets
+ * Oxide-specific hardware and requires a running Crucible "downstairs" cluster.
+ *
+ * To build OSv with Crucible support:
+ *   ./scripts/build conf_drivers_profile=crucible
+ * or:
+ *   make conf_drivers_crucible=1
+ *
+ * The driver uses blocking TCP I/O in kernel context, which is intentional
+ * in OSv's single-address-space model but means that a lost connection will
+ * stall the I/O thread until the timeout fires.
  */
 
 #ifndef CRUCIBLE_BLK_HH
