@@ -263,7 +263,7 @@ void blk::read_config()
  * drain_queue() — pull all completed requests off one virtqueue ring.
  * Returns the number of completions processed.
  */
-static int drain_queue(vring* queue)
+int blk::drain_queue(vring* queue)
 {
     int n = 0;
     u32 len;

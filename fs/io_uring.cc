@@ -144,6 +144,12 @@ struct io_uring_work {
     struct io_uring_ctx *ctx;
     struct io_uring_sqe  sqe;
     std::atomic<bool>    cancelled{false};
+
+    io_uring_work() = default;
+    /* std::atomic is non-movable; define a move ctor that copies the value */
+    io_uring_work(io_uring_work&& o) noexcept
+        : ctx(o.ctx), sqe(o.sqe), cancelled(o.cancelled.load(std::memory_order_relaxed)) {}
+    io_uring_work& operator=(io_uring_work&&) = delete;
 };
 
 static constexpr size_t MAX_ENTRIES = 4096;
@@ -969,10 +975,11 @@ static int io_uring_submit_sqes(struct io_uring_ctx *ctx, unsigned count)
                 ctx->cancellable.emplace(w.sqe.user_data, &w.cancelled);
             }
 
+            /* shared_ptr makes the lambda copyable for std::function */
+            auto cp = std::make_shared<std::vector<io_uring_work>>(
+                std::move(chain));
             sched::thread::make(
-                [ctx, c = std::move(chain)]() mutable {
-                    exec_sqe_chain(ctx, std::move(c));
-                },
+                [ctx, cp]() { exec_sqe_chain(ctx, std::move(*cp)); },
                 sched::thread::attr().detached())->start();
         };
 

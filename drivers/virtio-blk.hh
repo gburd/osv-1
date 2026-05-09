@@ -161,6 +161,9 @@ public:
     int get_num_queues() const { return _num_queues; }
 
     static hw_driver* probe(hw_device* dev);
+
+    /* Pull all completed requests off one virtqueue ring. */
+    static int drain_queue(vring* queue);
 private:
 
     struct blk_req {
