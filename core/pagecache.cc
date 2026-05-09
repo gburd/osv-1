@@ -19,28 +19,29 @@
 #include <fs/vfs/vfs_id.h>
 #include <osv/trace.hh>
 #include <osv/prio.hh>
-#include <chrono>
 
-//These four function pointers will be set dynamically in INIT function of
-//libsolaris.so by calling register_pagecache_arc_funs() below. The arc_unshare_buf(),
-//arc_share_buf(), arc_buf_accessed() and arc_buf_get_hashkey()
-//are functions defined in libsolaris.so.
-void (*arc_unshare_buf_fun)(arc_buf_t*);
-void (*arc_share_buf_fun)(arc_buf_t*);
-void (*arc_buf_accessed_fun)(const uint64_t[4]);
-void (*arc_buf_get_hashkey_fun)(arc_buf_t*, uint64_t[4]);
+// NOTE: The ARC bridge (IS_ZFS() == true path) is intentionally unreachable
+// with the OpenZFS 2.x integration. OpenZFS 2.x made arc_share_buf() a static
+// function, breaking the hook that the original BSD-ZFS used to share ARC pages
+// directly with the mmap layer. ZFS files now use the regular read_cache path,
+// fed by the zfs_vop_cache() vnode hook which calls zfs_read() per page.
+//
+// No double-caching occurs: ARC caches compressed ZFS blocks; read_cache caches
+// decompressed 4KB pages for mmap — they serve different granularities.
+//
+// The functions register_pagecache_arc_funs(), start_pagecache_access_scanner(),
+// unmap_arc_buf(), and map_arc_buf() are kept as no-ops below because
+// fs/zfs/zfs_initialize.c (linked into libsolaris.so) still references them.
+// A future cleanup can remove both sides once the old BSD-ZFS compat layer is
+// fully retired.
 
-//This needs to be a C-style function so it can be called
-//from libsolaris.so
+// No-op: kept for ABI compatibility with fs/zfs/zfs_initialize.c in libsolaris.so.
 extern "C" OSV_LIBSOLARIS_API void register_pagecache_arc_funs(
-    void (*_arc_unshare_buf_fun)(arc_buf_t*),
-    void (*_arc_share_buf_fun)(arc_buf_t*),
-    void (*_arc_buf_accessed_fun)(const uint64_t[4]),
-    void (*_arc_buf_get_hashkey_fun)(arc_buf_t*, uint64_t[4])) {
-    arc_unshare_buf_fun = _arc_unshare_buf_fun;
-    arc_share_buf_fun = _arc_share_buf_fun;
-    arc_buf_accessed_fun = _arc_buf_accessed_fun;
-    arc_buf_get_hashkey_fun = _arc_buf_get_hashkey_fun;
+    void (*)(arc_buf_t*),
+    void (*)(arc_buf_t*),
+    void (*)(const uint64_t[4]),
+    void (*)(arc_buf_t*, uint64_t[4])) {
+    // ARC bridge inactive with OpenZFS 2.x — see comment above.
 }
 
 namespace std {
@@ -56,13 +57,6 @@ template<> struct hash<mmu::hw_ptep<0>> {
     size_t operator()(const mmu::hw_ptep<0>& ptep) const noexcept {
         hash<const mmu::pt_element<0>*> h;
         return h(ptep.release());
-    }
-};
-template<>
-struct hash<pagecache::arc_hashkey> {
-    size_t operator()(const pagecache::arc_hashkey& key) const noexcept {
-        hash<uint64_t> h;
-        return h(key.key[0]) ^ h(key.key[1]) ^ h(key.key[2]) ^ h(key.key[3]);
     }
 };
 
@@ -254,73 +248,9 @@ public:
     }
 };
 
-class cached_page_arc;
-
-static unsigned drop_arc_read_cached_page(cached_page_arc* cp, bool flush = true);
-
-class cached_page_arc : public cached_page {
-public:
-    typedef std::unordered_multimap<arc_buf_t*, cached_page_arc*> arc_map;
-
-    static arc_map arc_cache_map;
-
-private:
-    arc_buf_t* _ab;
-    bool _removed = false;
-
-    static arc_buf_t* ref(arc_buf_t* ab, cached_page_arc* pc)
-    {
-        arc_cache_map.emplace(ab, pc);
-        return ab;
-    }
-
-    static bool unref(arc_buf_t* ab, cached_page_arc* pc)
-    {
-        auto it = arc_cache_map.equal_range(ab);
-
-        arc_cache_map.erase(std::find(it.first, it.second, pc));
-
-        return arc_cache_map.find(ab) == arc_cache_map.end();
-    }
-
-public:
-    cached_page_arc(hashkey key, void* page, arc_buf_t* ab) : cached_page(key, page), _ab(ref(ab, this)) {}
-    virtual ~cached_page_arc() {
-        if (!_removed && unref(_ab, this)) {
-            (*arc_unshare_buf_fun)(_ab);
-        }
-    }
-    arc_buf_t* arcbuf() {
-        return _ab;
-    }
-    static void unmap_arc_buf(arc_buf_t* ab) {
-        auto it = arc_cache_map.equal_range(ab);
-        unsigned count = 0;
-
-        std::for_each(it.first, it.second, [&count](arc_map::value_type& p) {
-                auto cp = p.second;
-                cp->_removed = true;
-                count += drop_arc_read_cached_page(cp, false);
-        });
-        arc_cache_map.erase(ab);
-        if (count) {
-            mmu::flush_tlb_all();
-        }
-    }
-};
-
-static bool operator==(const cached_page_arc::arc_map::value_type& l, const cached_page_arc* r) {
-    return l.second == r;
-}
-
-std::unordered_multimap<arc_buf_t*, cached_page_arc*> cached_page_arc::arc_cache_map;
-//Map used to store read cache pages for ZFS filesystem interacting with ARC
-static std::unordered_map<hashkey, cached_page_arc*> arc_read_cache;
-//Map used to store read cache pages for non-ZFS filesystems
 static std::unordered_map<hashkey, cached_page*> read_cache;
 static std::unordered_map<hashkey, cached_page_write*> write_cache;
 static std::deque<cached_page_write*> write_lru;
-static mutex arc_read_lock; // protects against parallel access to the ARC read cache
 static mutex read_lock; // protects against parallel access to the read cache
 static mutex write_lock; // protect against parallel access to the write cache
 
@@ -341,13 +271,6 @@ static void add_read_mapping(cached_page *cp, mmu::hw_ptep<0> ptep)
     cp->map(ptep);
 }
 
-TRACEPOINT(trace_add_read_mapping, "buf=%p, addr=%p, ptep=%p", void*, void*, void*);
-static void add_arc_read_mapping(cached_page_arc *cp, mmu::hw_ptep<0> ptep)
-{
-    trace_add_read_mapping(cp->arcbuf(), cp->addr(), ptep.release());
-    add_read_mapping(cp, ptep);
-}
-
 template<typename T>
 static void remove_read_mapping(std::unordered_map<hashkey, T>& cache, cached_page* cp, mmu::hw_ptep<0> ptep)
 {
@@ -355,13 +278,6 @@ static void remove_read_mapping(std::unordered_map<hashkey, T>& cache, cached_pa
         cache.erase(cp->key());
         delete cp;
     }
-}
-
-TRACEPOINT(trace_remove_mapping, "buf=%p, addr=%p, ptep=%p", void*, void*, void*);
-static void remove_arc_read_mapping(cached_page_arc* cp, mmu::hw_ptep<0> ptep)
-{
-    trace_remove_mapping(cp->arcbuf(), cp->addr(), ptep.release());
-    remove_read_mapping(arc_read_cache, cp, ptep);
 }
 
 void remove_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
@@ -392,15 +308,6 @@ void remove_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
     }
 }
 
-void remove_arc_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
-{
-    SCOPE_LOCK(arc_read_lock);
-    cached_page_arc* cp = find_in_cache(arc_read_cache, key);
-    if (cp) {
-        remove_arc_read_mapping(cp, ptep);
-    }
-}
-
 template<typename T>
 static unsigned drop_read_cached_page(std::unordered_map<hashkey, T>& cache, cached_page* cp, bool flush)
 {
@@ -416,11 +323,6 @@ static unsigned drop_read_cached_page(std::unordered_map<hashkey, T>& cache, cac
     return flushed;
 }
 
-static unsigned drop_arc_read_cached_page(cached_page_arc* cp, bool flush)
-{
-    return drop_read_cached_page(arc_read_cache, cp, flush);
-}
-
 static void drop_read_cached_page(hashkey& key)
 {
     SCOPE_LOCK(read_lock);
@@ -430,34 +332,13 @@ static void drop_read_cached_page(hashkey& key)
     }
 }
 
-TRACEPOINT(trace_drop_read_cached_page, "buf=%p, addr=%p", void*, void*);
-static void drop_arc_read_cached_page(hashkey& key)
-{
-    SCOPE_LOCK(arc_read_lock);
-    cached_page_arc* cp = find_in_cache(arc_read_cache, key);
-    if (cp) {
-        trace_drop_read_cached_page(cp->arcbuf(), cp->addr());
-        drop_read_cached_page(arc_read_cache, cp, true);
-    }
-}
+// No-op: ARC bridge inactive with OpenZFS 2.x (see comment near register_pagecache_arc_funs).
+// Kept for ABI compatibility with bsd/porting/mmu.cc in loader.elf.
+void unmap_arc_buf(arc_buf_t*) {}
 
-TRACEPOINT(trace_unmap_arc_buf, "buf=%p", void*);
-void unmap_arc_buf(arc_buf_t* ab)
-{
-    trace_unmap_arc_buf(ab);
-    SCOPE_LOCK(arc_read_lock);
-    cached_page_arc::unmap_arc_buf(ab);
-}
-
-TRACEPOINT(trace_map_arc_buf, "buf=%p page=%p", void*, void*);
-void map_arc_buf(hashkey *key, arc_buf_t* ab, void *page)
-{
-    trace_map_arc_buf(ab, page);
-    SCOPE_LOCK(arc_read_lock);
-    cached_page_arc* pc = new cached_page_arc(*key, page, ab);
-    arc_read_cache.emplace(*key, pc);
-    (*arc_share_buf_fun)(ab);
-}
+// No-op: ARC bridge inactive with OpenZFS 2.x (see comment near register_pagecache_arc_funs).
+// Kept for ABI compatibility with bsd/porting/mmu.cc in loader.elf.
+void map_arc_buf(hashkey*, arc_buf_t*, void*) {}
 
 void map_read_cached_page(hashkey *key, void *page)
 {
@@ -521,8 +402,6 @@ static void insert(cached_page_write* cp) {
     }
 }
 
-#define IS_ZFS(st_dev) ((st_dev & (0xffULL<<56)) == ZFS_ID)
-
 bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pte, bool write, bool shared)
 {
     struct stat st;
@@ -540,20 +419,10 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
                 insert(wcp);
                 // page is moved from read cache to write cache
                 // drop read page if exists, removing all mappings
-                if (IS_ZFS(st.st_dev)) {
-                    drop_arc_read_cached_page(key);
-                } else {
-                    // ROFS (at least for now)
-                    drop_read_cached_page(key);
-                }
+                drop_read_cached_page(key);
             } else {
                 // remove mapping to read cache page if exists
-                if (IS_ZFS(st.st_dev)) {
-                    remove_arc_read_mapping(key, ptep);
-                } else {
-                    // ROFS (at least for now)
-                    remove_read_mapping(key, ptep);
-                }
+                remove_read_mapping(key, ptep);
                 // cow (copy-on-write) of private page from read cache
                 return mmu::write_pte(newcp->release(), ptep, pte);
             }
@@ -565,25 +434,13 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
         }
     } else if (!wcp) {
         int ret;
-        // read fault and page is not in write cache yet, return one from ARC, mark it cow
+        // read fault and page is not in write cache yet, return one from read cache, mark it cow
         do {
-            if (IS_ZFS(st.st_dev)) {
-                WITH_LOCK(arc_read_lock) {
-                    cached_page_arc* cp = find_in_cache(arc_read_cache, key);
-                    if (cp) {
-                        add_arc_read_mapping(cp, ptep);
-                        return mmu::write_pte(cp->addr(), ptep, mmu::pte_mark_cow(pte, true));
-                    }
-                }
-            }
-            else {
-                // ROFS (at least for now)
-                WITH_LOCK(read_lock) {
-                    cached_page* cp = find_in_cache(read_cache, key);
-                    if (cp) {
-                        add_read_mapping(cp, ptep);
-                        return mmu::write_pte(cp->addr(), ptep, mmu::pte_mark_cow(pte, true));
-                    }
+            WITH_LOCK(read_lock) {
+                cached_page* cp = find_in_cache(read_cache, key);
+                if (cp) {
+                    add_read_mapping(cp, ptep);
+                    return mmu::write_pte(cp->addr(), ptep, mmu::pte_mark_cow(pte, true));
                 }
             }
 
@@ -636,24 +493,12 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
         }
     }
 
-    if (IS_ZFS(st.st_dev)) {
-        WITH_LOCK(arc_read_lock) {
-            cached_page_arc* rcp = find_in_cache(arc_read_cache, key);
-            if (rcp && mmu::virt_to_phys(rcp->addr()) == old.addr()) {
-                // page is in ARC read cache
-                remove_arc_read_mapping(rcp, ptep);
-                return false;
-            }
-        }
-    } else {
-        // ROFS (at least for now)
-        WITH_LOCK(read_lock) {
-            cached_page* rcp = find_in_cache(read_cache, key);
-            if (rcp && mmu::virt_to_phys(rcp->addr()) == old.addr()) {
-                // page is in regular read cache
-                remove_read_mapping(read_cache, rcp, ptep);
-                return false;
-            }
+    WITH_LOCK(read_lock) {
+        cached_page* rcp = find_in_cache(read_cache, key);
+        if (rcp && mmu::virt_to_phys(rcp->addr()) == old.addr()) {
+            // page is in read cache
+            remove_read_mapping(read_cache, rcp, ptep);
+            return false;
         }
     }
 
@@ -688,109 +533,8 @@ void sync(vfs_file* fp, off_t start, off_t end)
     }
 }
 
-TRACEPOINT(trace_access_scanner, "scanned=%u, cleared=%u, %%cpu=%g", unsigned, unsigned, double);
-class access_scanner {
-    static constexpr double _max_cpu = 20;
-    static constexpr double _min_cpu = 0.1;
-    static constexpr unsigned _freq = 1000;
-    double _cpu = _min_cpu;
-    std::unique_ptr<sched::thread> _thread;
-public:
-    access_scanner() : _thread(sched::thread::make(std::bind(&access_scanner::run, this), sched::thread::attr().name("page-access-scanner"))) {
-        _thread->start();
-    }
-
-private:
-    bool mark_accessed(std::unordered_set<arc_hashkey>& accessed) {
-        if (accessed.empty()) {
-            return false;
-        }
-        for (auto&& arc_hashkey: accessed) {
-            (*arc_buf_accessed_fun)(arc_hashkey.key);
-        }
-        accessed.clear();
-        return true;
-    }
-    void run()
-    {
-        cached_page_arc::arc_map::size_type current_bucket = 0;
-        std::unordered_set<arc_hashkey> accessed;
-        unsigned scanned = 0, cleared = 0;
-
-        while (true) {
-            unsigned buckets_scanned = 0;
-            bool flush = false;
-            auto bucket_count = cached_page_arc::arc_cache_map.bucket_count();
-
-            double work = (1000000000 * _cpu)/100;
-            double sleep = 1000000000 - work;
-
-            sched::thread::sleep(std::chrono::nanoseconds(static_cast<unsigned long>(sleep/_freq)));
-
-            auto start = sched::thread::current()->thread_clock();
-            auto deadline = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::nanoseconds(static_cast<unsigned long>(work/_freq))) + start;
-
-            WITH_LOCK(arc_read_lock) {
-                while (sched::thread::current()->thread_clock() < deadline && buckets_scanned < bucket_count) {
-                    if (current_bucket >= cached_page_arc::arc_cache_map.bucket_count()) {
-                        current_bucket = 0;
-                    }
-                    std::for_each(cached_page_arc::arc_cache_map.begin(current_bucket), cached_page_arc::arc_cache_map.end(current_bucket),
-                            [&accessed, &scanned, &cleared](cached_page_arc::arc_map::value_type& p) {
-                        auto arcbuf = p.first;
-                        auto cp = p.second;
-                        if (cp->clear_accessed()) {
-                            arc_hashkey arc_hashkey;
-                            (*arc_buf_get_hashkey_fun)(arcbuf, arc_hashkey.key);
-                            accessed.emplace(arc_hashkey);
-                            cleared++;
-                        }
-                        scanned++;
-                    });
-                    current_bucket++;
-                    buckets_scanned++;
-
-                    // mark ARC buffers as accessed when we have 1024 of them
-                    if (!(cleared % 1024)) {
-                        DROP_LOCK(arc_read_lock) {
-                            flush = mark_accessed(accessed);
-                        }
-                    }
-                }
-            }
-
-            // mark leftovers ARC buffers as accessed
-            flush = mark_accessed(accessed);
-
-            if (flush) {
-                mmu::flush_tlb_all();
-            }
-
-            if (buckets_scanned == bucket_count || !scanned) {
-                _cpu = _min_cpu;
-            } else {
-                _cpu = std::max(_min_cpu, std::min(_max_cpu, _cpu * ((cleared*5.0)/scanned)));
-            }
-
-            trace_access_scanner(scanned, cleared, _cpu);
-
-            // decay old results a bit
-            scanned /= 4;
-            cleared /= 2;
-        }
-    }
-};
-
-static access_scanner *s_access_scanner = nullptr;
-
-constexpr double access_scanner::_max_cpu;
-constexpr double access_scanner::_min_cpu;
-
 }
 
-//The access_scanner thread is ZFS specific so it
-//is initialized by calling the function below if libsolaris.so
-//is loaded.
-extern "C" OSV_LIBSOLARIS_API void start_pagecache_access_scanner() {
-    pagecache::s_access_scanner = new pagecache::access_scanner();
-}
+// No-op: ARC access scanner is not used with OpenZFS 2.x (see comment near
+// register_pagecache_arc_funs). Kept for ABI compatibility with libsolaris.so.
+extern "C" OSV_LIBSOLARIS_API void start_pagecache_access_scanner() {}
