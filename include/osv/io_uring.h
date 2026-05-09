@@ -306,7 +306,12 @@ struct io_uring_buf_ring {
             uint16_t resv3;
             uint16_t tail;
         };
-        struct io_uring_buf bufs[];
+        /*
+         * Zero-length array (GCC/Clang extension) so this compiles in C++
+         * mode.  The ABI matches the flexible-array version: bufs[0] is at
+         * offset 0 within the union, i.e. at the ring base address.
+         */
+        struct io_uring_buf bufs[0];
     };
 };
 
