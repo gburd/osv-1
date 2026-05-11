@@ -1,4 +1,4 @@
-Subject: OSv I/O subsystem improvements — ZFS, NILFS2, io_uring, multiqueue, and more
+Subject: OSv I/O subsystem improvements -- ZFS, io_uring, multiqueue, and more
 
 Hi Waldek,
 
@@ -28,7 +28,7 @@ improvements, modern on-disk formats). This series:
   - Wires everything into the OSv VFS layer (vfsops/vnops) so that ZFS
     filesystems mount and pass the existing test suite.
   - Implements zfs_vop_cache() for mmap integration (page cache backed by
-    ZFS reads, no double-caching risk — ARC caches compressed blocks, OSv
+    ZFS reads, no double-caching risk -- ARC caches compressed blocks, OSv
     page cache caches decompressed 4KB pages for mmap).
   - Supports MAP_SHARED file-backed mmap on ZFS.
   - Implements ftruncate (zfs_freesp and helpers).
@@ -50,41 +50,39 @@ encryption end-to-end: create an encrypted dataset, write/read data, unload
 the key, verify access is blocked, reload the key, verify access is restored.
 21/21 test cases pass. This required fixing the libzfs mnttab cache (the
 in-memory mount table wasn't being populated on OSv because libzfs_mnttab_add
-was guarded behind avl_numnodes > 0 — fixed in our local copy of libzfs).
+was guarded behind avl_numnodes > 0 -- fixed in our local copy of libzfs).
 
-3. NILFS2 filesystem port (Phase 1 + 2)
+3. io_uring support (full Linux 5.10 opcode parity)
 
-A port of Linux's NILFS2 read-only filesystem. NILFS2 is a log-structured
-filesystem designed for flash storage, and having it in OSv opens up a useful
-image-building workflow where the host builds a NILFS2 image offline and OSv
-boots from it read-only with very fast fsck (log-structured means clean
-journal on every write).
+Implements the io_uring_setup, io_uring_enter, and io_uring_register syscalls
+with complete Linux ABI compatibility. All 40 opcodes are implemented:
 
-The port uses a "two-translation-unit" approach to avoid the struct dentry
-ODR conflict between Linux's compat headers and OSv's VFS headers: all Linux
-NILFS2 kernel code compiles in C translation units that include only Linux
-compat headers; the OSv VFS bridge (nilfs2_vfsops.cc) includes only OSv
-headers. A thin POD bridge header (nilfs2_linux_glue.h) connects the two
-using only C primitive types.
+  - Read/write: READV, WRITEV, READ, WRITE, READ_FIXED, WRITE_FIXED (with
+    registered buffer support).
+  - Networking: SENDMSG, RECVMSG, SEND, RECV (with provided buffer group
+    selection), ACCEPT, CONNECT, SHUTDOWN.
+  - Filesystem: OPENAT, OPENAT2, CLOSE, STATX, FALLOCATE, FADVISE, MADVISE,
+    FSYNC, SYNC_FILE_RANGE, RENAMEAT, UNLINKAT, MKDIRAT, SYMLINKAT, LINKAT.
+  - Polling: POLL_ADD (synchronous), POLL_REMOVE, EPOLL_CTL.
+  - Control: NOP, TIMEOUT, TIMEOUT_REMOVE, LINK_TIMEOUT, ASYNC_CANCEL.
+  - Zero-copy: SPLICE (via bounce-copy read+write), TEE.
+  - Buffer management: PROVIDE_BUFFERS, REMOVE_BUFFERS.
+  - File table: FILES_UPDATE.
 
-Phase 1 implements: mount/unmount, lookup, readdir, read, stat, mmap.
-Phase 2 adds: a block buffer cache in the bio compat layer (so repeated
-sb_bread() calls on the same block don't hit disk) and page cache warming
-from the read() path (so a subsequent mmap fault on a just-read page is
-served from cache rather than going to disk again).
+Registration opcodes implemented: IORING_REGISTER_BUFFERS/FILES/EVENTFD/
+PROBE/PBUF_RING/SYNC_CANCEL and their UNREGISTER counterparts.
 
-Write support (Phase 3, the log-structured segment constructor) is not
-included — it's complex and NILFS2 is primarily useful as a read-only
-image format for OSv anyway.
+Linked request chains (IOSQE_IO_LINK, IOSQE_IO_HARDLINK), IO drain
+(IOSQE_IO_DRAIN), async cancel (ASYNC_CANCEL), and provided buffer groups
+are all implemented. Includes large-page (2MB) ring buffer mapping using
+hw_ptep<1> for efficient ring management at high queue depths.
 
-4. io_uring support
+In OSv's single-address-space model, "async" means dispatching each SQE
+chain to a sched::thread; the syscall overhead (~50-100 ns) is low enough
+that io_uring's primary benefit on OSv is batching and linked-request
+semantics rather than user/kernel boundary avoidance.
 
-Implements the io_uring_setup, io_uring_enter, and io_uring_register
-syscalls. Includes large-page (2MB) ring buffer mapping using hw_ptep<1>
-for efficient ring management at high queue depths. Registration supports
-IORING_REGISTER_BUFFERS and IORING_REGISTER_FILES. Tests are included.
-
-5. MADV_HUGEPAGE and MAP_HUGETLB
+4. MADV_HUGEPAGE and MAP_HUGETLB
 
 OSv already uses 2MB huge pages by default for anonymous mappings.
 MADV_HUGEPAGE re-enables huge pages after MADV_NOHUGEPAGE (clears the
@@ -92,13 +90,13 @@ mmap_small flag). MAP_HUGETLB requests strict huge-page-only allocation
 (returns ENOMEM if huge pages are unavailable rather than falling back to
 4KB). Tests are included.
 
-6. musl libc upgrade: 1.1.24 → 1.2.1
+5. musl libc upgrade: 1.1.24 -> 1.2.1
 
 Updates the musl submodule. The main user-visible change is proper large-file
 support (off_t is always 64-bit in 1.2.x). A small fix to
 libc/stdio/__string_read.c was needed to adapt to the new musl internals.
 
-7. VirtIO-BLK multiqueue (per-CPU queue dispatch)
+6. VirtIO-BLK multiqueue (per-CPU queue dispatch)
 
 Replaces the single global _lock mutex with per-queue locks and CPU-affine
 queue selection (sched::cpu::current()->id % _num_queues). On a multiqueue-
@@ -107,7 +105,8 @@ simultaneously without serializing on a single global lock. Completion
 handling creates one thread per queue; the queue-0 thread is interrupt-driven
 and also drains other queues when woken.
 
-8. Pagecache improvements: sequential readahead and periodic writeback
+7. Pagecache improvements: sequential readahead, periodic writeback, and
+   filesystem-signaled writeback API
 
 Sequential readahead: after fetching a page on an mmap fault miss, the
 pagecache layer checks whether the immediately preceding page is cached (a
@@ -115,13 +114,25 @@ signal that access is sequential). If so, it speculatively prefetches the
 next 4 pages before returning, hiding one round-trip of I/O latency on
 sequential scans.
 
-Periodic writeback: a background thread (pagecache-wb) wakes every 5 seconds
-and flushes all dirty write-cached pages. Previously, dirty pages were only
-flushed on LRU eviction or explicit fsync. This closes the gap between OSv's
-write-behind cache and Linux's pdflush/bdflush behaviour and reduces the risk
-of losing up to [LRU size × 4KB] of writes on a clean shutdown.
+Periodic writeback: a background thread (pagecache-wb) wakes every N seconds
+(default 5, tunable via pagecache_wb_interval_secs) and flushes all dirty
+write-cached pages. Previously, dirty pages were only flushed on LRU eviction
+or explicit fsync.
 
-9. Crucible block device driver (Oxide Computer hardware)
+Filesystem-signaled writeback API: pagecache::writeback_inode(dev, ino,
+start, end) lets filesystem VOP callbacks (VOP_FSYNC, checkpoint hooks,
+pre-unmount) request writeback of specific inode ranges without holding a
+vfs_file*. A C-linkage entry point osv_pagecache_writeback_inode() is
+provided for C filesystem code. pagecache::writeback_all() is available for
+system-wide sync at shutdown.
+
+Two correctness fixes to pagecache::sync():
+  - Fixed thread-unsafe static std::stack<> (now a local vector per call).
+  - Added a phase that promotes PTE-dirty bits to the software _dirty flag
+    before collecting pages, so fsync() no longer misses MAP_SHARED writes
+    that haven't yet been unmapped.
+
+8. Crucible block device driver (Oxide Computer hardware)
 
 A VirtIO-like block device driver for Oxide Computer's Crucible distributed
 block storage. This is Oxide-specific hardware not present in standard QEMU,
@@ -129,7 +140,7 @@ so the driver is opt-in (not compiled into the default 'all' profile). Use
 conf_drivers_profile=crucible to include it. I've added a note to this effect
 in the driver source.
 
-10. Various build and test improvements
+9. Various build and test improvements
 
   - Nix flake updated to replace boost177 with the current Boost.
   - Filesystem benchmark (tests/tst-fs-bench.cc) measures sequential and
@@ -148,25 +159,22 @@ Honest assessment of what still needs work:
     core/pagecache.cc) and whether the current "route ZFS through read_cache
     via zfs_vop_cache()" approach is the right long-term design.
 
-  - The NILFS2 port works for read-only use but the compat layer is quite
-    large (~2000 lines of Linux glue code). I'm not sure whether this level
-    of Linux kernel porting is something OSv wants to maintain. Feedback on
-    the architectural approach would be very helpful.
+  - The io_uring implementation is complete with respect to the Linux 5.10
+    ABI. On OSv there is no real async I/O kernel infrastructure, so all
+    opcodes are dispatched to sched::threads. The primary value is ABI
+    compatibility (existing io_uring userspace libraries work unchanged) and
+    batching semantics. SQPOLL mode is implemented as well.
 
-  - The io_uring implementation covers the common async I/O path but does not
-    yet support all opcodes (IORING_OP_POLL_ADD, IORING_OP_TIMEOUT, etc.).
-    I've documented the limitations in the test file.
-
-  - Periodic writeback uses a 5-second interval. I picked this somewhat
-    arbitrarily. What would you recommend? Linux defaults to 30 seconds
-    (dirty_writeback_centisecs=1500) but OSv's simpler memory model might
-    benefit from a shorter interval.
+  - Periodic writeback uses a 5-second default interval. Linux defaults to
+    30 seconds (dirty_writeback_centisecs=1500) but OSv's simpler memory
+    model might benefit from a shorter interval. The interval is tunable at
+    runtime via the pagecache_wb_interval_secs global.
 
 I've tried to structure the commits so that each is logically independent and
 builds cleanly on its own. If it would be easier to review individual features
 as separate PRs, I'm happy to do that instead.
 
-Thank you for your time and for maintaining OSv — I've learned a tremendous
+Thank you for your time and for maintaining OSv -- I've learned a tremendous
 amount from reading the codebase.
 
 Best regards,
