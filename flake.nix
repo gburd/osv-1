@@ -88,8 +88,8 @@
           tcpdump
           pax-utils
 
-          # Java toolchain (for tests)
-          openjdk17
+          # Java toolchain (for tests and openjdk*-from-host modules)
+          openjdk21
           maven
           ant
 
@@ -101,6 +101,11 @@
           curl
           wget
           unzip
+
+          # For ca-certificates module (p11-kit extract builds Java/PEM trust stores)
+          p11-kit
+          nss
+          nssTools
         ];
 
       in
@@ -122,10 +127,17 @@
 
             # Required libraries (native)
             boostHeaders
+            boost  # runtime .so for linking (boost_filesystem etc.)
             libedit
+            # OpenSSL 3.x for httpserver-api compilation (-lssl -lcrypto)
             openssl
             yaml-cpp
+            # Lua 5.3 interpreter + headers for the lua module.
+            # The binary is named 'lua' in nixpkgs; the module Makefile checks
+            # 'command -v lua' to use the system copy instead of downloading.
             lua5_3
+            # LuaRocks for installing Lua modules without a network download
+            luarocks
           ]);
 
           shellHook = ''
@@ -141,6 +153,18 @@
 
             # Set LIBCLANG_PATH for Rust bindgen
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+
+            # ----------------------------------------------------------------
+            # Nix compatibility: manifest_from_host.sh uses ldconfig -p which
+            # returns nothing on NixOS.  Expose all needed .so paths via
+            # LD_LIBRARY_PATH so the patched script can find them.
+            # ----------------------------------------------------------------
+            export LD_LIBRARY_PATH="${pkgs.openssl.out}/lib:${pkgs.boost.out}/lib:${pkgs.lua5_3}/lib:${pkgs.zlib.out}/lib:${pkgs.libedit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # Boost runtime lib dir for module Makefiles that link -lboost_filesystem etc.
+            export boost_lib_dir="${pkgs.boost.out}/lib"
+
+            # Java home for openjdk*-from-host module (packages JVM into image)
+            export JAVA_HOME="${pkgs.openjdk21}"
           '';
 
           # Environment variables

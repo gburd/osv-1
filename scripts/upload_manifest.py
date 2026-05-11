@@ -149,7 +149,12 @@ def main():
             make_option('--arch',
                         dest='arch',
                         default=host_arch,
-                        help="specify QEMU architecture: x86_64, aarch64")
+                        help="specify QEMU architecture: x86_64, aarch64"),
+            make_option('--mem',
+                        dest='mem',
+                        default=2048,
+                        type='int',
+                        help="ZFS builder QEMU memory in MB (default: 2048)"),
     ])
 
     (options, args) = opt.parse_args()
@@ -174,7 +179,7 @@ def main():
         console = '--console=serial'
         zfs_builder_name = 'zfs_builder-stripped.elf'
 
-    osv = subprocess.Popen('cd ../..; scripts/run.py -k --kernel-path build/last/%s --arch=%s --vnc none -m 512 -c1 -i "%s" --block-device-cache writeback -s -e "%s --norandom --nomount --noinit --preload-zfs-library /tools/mkfs.so; /tools/cpiod.so --prefix /zfs/; /zfs.so set compression=off osv; /zpool.so export osv" --forward tcp:127.0.0.1:%s-:10000' % (zfs_builder_name,arch,image_path,console,upload_port), shell=True, stdout=subprocess.PIPE)
+    osv = subprocess.Popen('cd ../..; scripts/run.py -k --kernel-path build/last/%s --arch=%s --vnc none -m %d -c1 -i "%s" --block-device-cache writeback -s -e "%s --norandom --nomount --noinit --preload-zfs-library /tools/mkfs.so; /tools/cpiod.so --prefix /zfs/; /zfs.so set compression=off osv; /zpool.so export osv" --forward tcp:127.0.0.1:%s-:10000' % (zfs_builder_name,arch,options.mem,image_path,console,upload_port), shell=True, stdout=subprocess.PIPE)
 
     upload(osv, manifest, depends, upload_port)
 
