@@ -263,14 +263,8 @@ static void test_io_uring_invalid_params(void)
     fd = sys_io_uring_setup(32, NULL);
     assert(fd == -EFAULT);
 
-    /* Test unsupported flag IORING_SETUP_SQPOLL (bit 1): if accepted, the
-     * app would stall waiting for a kernel poll thread we never start. */
-    params.flags = IORING_SETUP_SQPOLL;
-    fd = sys_io_uring_setup(32, &params);
-    assert(fd == -EINVAL);
-
-    /* Test unsupported flag IORING_SETUP_SQ_AFF (bit 2) */
-    params.flags = IORING_SETUP_SQ_AFF;
+    /* Test unsupported flag IORING_SETUP_ATTACH_WQ (bit 5): not implemented */
+    params.flags = IORING_SETUP_ATTACH_WQ;
     fd = sys_io_uring_setup(32, &params);
     assert(fd == -EINVAL);
 
@@ -422,7 +416,7 @@ static void test_io_uring_nop_via_ring(void)
 
     /* Call io_uring_enter to process */
     ret = sys_io_uring_enter(ring.fd, 1, 1, IORING_ENTER_GETEVENTS, NULL, 0);
-    assert(ret == 0);
+    assert(ret == 1); /* returns count of submitted SQEs, not a 0/1 success flag */
 
     /* Check completion */
     unsigned int cq_head = ring.cq_ring->head;
@@ -474,7 +468,7 @@ static void test_io_uring_file_io(void)
     ring.sq_ring->tail = tail + 1;
 
     ret = sys_io_uring_enter(ring.fd, 1, 1, IORING_ENTER_GETEVENTS, NULL, 0);
-    assert(ret == 0);
+    assert(ret == 1); /* returns count of submitted SQEs */
 
     /* Check write completion */
     unsigned int cq_head = ring.cq_ring->head;
@@ -504,7 +498,7 @@ static void test_io_uring_file_io(void)
     ring.sq_ring->tail = tail + 1;
 
     ret = sys_io_uring_enter(ring.fd, 1, 1, IORING_ENTER_GETEVENTS, NULL, 0);
-    assert(ret == 0);
+    assert(ret == 1); /* returns count of submitted SQEs */
 
     /* Check read completion */
     cq_head = ring.cq_ring->head;
