@@ -1,0 +1,174 @@
+Subject: OSv I/O subsystem improvements — ZFS, NILFS2, io_uring, multiqueue, and more
+
+Hi Waldek,
+
+I hope you're well. I've been working on a series of improvements to OSv's I/O
+subsystem over the past several months and wanted to share what I have so far,
+ask for your thoughts, and get your guidance on whether any of this would be
+worth upstreaming. I'm happy to rebase, split, rework, or drop anything that
+doesn't fit with the project's direction.
+
+Here's a summary of what the branch contains. Everything is on
+osv-improvements (rebased on master) and the individual features are also
+available on separate feat/* branches.
+
+---
+
+1. OpenZFS 2.4.1 integration (upgrading from in-tree BSD-ZFS)
+
+The biggest change by far. The existing BSD-ZFS code is aging and lacks many
+features that OpenZFS 2.x provides (TRIM/DISCARD, encryption, compression
+improvements, modern on-disk formats). This series:
+
+  - Replaces the in-tree BSD-ZFS objects with a submodule pointing to the
+    upstream OpenZFS 2.4.1 release.
+  - Adds an OSv platform layer under external/openzfs/module/os/osv/ that
+    bridges OpenZFS's SPL/ZFS kernel module to OSv's bio/device layer.
+  - Builds libsolaris.so, zpool.so, and zfs.so as userspace tools.
+  - Wires everything into the OSv VFS layer (vfsops/vnops) so that ZFS
+    filesystems mount and pass the existing test suite.
+  - Implements zfs_vop_cache() for mmap integration (page cache backed by
+    ZFS reads, no double-caching risk — ARC caches compressed blocks, OSv
+    page cache caches decompressed 4KB pages for mmap).
+  - Supports MAP_SHARED file-backed mmap on ZFS.
+  - Implements ftruncate (zfs_freesp and helpers).
+
+I've tried to keep the OSv-side patches minimal and the OpenZFS submodule
+untouched, so that future OpenZFS upgrades are straightforward using the
+provided scripts/update-openzfs.sh script and patches/ directory.
+
+I'm a bit worried this is too large a change to ask for in one go, so I've
+split the ZFS commits into three logical sub-commits (build system, porting
+layer, VFS/boot integration) to make review easier. I'd completely understand
+if you'd prefer this be held until it's more thoroughly tested, or if you'd
+want it broken into a longer series of smaller incremental patches.
+
+2. ZFS encryption integration test
+
+A new test (tests/tst-zfs-encryption.cc) that exercises AES-256-GCM
+encryption end-to-end: create an encrypted dataset, write/read data, unload
+the key, verify access is blocked, reload the key, verify access is restored.
+21/21 test cases pass. This required fixing the libzfs mnttab cache (the
+in-memory mount table wasn't being populated on OSv because libzfs_mnttab_add
+was guarded behind avl_numnodes > 0 — fixed in our local copy of libzfs).
+
+3. NILFS2 filesystem port (Phase 1 + 2)
+
+A port of Linux's NILFS2 read-only filesystem. NILFS2 is a log-structured
+filesystem designed for flash storage, and having it in OSv opens up a useful
+image-building workflow where the host builds a NILFS2 image offline and OSv
+boots from it read-only with very fast fsck (log-structured means clean
+journal on every write).
+
+The port uses a "two-translation-unit" approach to avoid the struct dentry
+ODR conflict between Linux's compat headers and OSv's VFS headers: all Linux
+NILFS2 kernel code compiles in C translation units that include only Linux
+compat headers; the OSv VFS bridge (nilfs2_vfsops.cc) includes only OSv
+headers. A thin POD bridge header (nilfs2_linux_glue.h) connects the two
+using only C primitive types.
+
+Phase 1 implements: mount/unmount, lookup, readdir, read, stat, mmap.
+Phase 2 adds: a block buffer cache in the bio compat layer (so repeated
+sb_bread() calls on the same block don't hit disk) and page cache warming
+from the read() path (so a subsequent mmap fault on a just-read page is
+served from cache rather than going to disk again).
+
+Write support (Phase 3, the log-structured segment constructor) is not
+included — it's complex and NILFS2 is primarily useful as a read-only
+image format for OSv anyway.
+
+4. io_uring support
+
+Implements the io_uring_setup, io_uring_enter, and io_uring_register
+syscalls. Includes large-page (2MB) ring buffer mapping using hw_ptep<1>
+for efficient ring management at high queue depths. Registration supports
+IORING_REGISTER_BUFFERS and IORING_REGISTER_FILES. Tests are included.
+
+5. MADV_HUGEPAGE and MAP_HUGETLB
+
+OSv already uses 2MB huge pages by default for anonymous mappings.
+MADV_HUGEPAGE re-enables huge pages after MADV_NOHUGEPAGE (clears the
+mmap_small flag). MAP_HUGETLB requests strict huge-page-only allocation
+(returns ENOMEM if huge pages are unavailable rather than falling back to
+4KB). Tests are included.
+
+6. musl libc upgrade: 1.1.24 → 1.2.1
+
+Updates the musl submodule. The main user-visible change is proper large-file
+support (off_t is always 64-bit in 1.2.x). A small fix to
+libc/stdio/__string_read.c was needed to adapt to the new musl internals.
+
+7. VirtIO-BLK multiqueue (per-CPU queue dispatch)
+
+Replaces the single global _lock mutex with per-queue locks and CPU-affine
+queue selection (sched::cpu::current()->id % _num_queues). On a multiqueue-
+capable hypervisor (VIRTIO_BLK_F_MQ), multiple CPUs can now submit I/O
+simultaneously without serializing on a single global lock. Completion
+handling creates one thread per queue; the queue-0 thread is interrupt-driven
+and also drains other queues when woken.
+
+8. Pagecache improvements: sequential readahead and periodic writeback
+
+Sequential readahead: after fetching a page on an mmap fault miss, the
+pagecache layer checks whether the immediately preceding page is cached (a
+signal that access is sequential). If so, it speculatively prefetches the
+next 4 pages before returning, hiding one round-trip of I/O latency on
+sequential scans.
+
+Periodic writeback: a background thread (pagecache-wb) wakes every 5 seconds
+and flushes all dirty write-cached pages. Previously, dirty pages were only
+flushed on LRU eviction or explicit fsync. This closes the gap between OSv's
+write-behind cache and Linux's pdflush/bdflush behaviour and reduces the risk
+of losing up to [LRU size × 4KB] of writes on a clean shutdown.
+
+9. Crucible block device driver (Oxide Computer hardware)
+
+A VirtIO-like block device driver for Oxide Computer's Crucible distributed
+block storage. This is Oxide-specific hardware not present in standard QEMU,
+so the driver is opt-in (not compiled into the default 'all' profile). Use
+conf_drivers_profile=crucible to include it. I've added a note to this effect
+in the driver source.
+
+10. Various build and test improvements
+
+  - Nix flake updated to replace boost177 with the current Boost.
+  - Filesystem benchmark (tests/tst-fs-bench.cc) measures sequential and
+    random I/O, metadata ops, and mmap throughput across all filesystems.
+  - ZFS direct I/O test (tests/tst-zfs-direct-io.cc).
+  - ZFS recordsize throughput benchmark (tests/tst-zfs-recordsize.cc).
+  - Shared memory consistency test (tests/tst-shm-consistency.cc).
+
+---
+
+Honest assessment of what still needs work:
+
+  - The OpenZFS integration is functional but has not been stress-tested at
+    the level I'd want before calling it production-ready. I'd particularly
+    appreciate your thoughts on the ARC/pagecache layering (documented in
+    core/pagecache.cc) and whether the current "route ZFS through read_cache
+    via zfs_vop_cache()" approach is the right long-term design.
+
+  - The NILFS2 port works for read-only use but the compat layer is quite
+    large (~2000 lines of Linux glue code). I'm not sure whether this level
+    of Linux kernel porting is something OSv wants to maintain. Feedback on
+    the architectural approach would be very helpful.
+
+  - The io_uring implementation covers the common async I/O path but does not
+    yet support all opcodes (IORING_OP_POLL_ADD, IORING_OP_TIMEOUT, etc.).
+    I've documented the limitations in the test file.
+
+  - Periodic writeback uses a 5-second interval. I picked this somewhat
+    arbitrarily. What would you recommend? Linux defaults to 30 seconds
+    (dirty_writeback_centisecs=1500) but OSv's simpler memory model might
+    benefit from a shorter interval.
+
+I've tried to structure the commits so that each is logically independent and
+builds cleanly on its own. If it would be easier to review individual features
+as separate PRs, I'm happy to do that instead.
+
+Thank you for your time and for maintaining OSv — I've learned a tremendous
+amount from reading the codebase.
+
+Best regards,
+Greg Burd
+May 2026
