@@ -9,7 +9,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
-#include <stack>
+#include <vector>
+#include <mutex>
 #include <algorithm>
 #include <boost/variant.hpp>
 #include <osv/pagecache.hh>
@@ -19,6 +20,8 @@
 #include <fs/vfs/vfs_id.h>
 #include <osv/trace.hh>
 #include <osv/prio.hh>
+#include <osv/sched.hh>
+#include <osv/clock.hh>
 
 // NOTE: The ARC bridge (IS_ZFS() == true path) is intentionally unreachable
 // with the OpenZFS 2.x integration. OpenZFS 2.x made arc_share_buf() a static
@@ -243,6 +246,12 @@ public:
     void mark_dirty() {
         _dirty |= true;
     }
+    bool is_dirty() const { return _dirty; }
+    bool clear_dirty_flag() {
+        bool was = _dirty;
+        _dirty = false;
+        return was;
+    }
     bool flush_check_dirty() {
         return for_each_pte([] (mmu::hw_ptep<0> pte) { return mmu::clear_pte(pte).dirty(); }, std::logical_or<bool>(), false);
     }
@@ -363,9 +372,129 @@ extern "C" void osv_free_page(void *p)
     memory::free_page(p);
 }
 
+/*
+ * osv_pagecache_read_page() — copy a cached read page into @buf.
+ *
+ * If (dev, ino, offset) is in the read cache, copies PAGE_SIZE bytes into
+ * @buf and returns 0 (cache hit).  Returns -1 on miss.
+ *
+ * Used by vop_read implementations to serve sequential reads from the
+ * page cache without triggering a mmap fault.
+ */
+extern "C" int osv_pagecache_read_page(dev_t dev, ino_t ino, off_t offset,
+                                        void *buf)
+{
+    hashkey key {dev, ino, offset};
+    SCOPE_LOCK(read_lock);
+    cached_page *cp = find_in_cache(read_cache, key);
+    if (!cp)
+        return -1;
+    memcpy(buf, cp->addr(), mmu::page_size);
+    return 0;
+}
+
+/*
+ * osv_pagecache_map_page_if_absent() — insert page only when key is absent.
+ *
+ * If (dev, ino, offset) is already in the read cache the new @page is NOT
+ * inserted and the caller remains responsible for freeing it.  Returns 1
+ * if insertion was skipped (page already cached), 0 if inserted (read_cache
+ * now owns the page).
+ *
+ * Used by vop_read implementations to warm the page cache after reading
+ * file data from disk, so a subsequent mmap fault finds the page cached.
+ */
+extern "C" int osv_pagecache_map_page_if_absent(dev_t dev, ino_t ino,
+                                                  off_t offset, void *page)
+{
+    hashkey key {dev, ino, offset};
+    SCOPE_LOCK(read_lock);
+    if (find_in_cache(read_cache, key))
+        return 1;   /* already cached — caller owns page */
+    cached_page *cp = new cached_page(key, page);
+    read_cache.emplace(key, cp);
+    return 0;       /* inserted — read_cache owns page */
+}
+
 static int create_read_cached_page(vfs_file* fp, hashkey& key)
 {
     return fp->read_page_from_cache(&key, key.offset);
+}
+
+/*
+ * Sequential readahead
+ * --------------------
+ * READAHEAD_WINDOW: number of pages to prefetch ahead when sequential
+ * access is detected (previous page in read_cache).  Four pages == 16 KB
+ * of lookahead, enough to hide one round-trip of I/O latency while the
+ * CPU processes the current page.
+ */
+static constexpr int READAHEAD_WINDOW = 4;
+
+/*
+ * prefetch_one_page() — speculatively load one page into the read cache.
+ *
+ * Called for readahead: errors are silently ignored (prefetch is best-effort).
+ * write_lock must NOT be held by the caller; this function acquires and
+ * releases it internally via VOP_CACHE → osv_pagecache_map_page.
+ */
+static void prefetch_one_page(vfs_file* fp, hashkey key, off_t file_size)
+{
+    struct vnode *vp = fp->f_dentry->d_vnode;
+
+    if (!vp->v_op->vop_cache)
+        return;
+    if (key.offset >= file_size)
+        return;
+
+    WITH_LOCK(read_lock) {
+        if (find_in_cache(read_cache, key))
+            return;  /* already cached */
+    }
+
+    iovec io[1];
+    io[0].iov_base = &key;   /* hashkey* used as opaque slot key */
+    uio data;
+    data.uio_iov     = io;
+    data.uio_iovcnt  = 1;
+    data.uio_offset  = key.offset;
+    data.uio_resid   = mmu::page_size;
+    data.uio_rw      = UIO_READ;
+
+    vn_lock(vp);
+    VOP_CACHE(vp, fp, &data);  /* errors silently ignored for prefetch */
+    vn_unlock(vp);
+}
+
+/*
+ * readahead_if_sequential() — heuristic sequential prefetch.
+ *
+ * If the page just before @key is in read_cache (sequential-access signal),
+ * speculatively populate the next READAHEAD_WINDOW pages.
+ *
+ * write_lock is released by the caller (DROP_LOCK block) so we can safely
+ * acquire vnode locks inside prefetch_one_page().
+ */
+static void readahead_if_sequential(vfs_file* fp, const hashkey& key)
+{
+    if (key.offset < (off_t)mmu::page_size)
+        return;
+
+    hashkey prev {key.dev, key.ino, key.offset - (off_t)mmu::page_size};
+    {
+        WITH_LOCK(read_lock) {
+            if (!find_in_cache(read_cache, prev))
+                return;  /* not sequential — skip readahead */
+        }
+    }
+
+    /* Sequential: prefetch READAHEAD_WINDOW pages starting from key+1 */
+    off_t file_size = fp->f_dentry->d_vnode->v_size;
+    for (int i = 1; i <= READAHEAD_WINDOW; i++) {
+        hashkey ahead {key.dev, key.ino,
+                       key.offset + (off_t)(i * (int)mmu::page_size)};
+        prefetch_one_page(fp, ahead, file_size);
+    }
 }
 
 static std::unique_ptr<cached_page_write> create_write_cached_page(vfs_file* fp, hashkey& key)
@@ -448,6 +577,8 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
                 // page is not in cache yet, create and try again
                 // function may sleep so drop write lock while executing it
                 ret = create_read_cached_page(fp, key);
+                if (ret == 0)
+                    readahead_if_sequential(fp, key);
             }
 
             // we dropped write lock, need to re-check write cache again
@@ -508,29 +639,178 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
 
 void sync(vfs_file* fp, off_t start, off_t end)
 {
-    static std::stack<cached_page_write*> dirty; // protected by write_lock
     struct stat st;
     fp->stat(&st);
     hashkey key {st.st_dev, st.st_ino, 0};
+
+    std::vector<cached_page_write*> to_flush;
+
     SCOPE_LOCK(write_lock);
 
+    /* Phase 1: promote PTE-dirty pages to software-dirty.
+     * A page written via mmap (MAP_SHARED) may have the dirty bit set only
+     * in its PTE, with the software _dirty flag still false.  Without this
+     * step fsync() would miss those writes.
+     */
     for (key.offset = start; key.offset < end; key.offset += mmu::page_size) {
         cached_page_write* cp = find_in_cache(write_cache, key);
-        if (cp && cp->clear_dirty()) {
-            dirty.push(cp);
-        }
+        if (cp && cp->flush_check_dirty())
+            cp->mark_dirty();
     }
+
+    /* Phase 2: collect pages with the software-dirty flag set and clear it. */
+    for (key.offset = start; key.offset < end; key.offset += mmu::page_size) {
+        cached_page_write* cp = find_in_cache(write_cache, key);
+        if (cp && cp->clear_dirty_flag())
+            to_flush.push_back(cp);
+    }
+
+    if (to_flush.empty())
+        return;
 
     mmu::flush_tlb_all();
 
-    while(!dirty.empty()) {
-        auto cp = dirty.top();
+    /* Phase 3: write each page back to the filesystem. */
+    for (auto cp : to_flush) {
         auto err = cp->writeback();
         if (err) {
             throw make_error(err);
         }
-        dirty.pop();
     }
+}
+
+/*
+ * Periodic writeback
+ * ------------------
+ * flush_write_cache_dirty() flushes every dirty page in the write cache.
+ * Pages become dirty in two ways:
+ *   1. mark_dirty() called from release() when a writeable PTE is unmapped
+ *      with the dirty bit set (MAP_SHARED writes).
+ *   2. flush_check_dirty() + mark_dirty() called at LRU eviction time.
+ *
+ * Without a periodic flush, pages in (1) stay dirty indefinitely until
+ * eviction or an explicit fsync/sync call.  The writeback thread below
+ * ensures a 5-second upper bound on how long dirty data remains in DRAM.
+ */
+static void flush_write_cache_dirty()
+{
+    std::vector<cached_page_write*> to_flush;
+
+    SCOPE_LOCK(write_lock);
+
+    /* Phase 1: promote any PTE-dirty pages to software-dirty so they survive
+     * the writeback phase even if the PTE dirty bit gets cleared by a
+     * concurrent TLB invalidation. */
+    for (auto& kv : write_cache) {
+        cached_page_write* cp = kv.second;
+        if (cp->flush_check_dirty())
+            cp->mark_dirty();
+    }
+
+    /* Phase 2: collect and clear software-dirty flag. */
+    for (auto& kv : write_cache) {
+        cached_page_write* cp = kv.second;
+        if (cp->clear_dirty_flag())
+            to_flush.push_back(cp);
+    }
+
+    if (to_flush.empty())
+        return;
+
+    mmu::flush_tlb_all();
+
+    /* Phase 3: write back (vnode lock acquired inside writeback(); write_lock
+     * is still held, consistent with the existing pagecache::sync() path). */
+    for (auto cp : to_flush) {
+        cp->writeback();
+    }
+}
+
+/*
+ * writeback_inode() — flush dirty pages for a specific (dev, ino) range.
+ *
+ * Same three-phase approach as sync() but:
+ *   - accepts (dev, ino) directly instead of a vfs_file*
+ *   - does not throw on I/O error (background/advisory writeback)
+ *
+ * The write_lock is held across all three phases so that a concurrent
+ * eviction cannot free a page between phase 2 (collecting) and phase 3
+ * (writing back).  This matches the locking strategy in sync().
+ */
+void writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
+{
+    hashkey key {dev, ino, 0};
+    std::vector<cached_page_write*> to_flush;
+
+    SCOPE_LOCK(write_lock);
+
+    /* Phase 1: promote PTE-dirty pages to software-dirty. */
+    for (key.offset = start; key.offset < end; key.offset += mmu::page_size) {
+        cached_page_write* cp = find_in_cache(write_cache, key);
+        if (cp && cp->flush_check_dirty())
+            cp->mark_dirty();
+    }
+
+    /* Phase 2: collect and clear the software-dirty flag. */
+    for (key.offset = start; key.offset < end; key.offset += mmu::page_size) {
+        cached_page_write* cp = find_in_cache(write_cache, key);
+        if (cp && cp->clear_dirty_flag())
+            to_flush.push_back(cp);
+    }
+
+    if (to_flush.empty())
+        return;
+
+    mmu::flush_tlb_all();
+
+    /* Phase 3: write back; errors are swallowed (advisory path). */
+    for (auto cp : to_flush)
+        cp->writeback();
+}
+
+/*
+ * writeback_all() — flush the entire write cache.
+ * Thin wrapper around flush_write_cache_dirty() for external callers.
+ */
+void writeback_all()
+{
+    flush_write_cache_dirty();
+}
+
+unsigned pagecache_wb_interval_secs = 5;
+
+static sched::thread* pagecache_wb_thread;
+
+static void writeback_worker()
+{
+    while (true) {
+        /* Sleep pagecache_wb_interval_secs between writeback passes.
+         * The interval is re-read on each iteration so a runtime change
+         * takes effect at the next wakeup without restarting the thread. */
+        unsigned interval = pagecache_wb_interval_secs;
+        if (interval == 0)
+            interval = 5;  /* guard against zero to avoid busy-loop */
+        sched::timer t(*sched::thread::current());
+        t.set(std::chrono::seconds(interval));
+        sched::thread::wait_until([&] { return t.expired(); });
+
+        flush_write_cache_dirty();
+    }
+}
+
+/*
+ * pagecache_start_writeback() — start the periodic writeback daemon.
+ *
+ * Called once from the pagecache constructor after the scheduler is up.
+ * A plain constructor (no init_prio) runs after all init_prio constructors,
+ * at which point the OSv scheduler is already running.
+ */
+static void __attribute__((constructor)) pagecache_start_writeback()
+{
+    pagecache_wb_thread = sched::thread::make(
+        [] { writeback_worker(); },
+        sched::thread::attr().name("pagecache-wb"));
+    pagecache_wb_thread->start();
 }
 
 }
@@ -538,3 +818,16 @@ void sync(vfs_file* fp, off_t start, off_t end)
 // No-op: ARC access scanner is not used with OpenZFS 2.x (see comment near
 // register_pagecache_arc_funs). Kept for ABI compatibility with libsolaris.so.
 extern "C" OSV_LIBSOLARIS_API void start_pagecache_access_scanner() {}
+
+/*
+ * osv_pagecache_writeback_inode() — C-linkage entry point.
+ *
+ * Allows C filesystem code (ZFS vop_fsync, ext2 vop_fsync, etc.) to request
+ * writeback of dirty mmap pages for a specific inode without needing a C++
+ * vfs_file* handle.  Errors are silently swallowed (same as background WB).
+ */
+extern "C" void osv_pagecache_writeback_inode(dev_t dev, ino_t ino,
+                                               off_t start, off_t end)
+{
+    pagecache::writeback_inode(dev, ino, start, end);
+}
