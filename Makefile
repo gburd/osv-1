@@ -40,6 +40,7 @@ endif
 ###########################################################################
 
 include conf/base.mk
+include bsd/sys/cddl/openzfs_sources.mk
 
 # The build mode defaults to "release" (optimized build), the other option
 # is "debug" (unoptimized build). In the latter the optimizer interferes
@@ -744,12 +745,7 @@ solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_sysevent.o
 solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.o
 solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_uio.o
 solaris += bsd/sys/cddl/contrib/opensolaris/common/acl/acl_common.o
-solaris += bsd/sys/cddl/contrib/opensolaris/common/avl/avl.o
-solaris += bsd/sys/cddl/contrib/opensolaris/common/nvpair/fnvpair.o
-solaris += bsd/sys/cddl/contrib/opensolaris/common/nvpair/nvpair.o
-$(out)/bsd/sys/cddl/contrib/opensolaris/common/nvpair/nvpair.o: CFLAGS += -Wno-stringop-overread
-solaris += bsd/sys/cddl/contrib/opensolaris/common/nvpair/nvpair_alloc_fixed.o
-solaris += bsd/sys/cddl/contrib/opensolaris/common/unicode/u8_textprep.o
+# avl, nvpair, unicode are now provided by OpenZFS (openzfs-avl/nvpair/unicode)
 solaris += bsd/sys/cddl/contrib/opensolaris/uts/common/os/callb.o
 # NOTE: list.o is provided by OpenZFS (via openzfs_sources.mk / openzfs-osv),
 # compiled with OPENZFS_CFLAGS and the 24-byte list_impl.h (no list_size).
@@ -860,7 +856,8 @@ zfs += bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/zrlock.o
 zfs += bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/zvol.o
 zfs += bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/lz4.o
 
-solaris += $(zfs)
+# Old BSD-ZFS objects replaced by OpenZFS 2.4.1 via openzfs_sources.mk
+solaris += $(openzfs-all)
 
 # OpenZFS-specific CFLAGS (for openzfs-all objects)
 $(openzfs-all:%=$(out)/%): CFLAGS+= \
@@ -2639,7 +2636,9 @@ $(out)/libtpool.so: $(libtpool-objects)
 # libsolaris.so — OpenZFS kernel module (unchanged)
 # -----------------------------------------------------------------------
 libsolaris-objects = $(foreach file, $(solaris) $(xdr), $(out)/$(file))
-libsolaris-objects += $(out)/bsd/porting/kobj.o $(out)/fs/zfs/zfs_initialize.o
+# zfs_initialize is provided by external/openzfs/module/os/osv/zfs/zfs_initialize_osv.c
+# (included via openzfs-osv in openzfs-all).  The old fs/zfs/zfs_initialize.o is removed.
+libsolaris-objects += $(out)/bsd/porting/kobj.o
 
 $(libsolaris-objects): kernel-defines = -D_KERNEL $(source-dialects) -fvisibility=hidden -ffunction-sections -fdata-sections
 
