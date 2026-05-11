@@ -126,11 +126,16 @@ vfs_file*. A C-linkage entry point osv_pagecache_writeback_inode() is
 provided for C filesystem code. pagecache::writeback_all() is available for
 system-wide sync at shutdown.
 
-Two correctness fixes to pagecache::sync():
-  - Fixed thread-unsafe static std::stack<> (now a local vector per call).
+Three correctness fixes:
+  - Fixed thread-unsafe static std::stack<> in pagecache::sync() (now a
+    local vector per call).
   - Added a phase that promotes PTE-dirty bits to the software _dirty flag
-    before collecting pages, so fsync() no longer misses MAP_SHARED writes
-    that haven't yet been unmapped.
+    before collecting pages, so pagecache::sync() no longer misses MAP_SHARED
+    writes that haven't yet been unmapped.
+  - Fixed sys_fsync() in fs/vfs/vfs_syscalls.cc to flush the write cache
+    (via osv_pagecache_writeback_inode) before calling VOP_FSYNC.
+    Previously, MAP_SHARED mmap writes that had not been msync()ed would
+    not reach the filesystem's journal even after fsync() returned.
 
 8. Crucible block device driver (Oxide Computer hardware)
 
