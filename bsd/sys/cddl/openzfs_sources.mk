@@ -322,6 +322,7 @@ openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_vnops_os.o
 openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_znode_os.o
 openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zfs_auto_upgrade.o
 openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zvol_os.o
+openzfs-osv += $(OPENZFS)/module/os/osv/zfs/zio_crypt_impl.o
 # NOTE: list.o replaces the old OpenSolaris list.o (bsd/sys/cddl/contrib/.../os/list.o).
 # The old version was compiled with the 32-byte list_impl.h (list_size + list_offset +
 # list_head), but OpenZFS module code uses the 24-byte list_impl.h (list_offset +
