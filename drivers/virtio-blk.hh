@@ -10,6 +10,7 @@
 #include "drivers/virtio.hh"
 #include "drivers/virtio-device.hh"
 #include <osv/bio.h>
+#include <vector>
 
 namespace virtio {
 
@@ -149,7 +150,7 @@ public:
 
     int make_request(struct bio*);
 
-    void req_done();
+    void req_done(int qid);
     int64_t size();
 
     void set_readonly() {_ro = true;}
@@ -180,8 +181,11 @@ private:
     int _id;
     bool _ro;
     int _num_queues;
-    // This mutex protects parallel make_request invocations
-    mutex _lock;
+    // Per-queue submission locks; sized to _num_queues in the constructor.
+    // Single-queue devices use _queue_locks[0].  When VIRTIO_BLK_F_MQ is
+    // active, make_request() selects the queue by CPU id so the queues act
+    // as independent submission channels with no cross-CPU lock contention.
+    std::vector<mutex> _queue_locks;
 };
 
 }
