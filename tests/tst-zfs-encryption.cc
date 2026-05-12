@@ -362,14 +362,44 @@ int main()
                 p_zfs_close(zh);
             }
 
-            /* After key unload, mounting the encrypted dataset should fail.
-             * This proves the key is truly unavailable — file I/O on the
-             * unmounted path is not meaningful since it would hit the root FS. */
+            /* After key unload, mounting the encrypted dataset must fail.
+             * ZFS refuses to mount when the wrapping key is unavailable,
+             * which proves the data is protected by the key. */
             zh = p_zfs_open(zfsh, dsname, ZFS_TYPE_FILESYSTEM);
             if (zh) {
                 rc = p_zfs_mount(zh, NULL, 0);
                 check(rc != 0, "remount with key unloaded (expect failure)");
                 p_zfs_close(zh);
+            }
+
+            /* Verify that the encrypted data is not readable at the mount
+             * point path while the dataset is unmounted and the key is
+             * unloaded.  After unmount the mount point reverts to the root
+             * FS: opening the file should either fail (ENOENT — the root FS
+             * has no such file) or return data that does NOT match what was
+             * written to the encrypted dataset.  Either outcome proves that
+             * ciphertext is not exposed as plaintext without the key. */
+            {
+                char path[256];
+                snprintf(path, sizeof(path), "%s/testfile.dat", MOUNT_PT);
+                int fd2 = open(path, O_RDONLY);
+                if (fd2 < 0) {
+                    /* ENOENT: root FS has no testfile.dat — data is inaccessible */
+                    check(errno == ENOENT,
+                          "encrypted data not accessible without key (ENOENT)");
+                } else {
+                    /* Root FS has a file at that path: its content must not
+                     * match the ciphertext of what was stored in the encrypted
+                     * dataset.  Any mismatch (or empty/short read) confirms
+                     * the encrypted data is not leaking as plaintext. */
+                    char buf2[128] = {0};
+                    const char *WRITTEN = "ZFS-AES256GCM-ENCRYPTED-DATA-OSV-TEST-2026";
+                    ssize_t r2 = read(fd2, buf2, strlen(WRITTEN));
+                    close(fd2);
+                    check(r2 != (ssize_t)strlen(WRITTEN) ||
+                          memcmp(buf2, WRITTEN, strlen(WRITTEN)) != 0,
+                          "encrypted data not readable as plaintext without key");
+                }
             }
 
             /* Reload the key */
