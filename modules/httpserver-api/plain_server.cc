@@ -34,7 +34,7 @@ public:
         callback(ec);
     }
 
-    void async_read_some(boost::asio::mutable_buffers_1 buf,
+    void async_read_some(boost::asio::mutable_buffer buf,
         std::function<void(boost::system::error_code, std::size_t)>&& callback) override
     {
         _socket.async_read_some(buf, std::move(callback));
