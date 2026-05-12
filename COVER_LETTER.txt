@@ -105,6 +105,11 @@ simultaneously without serializing on a single global lock. Completion
 handling creates one thread per queue; the queue-0 thread is interrupt-driven
 and also drains other queues when woken.
 
+A concurrency bug was also fixed in the drain path: the drain-all loop
+(qid==0) and the per-queue poll path (qid>0) were both missing
+_queue_locks[q] around their ring-buffer walk, which could race with request
+completion and corrupt the used-ring index under high queue depth.
+
 7. Pagecache improvements: sequential readahead, periodic writeback, and
    filesystem-signaled writeback API
 
@@ -148,10 +153,21 @@ in the driver source.
 9. Various build and test improvements
 
   - Nix flake updated to replace boost177 with the current Boost.
+    httpserver-api updated for Boost 1.74+/1.78+ API changes (io_context,
+    mutable_buffer, std::isinf). modules/common.gmk now searches for
+    libboost_filesystem.so and accepts a boost_lib_dir override for NixOS
+    where headers and libs live in separate store paths.
+  - NixOS build fixes: libz.so and OpenSSL 3.x discovery via LD_LIBRARY_PATH
+    fallback; manifest_from_host.sh filters lddtree "=> None" lines.
   - Filesystem benchmark (tests/tst-fs-bench.cc) measures sequential and
     random I/O, metadata ops, and mmap throughput across all filesystems.
   - ZFS direct I/O test (tests/tst-zfs-direct-io.cc).
   - ZFS recordsize throughput benchmark (tests/tst-zfs-recordsize.cc).
+  - ZFS database simulation benchmark (tests/tst-zfs-db-sim.cc): simulates
+    a Postgres WAL workload (8 KiB random pages, 750 MiB dataset) across
+    five dataset configurations. Demonstrates that O_DIRECT + primarycache=
+    metadata + lz4 achieves ~1100 txn/s on 128 MiB RAM and ~1450 txn/s on
+    512 MiB, with configurations that would OOM automatically skipped.
   - Shared memory consistency test (tests/tst-shm-consistency.cc).
 
 ---
@@ -163,6 +179,18 @@ Honest assessment of what still needs work:
     appreciate your thoughts on the ARC/pagecache layering (documented in
     core/pagecache.cc) and whether the current "route ZFS through read_cache
     via zfs_vop_cache()" approach is the right long-term design.
+
+  - Several low-level stability fixes were needed to make ZFS run reliably
+    at 128 MiB RAM: (a) virt_to_phys() now walks the page table for VMA-
+    mapped DMA buffers that land below phys_mem rather than asserting, since
+    ZFS malloc_large() buffers fragment physical memory under sustained I/O;
+    (b) kthread stacks were increased from 16 KiB to 256 KiB to prevent ZFS
+    thread overflow; (c) the ARC shrinker is registered inside
+    register_shrinker_arc_funs() (called after arc_init()) rather than in
+    bsd_shrinker_init() which runs before libsolaris.so is loaded; (d) the
+    ARC's arc_default_max() uses a tiered formula capping the cache at 1/8
+    of RAM for 128–256 MiB systems to leave room for the ZIO pipeline.
+    These are documented in the commit messages and in the code.
 
   - The io_uring implementation is complete with respect to the Linux 5.10
     ABI. On OSv there is no real async I/O kernel infrastructure, so all
