@@ -318,19 +318,27 @@ void blk::req_done(int qid)
             virtio_driver::wait_for_queue(myqueue, &vring::used_ring_not_empty);
             trace_virtio_blk_wake();
 
-            /* Drain all queues while we're awake. */
+            /* Drain all queues while we're awake.
+             * Hold each queue's lock so we don't race with the polling
+             * threads (qid > 0) that also call drain_queue on their queue. */
             for (int q = 0; q < _num_queues; q++) {
-                auto* q_ring = get_virt_queue(q);
-                drain_queue(q_ring);
-                q_ring->wakeup_waiter();
+                WITH_LOCK(_queue_locks[q]) {
+                    auto* q_ring = get_virt_queue(q);
+                    drain_queue(q_ring);
+                    q_ring->wakeup_waiter();
+                }
             }
         } else {
-            /* Non-zero queues: poll until something appears, then drain. */
-            if (!drain_queue(myqueue)) {
-                sched::thread::yield();
-            } else {
-                myqueue->wakeup_waiter();
+            /* Non-zero queues: poll, but hold the per-queue lock so we
+             * don't race with qid=0's drain-all loop above. */
+            WITH_LOCK(_queue_locks[qid]) {
+                if (!drain_queue(myqueue)) {
+                    // nothing processed; release lock before yielding
+                } else {
+                    myqueue->wakeup_waiter();
+                }
             }
+            sched::thread::yield();
         }
     }
 }
