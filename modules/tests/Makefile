@@ -110,7 +110,7 @@ rofs-only-tests := rofs/tst-chdir.so rofs/tst-symlink.so rofs/tst-readdir.so \
 
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-recordsize.so tst-zfs-direct-io.so \
-	tst-zfs-encryption.so tst-zfs-crucible-stress.so
+	tst-zfs-encryption.so tst-zfs-crucible-stress.so tst-zfs-db-sim.so
 
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
 
@@ -158,7 +158,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-tls-gold.so tst-tls-pie.so tst-tls-pie-dlopen.so \
 	tst-sigaction.so tst-syscall.so tst-ifaddrs.so tst-getdents.so \
 	tst-netlink.so misc-zfs-io.so misc-zfs-arc.so tst-zfs-recordsize.so tst-zfs-direct-io.so \
-	tst-zfs-encryption.so tst-zfs-crucible-stress.so tst-fs-bench.so tst-pthread-create.so \
+	tst-zfs-encryption.so tst-zfs-crucible-stress.so tst-zfs-db-sim.so tst-fs-bench.so tst-pthread-create.so \
 	misc-futex-perf.so misc-syscall-perf.so tst-brk.so tst-reloc.so \
 	misc-vdso-perf.so tst-string-utils.so tst-elf-circular-reloc.so \
 	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so
