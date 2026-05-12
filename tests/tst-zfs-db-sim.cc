@@ -36,7 +36,7 @@
  *
  * Build  listed in modules/tests/Makefile and modules/zfs-tools/usr.manifest
  * Run    ./scripts/run.py -m 128 --image <zfs-image> -e "/tests/tst-zfs-db-sim.so"
- * Requires ZFS root filesystem (build with fs=zfs fs_size_mb=2048)
+ * Requires ZFS root filesystem (build with fs=zfs fs_size_mb=4096)
  */
 
 #include <chrono>
@@ -532,14 +532,17 @@ int main(void)
         fflush(stdout);
 
         /*
-         * Brief pause between configs to allow ZFS async block freeing to
-         * process a few TXG syncs (2 s each) before the next config starts.
-         * This prevents ENOSPC on the early writes of the next config while
-         * the previous dataset's blocks are still queued for reclamation.
-         * 5 s ≈ 2–3 TXG syncs at txg_timeout=2, which is sufficient.
+         * Pause between configs to allow ZFS async dataset destruction to
+         * complete.  ZFS destroys datasets asynchronously: the DSL destroyer
+         * thread iterates over the dataset's blocks and queues them for
+         * freeing over multiple TXG syncs (txg_timeout=2 s each).  For a
+         * ~340 MiB dataset (~43 000 blocks), full reclamation takes ~10-15
+         * TXG syncs (20-30 s).  Without a sufficient pause, C5 sees ENOSPC
+         * because pool free-space accounting still reflects the previous
+         * config's blocks.  30 s = ~15 TXG syncs at txg_timeout=2.
          */
         if (i + 1 < NCONFIGS)
-            sleep(5);
+            sleep(30);
     }
 
     free(page_buf);

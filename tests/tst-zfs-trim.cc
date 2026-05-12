@@ -19,12 +19,11 @@
  *                 → vdev_disk_io_start() → BIO_DISCARD bio
  *   3. Driver:    virtio-blk make_request(BIO_DISCARD) → VIRTIO_BLK_T_DISCARD
  *
- * NOTE: The OSv vdev_disk.c does not yet handle ZIO_TYPE_TRIM in
- * vdev_disk_io_start() — only ZIO_TYPE_FLUSH, ZIO_TYPE_READ, and
- * ZIO_TYPE_WRITE are implemented.  When a TRIM zio reaches the vdev layer,
- * it will be completed with an error or silently succeed depending on how
- * the ZFS pipeline handles the missing op.  This test reports SKIP rather
- * than FAIL in that case so CI is not broken while the feature is pending.
+ * NOTE: OSv vdev_disk.c handles ZIO_TYPE_TRIM by issuing BIO_DISCARD to
+ * the virtio-blk driver.  If the hypervisor virtio-blk was not started with
+ * discard support (e.g. QEMU without discard=unmap), the driver returns
+ * ENOTSUP and ZFS marks the pool as trim-unsupported.  This test reports
+ * SKIP in that case, not FAIL.
  *
  * Test sequence:
  *   1. Load libzfs.so / libzfs_core.so via dlopen.
@@ -77,25 +76,33 @@ typedef void             (*fn_zpool_close)(zpool_handle_t *);
 typedef int              (*fn_zfs_create)(libzfs_handle_t *, const char *,
                                           int, nvlist_t *);
 typedef zfs_handle_t *   (*fn_zfs_open)(libzfs_handle_t *, const char *, int);
-typedef int              (*fn_zfs_prop_set)(zfs_handle_t *, const char *,
-                                            const char *);
+typedef int              (*fn_zfs_mount)(zfs_handle_t *, const char *, int);
 typedef int              (*fn_zfs_destroy)(zfs_handle_t *, int);
 typedef void             (*fn_zfs_close)(zfs_handle_t *);
+
+/* nvlist symbols (from libnvpair, loaded transitively via libzfs) */
+typedef nvlist_t *(*fn_fnvlist_alloc)(void);
+typedef void      (*fn_fnvlist_free)(nvlist_t *);
+typedef void      (*fn_fnvlist_add_string)(nvlist_t *, const char *,
+                                           const char *);
 
 /* libzfs_core symbols */
 typedef int (*fn_lzc_trim)(const char *, pool_trim_func_t, uint64_t,
                            int /*boolean_t*/, nvlist_t *, nvlist_t **);
 
-static fn_libzfs_init  p_libzfs_init;
-static fn_libzfs_fini  p_libzfs_fini;
-static fn_zpool_open   p_zpool_open;
-static fn_zpool_close  p_zpool_close;
-static fn_zfs_create   p_zfs_create;
-static fn_zfs_open     p_zfs_open;
-static fn_zfs_prop_set p_zfs_prop_set;
-static fn_zfs_destroy  p_zfs_destroy;
-static fn_zfs_close    p_zfs_close;
-static fn_lzc_trim     p_lzc_trim;
+static fn_libzfs_init    p_libzfs_init;
+static fn_libzfs_fini    p_libzfs_fini;
+static fn_zpool_open     p_zpool_open;
+static fn_zpool_close    p_zpool_close;
+static fn_zfs_create     p_zfs_create;
+static fn_zfs_open       p_zfs_open;
+static fn_zfs_mount      p_zfs_mount;
+static fn_zfs_destroy    p_zfs_destroy;
+static fn_zfs_close      p_zfs_close;
+static fn_fnvlist_alloc  p_fnvlist_alloc;
+static fn_fnvlist_free   p_fnvlist_free;
+static fn_fnvlist_add_string p_fnvlist_add_string;
+static fn_lzc_trim       p_lzc_trim;
 
 static bool load_libzfs(void)
 {
@@ -122,9 +129,13 @@ static bool load_libzfs(void)
     L(h,  zpool_close)
     L(h,  zfs_create)
     L(h,  zfs_open)
-    L(h,  zfs_prop_set)
+    L(h,  zfs_mount)
     L(h,  zfs_destroy)
     L(h,  zfs_close)
+    /* fnvlist_* live in libnvpair.so (loaded transitively via RTLD_GLOBAL) */
+    L(RTLD_DEFAULT, fnvlist_alloc)
+    L(RTLD_DEFAULT, fnvlist_free)
+    L(RTLD_DEFAULT, fnvlist_add_string)
     L(hc, lzc_trim)
 #undef L
     return true;
@@ -162,16 +173,22 @@ static const char *detect_pool(libzfs_handle_t *zfsh)
 static int create_dataset(libzfs_handle_t *zfsh, const char *name,
                            const char *mountpoint)
 {
-    int rc = p_zfs_create(zfsh, name, ZFS_TYPE_FILESYSTEM, nullptr);
+    /* Build a props nvlist with the mountpoint so ZFS mounts it correctly. */
+    nvlist_t *props = p_fnvlist_alloc();
+    if (mountpoint)
+        p_fnvlist_add_string(props, "mountpoint", mountpoint);
+
+    int rc = p_zfs_create(zfsh, name, ZFS_TYPE_FILESYSTEM, props);
+    p_fnvlist_free(props);
     if (rc != 0)
         return rc;
+
     zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
     if (!zh)
         return -1;
-    if (mountpoint)
-        p_zfs_prop_set(zh, "mountpoint", mountpoint);
+    rc = p_zfs_mount(zh, nullptr, 0);
     p_zfs_close(zh);
-    return 0;
+    return rc;
 }
 
 static void destroy_dataset(libzfs_handle_t *zfsh, const char *name)
@@ -264,20 +281,26 @@ static void test_trim_start_cancel(const char *pool_name)
     /*
      * rate=0 means "use the default trim rate".
      * secure=0 (B_FALSE) means normal (non-secure) TRIM.
-     * vdevs=NULL means trim all vdevs in the pool.
+     * vdevs: an empty nvlist means trim all vdevs in the pool.
+     * NOTE: lzc_trim() calls fnvlist_add_nvlist(args, ZPOOL_TRIM_VDEVS, vdevs)
+     *       which panics if vdevs is NULL — always pass an empty nvlist.
      */
+    nvlist_t *vdevs = p_fnvlist_alloc();   /* empty = all vdevs */
     nvlist_t *errlist = nullptr;
     int rc = p_lzc_trim(pool_name, POOL_TRIM_START,
                         /*rate=*/0, /*secure=*/0,
-                        /*vdevs=*/nullptr, &errlist);
+                        vdevs, &errlist);
+    p_fnvlist_free(vdevs);
 
     if (rc == 0) {
         PASS("lzc_trim(POOL_TRIM_START) succeeded on pool %s", pool_name);
 
         /* Cancel the trim so we do not leave it running indefinitely. */
         printf("\n[Test 3] lzc_trim(POOL_TRIM_CANCEL)\n");
+        nvlist_t *vdevs_cancel = p_fnvlist_alloc();
         rc = p_lzc_trim(pool_name, POOL_TRIM_CANCEL,
-                        0, 0, nullptr, &errlist);
+                        0, 0, vdevs_cancel, &errlist);
+        p_fnvlist_free(vdevs_cancel);
         if (rc == 0) {
             PASS("lzc_trim(POOL_TRIM_CANCEL) succeeded");
         } else {
@@ -298,8 +321,8 @@ static void test_trim_start_cancel(const char *pool_name)
          * (no --discard=on flag passed to QEMU).
          */
         SKIP("lzc_trim returned %d (%s) — TRIM not supported on this vdev "
-             "(ZIO_TYPE_TRIM not handled in vdev_disk.c, or hypervisor "
-             "virtio-blk started without discard support)",
+             "(hypervisor virtio-blk not started with discard support, "
+             "e.g. QEMU discard=unmap)",
              rc, strerror(rc));
     } else if (rc == EBUSY) {
         /*
@@ -328,9 +351,8 @@ int main(void)
     printf("  lzc_trim() -> ZFS_IOC_POOL_TRIM -> vdev_trim.c\n");
     printf("  -> zio_trim() [ZIO_TYPE_TRIM] -> vdev_disk_io_start()\n");
     printf("  -> bio(BIO_DISCARD) -> virtio-blk VIRTIO_BLK_T_DISCARD\n\n");
-    printf("NOTE: OSv vdev_disk.c does not yet handle ZIO_TYPE_TRIM;\n");
-    printf("      lzc_trim() returning EOPNOTSUPP/ENOTSUP is a SKIP,\n");
-    printf("      not a FAIL.\n\n");
+    printf("NOTE: SKIP means virtio-blk discard is not enabled in the hypervisor;\n");
+    printf("      lzc_trim() returning EOPNOTSUPP/ENOTSUP is a SKIP, not a FAIL.\n\n");
 
     if (!load_libzfs())
         return 1;
@@ -368,11 +390,9 @@ int main(void)
     printf(" ===\n");
 
     if (tests_skipped > 0 && tests_skipped == tests_run - tests_passed) {
-        printf("\nNOTE: TRIM support requires:\n");
-        printf("  1. ZIO_TYPE_TRIM handling in vdev_disk_io_start() "
-               "(not yet implemented)\n");
-        printf("  2. Hypervisor virtio-blk with discard enabled "
-               "(QEMU: --discard=on)\n");
+        printf("\nNOTE: TRIM SKIP means the hypervisor virtio-blk device\n");
+        printf("  was not started with discard support enabled.\n");
+        printf("  Enable with QEMU drive option: discard=unmap\n");
     }
 
     p_libzfs_fini(zfsh);
