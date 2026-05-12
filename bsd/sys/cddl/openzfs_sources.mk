@@ -289,11 +289,20 @@ openzfs-zstd += $(OPENZFS)/module/zstd/zfs_zstd.o
 openzfs-zstd += $(OPENZFS)/module/zstd/zstd-in.o
 
 # ============================================================
-# ZIO crypto (temporarily disabled - requires OSv crypto layer implementation)
+# ZIO crypto
+#
+# The core ZFS encryption implementation lives in zio_crypt_impl.c, which
+# is an OSv-adapted copy of module/os/linux/zfs/zio_crypt.c compiled as
+# part of openzfs-osv (see below).  It uses the ICP (module/icp/) for
+# AES-256-GCM and SHA-512 HMAC — the same crypto provider already compiled
+# for ZFS checksumming.  There is no separate platform-independent
+# module/zfs/zio_crypt.c to compile: zio_crypt_impl.c covers both the
+# OS-specific wrappers and the algorithm logic in one file.
+#
+# module/os/osv/zfs/zio_crypt_os.c contains superseded ENOTSUP stubs kept
+# only as documentation; it must NOT be added here.
 # ============================================================
 openzfs-crypt :=
-# openzfs-crypt += $(OPENZFS)/module/os/freebsd/zfs/zio_crypt.o
-# openzfs-crypt += $(OPENZFS)/module/os/freebsd/zfs/crypto_os.o
 
 # ============================================================
 # OSv-specific ZFS code (from module/os/osv/zfs/)
