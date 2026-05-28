@@ -86,9 +86,18 @@ static const char *detect_pool(libzfs_handle_t *zfsh)
     return nullptr;
 }
 
+static void destroy_dataset(libzfs_handle_t *zfsh, const char *name)
+{
+    zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
+    if (zh) { p_zfs_destroy(zh, /*defer=*/0); p_zfs_close(zh); }
+}
+
 static int create_dataset(libzfs_handle_t *zfsh, const char *name,
                            const char *mountpoint)
 {
+    /* Idempotent: tear down any leftover from a previous run. */
+    destroy_dataset(zfsh, name);
+
     int rc = p_zfs_create(zfsh, name, ZFS_TYPE_FILESYSTEM, nullptr);
     if (rc != 0)
         return rc;
@@ -99,12 +108,6 @@ static int create_dataset(libzfs_handle_t *zfsh, const char *name,
         p_zfs_prop_set(zh, "mountpoint", mountpoint);
     p_zfs_close(zh);
     return 0;
-}
-
-static void destroy_dataset(libzfs_handle_t *zfsh, const char *name)
-{
-    zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
-    if (zh) { p_zfs_destroy(zh, /*defer=*/0); p_zfs_close(zh); }
 }
 
 /* O_DIRECT must be aligned to 512 bytes for most block devices. */

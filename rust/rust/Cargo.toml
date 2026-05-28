@@ -1,7 +1,0 @@
-[workspace]
-resolver = "2"
-members = []
-
-[workspace.package]
-edition = "2021"
-license = "BSD-3-Clause"

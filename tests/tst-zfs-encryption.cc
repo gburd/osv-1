@@ -258,6 +258,19 @@ int main()
     char dsname[256];
     snprintf(dsname, sizeof(dsname), "%s/enc-test", pool);
 
+    /*
+     * Idempotent: tear down any leftover dataset from a prior run on the
+     * same image so zfs_create() does not see EEXIST.
+     */
+    {
+        zfs_handle_t *stale = p_zfs_open(zfsh, dsname, ZFS_TYPE_FILESYSTEM);
+        if (stale) {
+            p_zfs_unmount(stale, nullptr, 0);
+            p_zfs_destroy(stale, /*defer=*/0);
+            p_zfs_close(stale);
+        }
+    }
+
     nvlist_t *props = nullptr;
     char keyloc[256];
 

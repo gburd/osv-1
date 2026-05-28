@@ -170,9 +170,24 @@ static const char *detect_pool(libzfs_handle_t *zfsh)
     return nullptr;
 }
 
+static void destroy_dataset(libzfs_handle_t *zfsh, const char *name)
+{
+    zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
+    if (zh) { p_zfs_destroy(zh, /*defer=*/0); p_zfs_close(zh); }
+}
+
 static int create_dataset(libzfs_handle_t *zfsh, const char *name,
                            const char *mountpoint)
 {
+    /*
+     * Defensive cleanup: if a previous test run on the same image left a
+     * dataset with this name, the create call below would fail with EEXIST
+     * (or, surprisingly, ENOENT on some ZFS code paths when the mountpoint
+     * directory is stale).  Destroy any leftover first so the test is
+     * idempotent across runs of the same image.
+     */
+    destroy_dataset(zfsh, name);
+
     /* Build a props nvlist with the mountpoint so ZFS mounts it correctly. */
     nvlist_t *props = p_fnvlist_alloc();
     if (mountpoint)
@@ -189,12 +204,6 @@ static int create_dataset(libzfs_handle_t *zfsh, const char *name,
     rc = p_zfs_mount(zh, nullptr, 0);
     p_zfs_close(zh);
     return rc;
-}
-
-static void destroy_dataset(libzfs_handle_t *zfsh, const char *name)
-{
-    zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
-    if (zh) { p_zfs_destroy(zh, /*defer=*/0); p_zfs_close(zh); }
 }
 
 /*
