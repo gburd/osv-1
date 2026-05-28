@@ -11,8 +11,6 @@
 #include <vector>
 #include <errno.h>
 
-static std::atomic<unsigned int> next_queue_idx{0};
-
 int blk_mq_init_tag_set(struct blk_mq_tag_set* set)
 {
     if (!set || !set->ops || set->nr_hw_queues == 0) {
