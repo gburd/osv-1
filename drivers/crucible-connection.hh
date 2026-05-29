@@ -11,6 +11,7 @@
 
 #include <string>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <cstdint>
 #include <system_error>
@@ -23,7 +24,14 @@ namespace crucible {
  * Handles low-level TCP socket operations including connection establishment,
  * send/receive, and connection management.
  *
- * Thread-safety: Not thread-safe. External synchronization required.
+ * Thread-safety: send_exact() and recv_exact() each take an internal
+ * mutex that serialises calls on a single Connection.  This is necessary
+ * because the Crucible wire protocol frames a single message+inline-data
+ * across one or more send() syscalls, and OSv's block layer issues I/O
+ * from many threads concurrently; without per-direction locks the
+ * downstairs sees interleaved bytes and disconnects.  Send and receive
+ * use independent mutexes so a long send cannot block the I/O thread
+ * from draining responses.
  */
 class Connection {
 public:
@@ -65,6 +73,23 @@ public:
      * @throws ConnectionError on send failure or EOF
      */
     void send_exact(const void* buf, size_t len);
+
+    /**
+     * Send a header buffer immediately followed by a separate data
+     * buffer as a single atomic message on the socket.  Used for
+     * Crucible Write/WriteUnwritten frames where the header carries a
+     * u64 length prefix and the data must immediately follow it on the
+     * wire without any other thread's bytes getting in between.
+     *
+     * @param header  Header buffer (frame prefix + bincode-encoded
+     *                Message header + u64 data length)
+     * @param hlen    Length of header buffer
+     * @param data    Bulk data buffer
+     * @param dlen    Length of bulk data
+     * @throws ConnectionError on send failure or EOF
+     */
+    void send_exact_with_data(const void* header, size_t hlen,
+                              const void* data, size_t dlen);
 
     /**
      * Receive data from the connection.
@@ -119,10 +144,23 @@ public:
     int fd() const { return fd_; }
 
 private:
+    /* Loop until len bytes are sent.  Caller must hold send_lock_. */
+    void send_all_locked(const void* buf, size_t len);
+
     int fd_{-1};
     std::string host_;
     uint16_t port_;
     bool connected_{false};
+
+    /*
+     * Serialise concurrent send / recv calls.  send_lock_ ensures one
+     * thread's header+data pair reaches the wire as a contiguous frame;
+     * recv_lock_ ensures the I/O thread reading responses sees one
+     * complete frame at a time.  They're independent so a slow send
+     * does not block response processing.
+     */
+    mutable std::mutex send_lock_;
+    mutable std::mutex recv_lock_;
 };
 
 /**

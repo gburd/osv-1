@@ -138,6 +138,8 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-concurrent-init.so tst-ring-spsc-wraparound.so tst-shm.so tst-shm-consistency.so \
 	tst-zfs-multirec.so \
 	tst-io_uring.so \
+	tst-crucible-blk.so \
+	tst-crucible-zfs.so \
 	tst-align.so tst-cxxlocale.so misc-tcp-close-without-reading.so \
 	tst-sigwait.so tst-sampler.so misc-malloc.so misc-memcpy.so \
 	misc-free-perf.so misc-printf.so tst-hostname.so \

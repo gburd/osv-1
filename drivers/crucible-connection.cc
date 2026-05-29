@@ -208,7 +208,9 @@ ssize_t Connection::recv(void* buf, size_t len)
     return received;
 }
 
-void Connection::send_exact(const void* buf, size_t len)
+/* Caller must hold send_lock_.  Same bytes-out-the-door loop as
+ * send_exact() but without re-acquiring the mutex. */
+void Connection::send_all_locked(const void* buf, size_t len)
 {
     size_t total_sent = 0;
     const uint8_t* ptr = static_cast<const uint8_t*>(buf);
@@ -222,8 +224,37 @@ void Connection::send_exact(const void* buf, size_t len)
     }
 }
 
+void Connection::send_exact(const void* buf, size_t len)
+{
+    /*
+     * Serialise concurrent senders.  Multiple OSv block-layer threads
+     * may submit Writes simultaneously; without this lock their
+     * header and data bytes can interleave on the socket and the
+     * downstairs disconnects with "bytes remaining on stream".
+     */
+    std::lock_guard<std::mutex> guard(send_lock_);
+    send_all_locked(buf, len);
+}
+
+void Connection::send_exact_with_data(const void* header, size_t hlen,
+                                      const void* data, size_t dlen)
+{
+    /*
+     * Holding the lock across BOTH the header and the data sends is
+     * what makes this atomic against concurrent senders -- a Crucible
+     * Write frame is one logical unit on the wire even though it is
+     * physically split between the bincode header (with the data
+     * length prefix) and the data bytes themselves.
+     */
+    std::lock_guard<std::mutex> guard(send_lock_);
+    send_all_locked(header, hlen);
+    send_all_locked(data, dlen);
+}
+
 void Connection::recv_exact(void* buf, size_t len)
 {
+    std::lock_guard<std::mutex> guard(recv_lock_);
+
     size_t total_received = 0;
     uint8_t* ptr = static_cast<uint8_t*>(buf);
 

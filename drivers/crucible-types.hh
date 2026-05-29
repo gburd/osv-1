@@ -236,11 +236,14 @@ struct Result<void> {
  * Region definition information.
  */
 struct RegionDefinition {
-    uint32_t block_size;        // Bytes per block (e.g., 512, 4096)
-    uint64_t extent_size;       // Blocks per extent
-    Uuid uuid;                  // Region UUID
-    bool encrypted;             // Encryption enabled
-    uint64_t extent_count;      // Number of extents
+    uint64_t block_size;            // Bytes per block (e.g., 512, 4096)
+    uint64_t extent_size;           // Blocks per extent (Block.value)
+    uint32_t extent_size_shift;     // Block.shift: log2(block_size)
+    uint32_t extent_count;          // Number of extents (u32 upstream)
+    Uuid uuid;                      // Region UUID
+    bool encrypted;                 // Encryption enabled
+    uint64_t database_read_version;
+    uint64_t database_write_version;
 };
 
 /**

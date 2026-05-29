@@ -89,7 +89,13 @@ public:
 
     // Crucible types
 
+    /*
+     * Encode a UUID as Rust serde does: serializer.serialize_bytes(&[u8;16]),
+     * which under bincode's standard config writes a u64 little-endian length
+     * prefix (=16) followed by the 16 raw bytes.
+     */
     void encode_uuid(const Uuid& uuid) {
+        encode_u64(16);
         buffer_.insert(buffer_.end(), uuid.bytes, uuid.bytes + 16);
     }
 
@@ -118,15 +124,19 @@ public:
         }
     }
 
-    // Result<T, E>
+    /*
+     * Result<T, E> in bincode 1.x is a regular enum: u32 LE variant tag
+     * (0 = Ok, 1 = Err) followed by the inner value.  Note this is
+     * different from Option, which uses a u8 tag.
+     */
     template<typename T, typename EncodeOkFunc, typename EncodeErrFunc>
     void encode_result(const Result<T>& result, EncodeOkFunc encode_ok,
                        EncodeErrFunc encode_err) {
         if (result.is_ok) {
-            encode_u8(0);  // Ok
+            encode_u32(0);  // Ok
             encode_ok(result.value);
         } else {
-            encode_u8(1);  // Err
+            encode_u32(1);  // Err
             encode_err(result.error);
         }
     }
@@ -137,8 +147,19 @@ public:
         buffer_.insert(buffer_.end(), str.begin(), str.end());
     }
 
-    // Raw bytes
+    // Raw bytes — append without prefix.  Used internally by encoders that
+    // already wrote a length prefix themselves.
     void encode_bytes(const void* data, size_t len) {
+        const uint8_t* bytes = static_cast<const uint8_t*>(data);
+        buffer_.insert(buffer_.end(), bytes, bytes + len);
+    }
+
+    /*
+     * Bincode 1.x wire format for `bytes::Bytes`, `Vec<u8>`, and `&[u8]`:
+     * a u64 little-endian length followed by the raw bytes.
+     */
+    void encode_byte_slice(const void* data, size_t len) {
+        encode_u64(len);
         const uint8_t* bytes = static_cast<const uint8_t*>(data);
         buffer_.insert(buffer_.end(), bytes, bytes + len);
     }
@@ -223,7 +244,15 @@ public:
 
     // Crucible types
 
+    /*
+     * Decode a UUID written by bincode's serialize_bytes: a u64 length
+     * prefix (must be 16) followed by 16 raw bytes.
+     */
     Uuid decode_uuid() {
+        uint64_t len = decode_u64();
+        if (len != 16) {
+            throw std::runtime_error("Decode error: UUID byte-length is not 16");
+        }
         if (pos_ + 16 > data_.size()) {
             throw std::runtime_error("Decode error: not enough data for UUID");
         }
@@ -281,7 +310,7 @@ public:
         return str;
     }
 
-    // Raw bytes
+    // Raw bytes (caller already knows the length).
     std::vector<uint8_t> decode_bytes(size_t len) {
         if (pos_ + len > data_.size()) {
             throw std::runtime_error("Decode error: not enough data for bytes");
@@ -289,6 +318,15 @@ public:
         std::vector<uint8_t> bytes(data_.begin() + pos_, data_.begin() + pos_ + len);
         pos_ += len;
         return bytes;
+    }
+
+    /*
+     * Read the u64 length prefix only, leaving the bytes themselves in the
+     * stream.  Used when the bytes are large and we want to read them
+     * directly into a caller-supplied buffer without copying.
+     */
+    uint64_t decode_byte_slice_length() {
+        return decode_u64();
     }
 
     // Skip bytes

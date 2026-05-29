@@ -113,10 +113,11 @@ void UpsairsClient::connect()
             connections_[i].reset(new Connection(host, port));
             connected_count_++;
 
-            kprintf("[Crucible] Connected to downstairs %zu: %s:%u\n\n", i, host.c_str(), port);
-
+            kprintf("[Crucible] connected to downstairs %zu (%s:%u)\n",
+                    i, host.c_str(), port);
         } catch (const std::exception& e) {
-            kprintf("[Crucible] Failed to connect to downstairs %zu (%s): %s\n\n", i, targets_[i].c_str(), e.what());
+            kprintf("[Crucible] connect to downstairs %zu (%s) failed: %s\n",
+                    i, targets_[i].c_str(), e.what());
         }
     }
 
@@ -150,7 +151,8 @@ void UpsairsClient::connect()
     io_thread_ = sched::thread::make([this] { this->io_loop(); });
     io_thread_->start();
 
-    kprintf("[Crucible] Upstairs client connected (%d/3 downstairs)\n", connected_count_.load());
+    kprintf("[Crucible] upstairs ready (%d/3 downstairs)\n",
+            connected_count_.load());
 }
 
 void UpsairsClient::disconnect()
@@ -222,30 +224,35 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
     // Encode message
     auto frame = encode_message(read_msg);
 
-    // Send to all connected downstairs
+    /*
+     * Submit to all connected downstairs.  Reads need only 2-of-3
+     * responses (set in PendingRequest's required_quorum); we still
+     * send to all three so the third can serve as a tiebreaker on
+     * checksum mismatch.
+     */
     int sent_count = 0;
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
                 connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
-                kprintf("[Crucible] Sent read job_id=%lu to downstairs %zu\n", job_id, i);
             } catch (const std::exception& e) {
-                kprintf("[Crucible] Failed to send read to downstairs %zu: %s\n", i, e.what());
+                kprintf("[Crucible] read job_id=%lu: send to downstairs %zu failed: %s\n",
+                        job_id, i, e.what());
             }
         }
     }
 
     if (sent_count < 2) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Failed to send read to quorum\n");
+        kprintf("[Crucible] read job_id=%lu: only %d of 3 downstairs reachable\n",
+                job_id, sent_count);
         return EIO;
     }
 
-    // Wait for quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Read job_id=%lu failed to reach quorum\n", job_id);
+        kprintf("[Crucible] read job_id=%lu: quorum not reached\n", job_id);
         return EIO;
     }
 
@@ -274,28 +281,31 @@ int UpsairsClient::read_sync(uint64_t offset, uint32_t length, void* buffer)
         return EIO;
     }
 
-    // Verify hashes for each block
+    /*
+     * Per-block hash verification.  If a downstairs returned data with
+     * an integrity hash mismatch, we have either a bug or storage
+     * corruption -- log it and fail the read.  An Empty (no-context)
+     * block was never written so the data is whatever was in the extent
+     * file (zeros for a fresh region); we accept it without hashing.
+     */
     for (uint64_t i = 0; i < block_count; i++) {
         const auto& ctx = contexts[i];
-
-        // For unencrypted blocks, verify hash
         if (ctx.type == ReadBlockType::Unencrypted) {
-            uint64_t computed_hash = xxhash64_block(data.data() + i * block_size_, block_size_);
+            uint64_t computed_hash = xxhash64_block(
+                data.data() + i * block_size_, block_size_);
             if (computed_hash != ctx.hash) {
                 request_mgr_.remove_request(job_id);
-                kprintf("[Crucible] Read job_id=%lu: hash mismatch at block %lu\n", job_id, i);
+                kprintf("[Crucible] Read job_id=%lu: hash mismatch at block %lu "
+                        "(start_block=%lu, count=%lu, expected=0x%016lx, got=0x%016lx)\n",
+                        job_id, i, start_block, block_count,
+                        ctx.hash, computed_hash);
                 return EIO;
             }
         }
     }
 
-    // Copy verified data to buffer
     std::memcpy(data_ptr, data.data(), length);
-
-    // Remove request
     request_mgr_.remove_request(job_id);
-
-    kprintf("[Crucible] Read job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -340,52 +350,59 @@ int UpsairsClient::write_sync(uint64_t offset, uint32_t length, const void* buff
         contexts.push_back(ctx);
     }
 
-    // Build Write message
+    /*
+     * Build the Write message header.  The frame is encoded as:
+     *   [u32 LE total_len][header bytes][u64 LE data_len=length][data]
+     * The header through the u64 data length prefix is produced by
+     * encode_message_with_data_header(); we then send the actual block
+     * data immediately afterwards on the same socket.
+     */
     Write write_msg;
     write_msg.upstairs_id = upstairs_id_;
     write_msg.session_id = session_id_;
     write_msg.job_id = job_id;
-    write_msg.dependencies = {};  // No dependencies for now
+    write_msg.dependencies = {};  // OSv driver does not pipeline writes today
     write_msg.start_block = start_block;
     write_msg.contexts = std::move(contexts);
 
-    // Encode message
-    auto frame = encode_message(write_msg);
+    auto header_frame = encode_message_with_data_header(write_msg, length);
 
-    // Append data blocks to frame
-    frame.insert(frame.end(), data_ptr, data_ptr + length);
-
-    // Send to all connected downstairs
+    /*
+     * send_exact_with_data() takes the per-connection send mutex
+     * across BOTH halves so the header and data reach the wire as one
+     * atomic frame.  Without this lock, ZFS's TXG sync issues many
+     * concurrent Writes and the bytes interleave on the socket,
+     * triggering "bytes remaining on stream" / immediate disconnect.
+     */
     int sent_count = 0;
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
-                connections_[i]->send_exact(frame.data(), frame.size());
+                connections_[i]->send_exact_with_data(
+                    header_frame.data(), header_frame.size(),
+                    data_ptr, length);
                 sent_count++;
-                kprintf("[Crucible] Sent write job_id=%lu to downstairs %zu\n", job_id, i);
             } catch (const std::exception& e) {
-                kprintf("[Crucible] Failed to send write to downstairs %zu: %s\n", i, e.what());
+                kprintf("[Crucible] write job_id=%lu: send to downstairs %zu failed: %s\n",
+                        job_id, i, e.what());
             }
         }
     }
 
     if (sent_count < 2) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Failed to send write to quorum\n");
+        kprintf("[Crucible] write job_id=%lu: only %d of 3 downstairs reachable\n",
+                job_id, sent_count);
         return EIO;
     }
 
-    // Wait for quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Write job_id=%lu failed to reach quorum\n", job_id);
+        kprintf("[Crucible] write job_id=%lu: quorum not reached\n", job_id);
         return EIO;
     }
 
-    // Remove request
     request_mgr_.remove_request(job_id);
-
-    kprintf("[Crucible] Write job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -413,47 +430,46 @@ int UpsairsClient::flush_sync()
     flush_msg.upstairs_id = upstairs_id_;
     flush_msg.session_id = session_id_;
     flush_msg.job_id = job_id;
-    flush_msg.dependencies = {};  // No dependencies for now
+    flush_msg.dependencies = {};
     flush_msg.flush_number = flush_number_;
     flush_msg.gen_number = generation_;
-    flush_msg.snapshot_details = nullopt;  // No snapshot
-    flush_msg.extent_limit = region_def_.extent_count;
+    /*
+     * No snapshot, no per-extent flush limit: both fields are encoded as
+     * None (single 0 byte each).  Setting extent_limit to extent_count
+     * was a leftover that the upstream protocol does not expect.
+     */
+    flush_msg.snapshot_name = nullopt;
+    flush_msg.extent_limit = nullopt;
 
-    // Encode message
     auto frame = encode_message(flush_msg);
 
-    // Send to all connected downstairs
     int sent_count = 0;
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
                 connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
-                kprintf("[Crucible] Sent flush job_id=%lu flush_num=%lu to downstairs %zu\n",
-                      job_id, flush_number_, i);
             } catch (const std::exception& e) {
-                kprintf("[Crucible] Failed to send flush to downstairs %zu: %s\n", i, e.what());
+                kprintf("[Crucible] flush job_id=%lu: send to downstairs %zu failed: %s\n",
+                        job_id, i, e.what());
             }
         }
     }
 
     if (sent_count < 2) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Failed to send flush to quorum\n");
+        kprintf("[Crucible] flush job_id=%lu: only %d of 3 downstairs reachable\n",
+                job_id, sent_count);
         return EIO;
     }
 
-    // Wait for quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Flush job_id=%lu failed to reach quorum\n", job_id);
+        kprintf("[Crucible] flush job_id=%lu: quorum not reached\n", job_id);
         return EIO;
     }
 
-    // Remove request
     request_mgr_.remove_request(job_id);
-
-    kprintf("[Crucible] Flush job_id=%lu completed successfully\n", job_id);
     return 0;
 }
 
@@ -483,7 +499,14 @@ int UpsairsClient::create_snapshot(uint64_t snapshot_id)
     // Create pending request (requires 3/3 acknowledgments)
     auto req = request_mgr_.create_request(job_id, 3);
 
-    // Build Flush message with snapshot details
+    /*
+     * Build a snapshot Flush.  The snapshot ID is stringified into
+     * SnapshotDetails.snapshot_name, which is what upstream Crucible
+     * accepts.  No per-extent limit.
+     */
+    char snapname[32];
+    snprintf(snapname, sizeof(snapname), "%lu", (unsigned long)snapshot_id);
+
     Flush flush_msg;
     flush_msg.upstairs_id = upstairs_id_;
     flush_msg.session_id = session_id_;
@@ -491,121 +514,57 @@ int UpsairsClient::create_snapshot(uint64_t snapshot_id)
     flush_msg.dependencies = {};
     flush_msg.flush_number = flush_number_;
     flush_msg.gen_number = generation_;
-    flush_msg.snapshot_details = snapshot_id;  // Set snapshot ID
-    flush_msg.extent_limit = region_def_.extent_count;
+    flush_msg.snapshot_name = std::string(snapname);
+    flush_msg.extent_limit = nullopt;
 
-    // Encode message
     auto frame = encode_message(flush_msg);
 
-    // Send to ALL downstairs (3/3 required for snapshots)
+    /*
+     * Snapshots require 3/3 acknowledgement (not 2/3): a downstairs
+     * that doesn't see the snapshot Flush would silently miss the
+     * point-in-time the user asked us to capture.
+     */
     int sent_count = 0;
     for (size_t i = 0; i < 3; i++) {
         if (connections_[i] && connections_[i]->is_connected()) {
             try {
                 connections_[i]->send_exact(frame.data(), frame.size());
                 sent_count++;
-                kprintf("[Crucible] Sent snapshot flush job_id=%lu snap_id=%lu to downstairs %zu\n",
-                      job_id, snapshot_id, i);
             } catch (const std::exception& e) {
-                kprintf("[Crucible] Failed to send snapshot flush to downstairs %zu: %s\n",
-                        i, e.what());
+                kprintf("[Crucible] snapshot %lu: send to downstairs %zu failed: %s\n",
+                        snapshot_id, i, e.what());
             }
         }
     }
 
     if (sent_count < 3) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Failed to send snapshot flush to all 3 downstairs (sent to %d)\n",
-                sent_count);
+        kprintf("[Crucible] snapshot %lu: only %d of 3 downstairs reachable\n",
+                snapshot_id, sent_count);
         return EIO;
     }
 
-    // Wait for 3/3 quorum
     if (!req->wait_for_quorum()) {
         request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Snapshot job_id=%lu snap_id=%lu failed to reach 3/3 quorum\n",
-                job_id, snapshot_id);
+        kprintf("[Crucible] snapshot %lu: 3/3 quorum not reached\n", snapshot_id);
         return EIO;
     }
 
-    // Remove request
     request_mgr_.remove_request(job_id);
-
-    kprintf("[Crucible] Snapshot job_id=%lu snap_id=%lu completed successfully (3/3)\n",
-            job_id, snapshot_id);
     return 0;
 }
 
 int UpsairsClient::discard_sync(uint64_t offset, uint64_t length)
 {
-    if (!is_connected()) {
-        return EIO;
-    }
-
-    if (read_only_) {
-        return EROFS;
-    }
-
-    // Validate parameters
-    if (offset + length > total_size()) {
-        return EINVAL;
-    }
-
-    if (length % block_size_ != 0 || offset % block_size_ != 0) {
-        return EINVAL;
-    }
-
-    // Allocate job ID
-    uint64_t job_id = job_allocator_.allocate();
-
-    // Create pending request
-    auto req = request_mgr_.create_request(job_id);
-
-    // Build Discard message
-    Discard discard_msg;
-    discard_msg.upstairs_id = upstairs_id_;
-    discard_msg.session_id = session_id_;
-    discard_msg.job_id = job_id;
-    discard_msg.dependencies = {};
-    discard_msg.offset = offset;
-    discard_msg.length = length;
-
-    // Encode message
-    auto frame = encode_message(discard_msg);
-
-    // Send to all connected downstairs
-    int sent_count = 0;
-    for (size_t i = 0; i < 3; i++) {
-        if (connections_[i] && connections_[i]->is_connected()) {
-            try {
-                connections_[i]->send_exact(frame.data(), frame.size());
-                sent_count++;
-                kprintf("[Crucible] Sent discard job_id=%lu offset=%lu length=%lu to downstairs %zu\n",
-                      job_id, offset, length, i);
-            } catch (const std::exception& e) {
-                kprintf("[Crucible] Failed to send discard to downstairs %zu: %s\n", i, e.what());
-            }
-        }
-    }
-
-    if (sent_count < 2) {
-        request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Failed to send discard to quorum\n");
-        return EIO;
-    }
-
-    // Wait for quorum
-    if (!req->wait_for_quorum()) {
-        request_mgr_.remove_request(job_id);
-        kprintf("[Crucible] Discard job_id=%lu failed to reach quorum\n", job_id);
-        return EIO;
-    }
-
-    // Remove request
-    request_mgr_.remove_request(job_id);
-
-    kprintf("[Crucible] Discard job_id=%lu completed successfully\n", job_id);
-    return 0;
+    /*
+     * The upstream Crucible protocol V13 has no Discard / DiscardAck
+     * messages.  TRIM/UNMAP is silently unsupported here; report
+     * ENOTSUP so the bio layer can complete the I/O and let the
+     * filesystem fall back to overwrite-with-zero or skip the trim.
+     */
+    (void) offset;
+    (void) length;
+    return ENOTSUP;
 }
 
 std::pair<std::string, uint16_t> UpsairsClient::parse_target(const std::string& target)
@@ -615,8 +574,6 @@ std::pair<std::string, uint16_t> UpsairsClient::parse_target(const std::string& 
 
 void UpsairsClient::io_loop()
 {
-    kprintf("[Crucible] I/O thread started\n");
-
     while (running_) {
         // Use select() to wait for readable connections
         fd_set readfds;
@@ -695,8 +652,6 @@ void UpsairsClient::io_loop()
         }
 
     }
-
-    kprintf("[Crucible] I/O thread stopped\n");
 }
 
 void UpsairsClient::process_responses(int downstairs_idx)
@@ -723,26 +678,35 @@ void UpsairsClient::process_responses(int downstairs_idx)
         }
 
         case MessageType::ReadResponse: {
-            auto resp = ReadResponse::decode(dec);
+            auto resp = ReadResponse::decode_header(dec);
             auto req = request_mgr_.find_request(resp.job_id);
-            if (req) {
-                if (resp.blocks.is_ok) {
-                    // Receive data following the header
-                    size_t block_count = resp.blocks.value.size();
-                    size_t data_size = block_count * block_size_;
-                    std::vector<uint8_t> data(data_size);
-                    connections_[downstairs_idx]->recv_exact(data.data(), data_size);
-
-                    // Store response data and contexts
+            if (resp.blocks.is_ok) {
+                /*
+                 * The bulk data is part of the same frame, encoded inline
+                 * as bincode `bytes` (u64 length + raw bytes).  Read both
+                 * from the in-memory frame buffer; do not pull more bytes
+                 * from the socket -- the socket cursor is already at the
+                 * start of the next frame.
+                 */
+                uint64_t data_len = dec.decode_byte_slice_length();
+                std::vector<uint8_t> data = dec.decode_bytes(data_len);
+                if (req) {
                     req->read_data[downstairs_idx] = std::move(data);
-                    req->read_contexts[downstairs_idx] = std::move(resp.blocks.value);
-
+                    req->read_contexts[downstairs_idx] =
+                        std::move(resp.blocks.value);
                     req->mark_response(downstairs_idx, true);
                 } else {
-                    req->mark_response(downstairs_idx, false, resp.blocks.error);
+                    kprintf("[Crucible] ReadResponse for unknown job %lu (%zu bytes dropped)\n",
+                            resp.job_id, data.size());
                 }
             } else {
-                kprintf("[Crucible] ReadResponse for unknown job %lu\n", resp.job_id);
+                if (req) {
+                    req->mark_response(downstairs_idx, false,
+                                       resp.blocks.error);
+                } else {
+                    kprintf("[Crucible] ReadResponse error for unknown job %lu\n",
+                            resp.job_id);
+                }
             }
             break;
         }
@@ -759,21 +723,9 @@ void UpsairsClient::process_responses(int downstairs_idx)
             break;
         }
 
-        case MessageType::DiscardAck: {
-            auto ack = DiscardAck::decode(dec);
-            auto req = request_mgr_.find_request(ack.job_id);
-            if (req) {
-                req->mark_response(downstairs_idx, ack.result.is_ok,
-                                  ack.result.is_ok ? CrucibleError::IoError : ack.result.error);
-            } else {
-                kprintf("[Crucible] DiscardAck for unknown job %lu\n", ack.job_id);
-            }
-            break;
-        }
-
         case MessageType::Imok: {
-            // Health check response, ignore for now
-            kprintf("[Crucible] Received Imok from downstairs %d\n", downstairs_idx);
+            /* Health check response. Quiet success: no log. */
+            (void) downstairs_idx;
             break;
         }
 
@@ -799,12 +751,11 @@ void UpsairsClient::handshake(int downstairs_idx)
     here_msg.gen = generation_;
     here_msg.read_only = read_only_;
     here_msg.encrypted = encrypted_;
-    here_msg.alternate_region = false;
+    /* No alternate versions advertised — upstairs only speaks V13. */
+    here_msg.alternate_versions.clear();
 
     auto frame = encode_message(here_msg);
     conn->send_exact(frame.data(), frame.size());
-
-    kprintf("[Crucible] Sent HereIAm to downstairs %d\n", downstairs_idx);
 
     // Receive response
     auto response_frame = receive_frame(downstairs_idx);
@@ -815,11 +766,37 @@ void UpsairsClient::handshake(int downstairs_idx)
     if (type == MessageType::YesItsMe) {
         auto yes_msg = YesItsMe::decode(dec);
 
-        if (yes_msg.upstairs_id != upstairs_id_) {
-            throw std::runtime_error("UUID mismatch in YesItsMe");
+        if (yes_msg.version != static_cast<uint32_t>(ProtocolVersion::V13)) {
+            throw std::runtime_error("Version mismatch in YesItsMe: got " +
+                                      std::to_string(yes_msg.version));
         }
 
-        kprintf("[Crucible] Handshake successful with downstairs %d\n", downstairs_idx);
+        /*
+         * Upstream Crucible protocol step 2: send PromoteToActive and wait
+         * for YouAreNowActive (or YouAreNoLongerActive if another upstairs
+         * has stolen the slot).  Only after this exchange may we issue
+         * RegionInfoPlease and start I/O.
+         */
+        PromoteToActive promote;
+        promote.upstairs_id = upstairs_id_;
+        promote.session_id = session_id_;
+        promote.generation = generation_;
+        auto promote_frame = encode_message(promote);
+        conn->send_exact(promote_frame.data(), promote_frame.size());
+
+        auto resp_frame = receive_frame(downstairs_idx);
+        bincode::Decoder resp_dec(resp_frame);
+        MessageType resp_type = decode_message_type(resp_dec);
+        if (resp_type == MessageType::YouAreNowActive) {
+            (void) YouAreNowActive::decode(resp_dec);
+            kprintf("[Crucible] downstairs %d active (repair port %u)\n",
+                    downstairs_idx, yes_msg.repair_addr.port);
+        } else if (resp_type == MessageType::YouAreNoLongerActive) {
+            throw std::runtime_error("Promote rejected: another session is active");
+        } else {
+            throw std::runtime_error("Unexpected promote response: " +
+                                     std::to_string(static_cast<uint32_t>(resp_type)));
+        }
 
     } else if (type == MessageType::VersionMismatch) {
         auto mismatch = VersionMismatch::decode(dec);
@@ -848,14 +825,10 @@ void UpsairsClient::query_region_info(int downstairs_idx)
         throw ConnectionError("Downstairs not connected");
     }
 
-    // Send RegionInfoPlease
     RegionInfoPlease req_msg;
     auto frame = encode_message(req_msg);
     conn->send_exact(frame.data(), frame.size());
 
-    kprintf("[Crucible] Sent RegionInfoPlease to downstairs %d\n", downstairs_idx);
-
-    // Receive RegionInfo response
     auto response_frame = receive_frame(downstairs_idx);
     bincode::Decoder dec(response_frame);
 
@@ -875,14 +848,39 @@ void UpsairsClient::query_region_info(int downstairs_idx)
                                 std::to_string(region_def_.block_size));
     }
 
-    // Update total_blocks_ from region definition if it was unset (0).
-    // query_region_info() is called once per downstairs; only set on the first.
+    /*
+     * Set total_blocks_ from the region definition the first time we
+     * see it; subsequent downstairs are validated against the same
+     * geometry by the block_size check above.
+     */
     if (total_blocks_ == 0) {
         total_blocks_ = region_def_.extent_size * region_def_.extent_count;
+        kprintf("[Crucible] region: %lu blocks of %lu bytes (%u extents x %lu)\n",
+                total_blocks_, region_def_.block_size,
+                region_def_.extent_count, region_def_.extent_size);
     }
 
-    kprintf("[Crucible] Region info: block_size=%u, extent_size=%lu, extents=%lu\n",
-          region_def_.block_size, region_def_.extent_size, region_def_.extent_count);
+    /*
+     * Final negotiation step: send ExtentVersionsPlease so the downstairs
+     * transitions out of "waiting for extent versions" and starts treating
+     * incoming Write/Flush/ReadRequest messages as I/O instead of
+     * "ignored message during negotiation".  We don't act on the per-extent
+     * gen/flush/dirty data — the OSv driver doesn't implement live repair —
+     * but we have to consume the bytes off the socket so the next reply
+     * isn't misframed.
+     */
+    ExtentVersionsPlease ev_req;
+    auto ev_frame = encode_message(ev_req);
+    conn->send_exact(ev_frame.data(), ev_frame.size());
+
+    auto ev_resp_frame = receive_frame(downstairs_idx);
+    bincode::Decoder ev_dec(ev_resp_frame);
+    MessageType ev_type = decode_message_type(ev_dec);
+    if (ev_type != MessageType::ExtentVersions) {
+        throw std::runtime_error("Expected ExtentVersions, got " +
+                                  std::to_string(static_cast<uint32_t>(ev_type)));
+    }
+    (void) ExtentVersions::decode(ev_dec);
 }
 
 std::vector<uint8_t> UpsairsClient::receive_frame(int downstairs_idx)
@@ -892,18 +890,21 @@ std::vector<uint8_t> UpsairsClient::receive_frame(int downstairs_idx)
         throw ConnectionError("Downstairs not connected");
     }
 
-    // Receive length prefix
-    uint32_t length;
-    conn->recv_exact(&length, 4);
+    /*
+     * The Rust upstream Crucible encoder writes the 4-byte u32 LE prefix
+     * as TOTAL frame length (prefix + payload), so subtract 4 to get the
+     * payload length we still need to read.
+     */
+    uint32_t total_length;
+    conn->recv_exact(&total_length, 4);
 
-    // Validate length
-    if (length > 100 * 1024 * 1024) {  // 100 MB max
-        throw std::runtime_error("Frame too large");
+    if (total_length < 4 || total_length > 100 * 1024 * 1024) {
+        throw std::runtime_error("Frame size out of range");
     }
+    uint32_t payload_length = total_length - 4;
 
-    // Receive data
-    std::vector<uint8_t> data(length);
-    conn->recv_exact(data.data(), length);
+    std::vector<uint8_t> data(payload_length);
+    conn->recv_exact(data.data(), payload_length);
 
     return data;
 }
