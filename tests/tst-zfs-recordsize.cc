@@ -27,6 +27,7 @@
 #include <cstring>
 #include <vector>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dlfcn.h>
@@ -103,14 +104,27 @@ static const char *detect_pool(libzfs_handle_t *zfsh)
 }
 
 /*
- * Create <pool>/<suffix> with default properties, then set recordsize.
- * ZFS automounts the dataset at /<suffix> (inheriting the pool's "/" mountpoint).
+ * Create <pool>/<suffix>, set recordsize, and give it an explicit mountpoint.
+ *
+ * OSv's libzfs zfs_create() does NOT auto-mount the new dataset the way the
+ * zfs(8) CLI does, so we set the "mountpoint" property explicitly and mkdir()
+ * the directory (matching the working pattern in tst-zfs-db-sim.cc). The
+ * mountpoint property triggers the in-kernel mount on OSv.
  */
 static int create_bench_ds(libzfs_handle_t *zfsh, const char *pool,
-                            const char *suffix, const char *recordsize)
+                            const char *suffix, const char *recordsize,
+                            const char *mountpoint)
 {
     char name[256];
     snprintf(name, sizeof(name), "%s/%s", pool, suffix);
+
+    /* Clean up any leftover dataset from a previous run. */
+    umount2(mountpoint, MNT_DETACH);
+    zfs_handle_t *old = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
+    if (old) {
+        p_zfs_destroy(old, 0);
+        p_zfs_close(old);
+    }
 
     int rc = p_zfs_create(zfsh, name, ZFS_TYPE_FILESYSTEM, nullptr);
     if (rc != 0)
@@ -121,16 +135,20 @@ static int create_bench_ds(libzfs_handle_t *zfsh, const char *pool,
         return -1;
 
     p_zfs_prop_set(zh, "recordsize", recordsize);
+    p_zfs_prop_set(zh, "mountpoint", mountpoint);
     p_zfs_close(zh);
+
+    mkdir(mountpoint, 0755);
     return 0;
 }
 
 static void destroy_bench_ds(libzfs_handle_t *zfsh, const char *pool,
-                              const char *suffix)
+                              const char *suffix, const char *mountpoint)
 {
     char name[256];
     snprintf(name, sizeof(name), "%s/%s", pool, suffix);
 
+    umount2(mountpoint, MNT_DETACH);
     zfs_handle_t *zh = p_zfs_open(zfsh, name, ZFS_TYPE_FILESYSTEM);
     if (zh) {
         p_zfs_destroy(zh, /*defer=*/0);
@@ -216,17 +234,19 @@ int main(void)
     }
     printf("Using pool: %s\n\n", pool);
 
-    /* Create benchmark datasets.
-     * ZFS mounts <pool>/bench8k at /<pool>/bench8k (inherits pool mountpoint). */
-    if (create_bench_ds(zfsh, pool, "bench8k",   "8K")   != 0)
+    /* Create benchmark datasets with explicit mountpoints.
+     * OSv libzfs does not auto-mount, so we mount each under /bench{8k,128k}. */
+    const char *mp8k   = "/bench8k";
+    const char *mp128k = "/bench128k";
+    if (create_bench_ds(zfsh, pool, "bench8k",   "8K",   mp8k)   != 0)
         fprintf(stderr, "warning: could not create %s/bench8k\n",   pool);
-    if (create_bench_ds(zfsh, pool, "bench128k", "128K") != 0)
+    if (create_bench_ds(zfsh, pool, "bench128k", "128K", mp128k) != 0)
         fprintf(stderr, "warning: could not create %s/bench128k\n", pool);
 
     /* Build file paths from dataset mountpoints. */
     char path8k[256], path128k[256];
-    snprintf(path8k,   sizeof(path8k),   "/%s/bench8k/seq.dat",   pool);
-    snprintf(path128k, sizeof(path128k), "/%s/bench128k/seq.dat", pool);
+    snprintf(path8k,   sizeof(path8k),   "%s/seq.dat", mp8k);
+    snprintf(path128k, sizeof(path128k), "%s/seq.dat", mp128k);
 
     struct {
         const char *label;
@@ -251,8 +271,8 @@ int main(void)
     printf("        less metadata overhead, better block device utilization.\n");
 
     /* Cleanup */
-    destroy_bench_ds(zfsh, pool, "bench8k");
-    destroy_bench_ds(zfsh, pool, "bench128k");
+    destroy_bench_ds(zfsh, pool, "bench8k",   mp8k);
+    destroy_bench_ds(zfsh, pool, "bench128k", mp128k);
     p_libzfs_fini(zfsh);
 
     return 0;
