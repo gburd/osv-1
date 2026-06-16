@@ -2474,7 +2474,6 @@ ZFS_META_ALIAS := "zfs-2.4.1-osv"
 define ozfs-userspace-includes
   $(OZFS)/include
   $(OZFS)/include/os/osv
-  $(OZFS)/lib/libspl/include
   $(OZFS)/lib/libspl/include/os/osv
   $(OZFS)/lib/libzfs
   bsd/cddl/compat/opensolaris/misc
@@ -2499,7 +2498,6 @@ ozfs-cflags-common = \
 	'-DTEXT_DOMAIN=""' \
 	'-DZFS_META_ALIAS="zfs-2.4.1-osv"' \
 	-DHAVE_MAKEDEV_IN_SYSMACROS \
-	-D_ZFS_LITTLE_ENDIAN \
 	'-DSYSCONFDIR="/etc"' \
 	'-DPKGDATADIR="/usr/share/zfs"' \
 	'-DZFSEXECDIR="/usr/lib/zfs"' \
@@ -2540,7 +2538,7 @@ libuutil-objects = $(libuutil-src-files:%.c=$(out)/%.o)
 
 $(libuutil-objects): kernel-defines =
 $(libuutil-objects): post-includes-bsd =
-$(libuutil-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libuutil-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(libuutil-objects): CFLAGS += $(ozfs-cflags-common)
 
 $(out)/libuutil.so: $(libuutil-objects)
@@ -2569,7 +2567,7 @@ libzutil-objects = $(libzutil-src-files:%.c=$(out)/%.o)
 
 $(libzutil-objects): kernel-defines =
 $(libzutil-objects): post-includes-bsd =
-$(libzutil-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libzutil-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(libzutil-objects): CFLAGS += $(ozfs-cflags-common) \
 	-isystem $(OZFS)/lib/libzutil
 
@@ -2589,9 +2587,8 @@ libshare-objects = $(libshare-src-files:%.c=$(out)/%.o)
 
 $(libshare-objects): kernel-defines =
 $(libshare-objects): post-includes-bsd =
-$(libshare-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
-$(libshare-objects): CFLAGS += $(ozfs-cflags-common) \
-	-isystem $(OZFS)/lib/libspl/include
+$(libshare-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libshare-objects): CFLAGS += $(ozfs-cflags-common)
 
 $(out)/libshare.so: $(libshare-objects)
 	$(makedir)
@@ -2608,7 +2605,7 @@ libzfs-core-objects = $(libzfs-core-src-files:%.c=$(out)/%.o)
 
 $(libzfs-core-objects): kernel-defines =
 $(libzfs-core-objects): post-includes-bsd =
-$(libzfs-core-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libzfs-core-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(libzfs-core-objects): CFLAGS += $(ozfs-cflags-common)
 
 $(out)/libzfs_core.so: $(libzfs-core-objects)
@@ -2625,7 +2622,7 @@ libtpool-objects = $(libtpool-src-files:%.c=$(out)/%.o)
 
 $(libtpool-objects): kernel-defines =
 $(libtpool-objects): post-includes-bsd =
-$(libtpool-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libtpool-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(libtpool-objects): CFLAGS += $(ozfs-cflags-common) \
 	-isystem $(OZFS)/include
 
@@ -2715,10 +2712,9 @@ $(out)/lib-zcommon/%.o: $(OZFS)/module/zcommon/%.c $(out)/gen/include/osv/kernel
 
 $(libzfs-zcommon-objects): kernel-defines =
 $(libzfs-zcommon-objects): post-includes-bsd =
-$(libzfs-zcommon-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libzfs-zcommon-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(libzfs-zcommon-objects): CFLAGS += $(ozfs-cflags-common) \
 	-isystem $(OZFS)/lib/libzutil \
-	-isystem $(OZFS)/lib/libspl/include \
 	-isystem $(OZFS)/lib/libspl/include/os/osv \
 	-isystem $(OZFS)/lib/libnvpair \
 	-Ibsd/cddl/compat/opensolaris/misc
@@ -2727,10 +2723,9 @@ libzfs-new-objects = $(patsubst %.c, $(out)/%.o, $(libzfs-new-src-files))
 
 $(libzfs-new-objects): kernel-defines =
 $(libzfs-new-objects): post-includes-bsd =
-$(libzfs-new-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(libzfs-new-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(libzfs-new-objects): CFLAGS += $(ozfs-cflags-common) \
 	-isystem $(OZFS)/lib/libzutil \
-	-isystem $(OZFS)/lib/libspl/include \
 	-isystem $(OZFS)/lib/libspl/include/os/osv \
 	-isystem $(OZFS)/lib/libnvpair \
 	-Ibsd/cddl/compat/opensolaris/misc
@@ -2764,11 +2759,10 @@ zpool-cmd-objects = $(patsubst %.c, $(out)/%.o, $(zpool-cmd-src-files))
 
 $(zpool-cmd-objects): kernel-defines =
 $(zpool-cmd-objects): post-includes-bsd =
-$(zpool-cmd-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(zpool-cmd-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(zpool-cmd-objects): CFLAGS += $(ozfs-cflags-common) \
 	-isystem $(OZFS)/lib/libzutil \
 	-isystem $(OZFS)/lib/libzfs \
-	-isystem $(OZFS)/lib/libspl/include \
 	-isystem $(OZFS)/lib/libspl/include/os/osv \
 	-I$(OZFS)/cmd/zpool \
 	-Dmain=zpool_real_main
@@ -2797,11 +2791,10 @@ zfs-cmd-objects = $(patsubst %.c, $(out)/%.o, $(zfs-cmd-src-files))
 
 $(zfs-cmd-objects): kernel-defines =
 $(zfs-cmd-objects): post-includes-bsd =
-$(zfs-cmd-objects): pre-include-api = -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
+$(zfs-cmd-objects): pre-include-api = -I $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv
 $(zfs-cmd-objects): CFLAGS += $(ozfs-cflags-common) \
 	-isystem $(OZFS)/lib/libzutil \
 	-isystem $(OZFS)/lib/libzfs \
-	-isystem $(OZFS)/lib/libspl/include \
 	-isystem $(OZFS)/lib/libspl/include/os/osv \
 	-I$(OZFS)/cmd/zfs \
 	-Dmain=zfs_real_main
