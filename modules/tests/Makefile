@@ -110,7 +110,8 @@ rofs-only-tests := rofs/tst-chdir.so rofs/tst-symlink.so rofs/tst-readdir.so \
 
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-recordsize.so tst-zfs-direct-io.so \
-	tst-zfs-encryption.so tst-zfs-crucible-stress.so tst-zfs-db-sim.so tst-zfs-trim.so
+	tst-zfs-encryption.so tst-zfs-crucible-stress.so tst-zfs-db-sim.so tst-zfs-trim.so \
+	tst-zfs-import-host.so
 
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
 
