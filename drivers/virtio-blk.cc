@@ -132,6 +132,7 @@ blk::blk(virtio_device& virtio_dev)
 
     // Resize per-queue lock vector now that _num_queues is known.
     _queue_locks = std::vector<mutex>(_num_queues);
+    _queue_space = std::vector<waitqueue>(_num_queues);
 
     // Create one completion thread per virtqueue.  Each thread drains its
     // own queue ring; the interrupt wakes queue-0's thread which then also
@@ -329,17 +330,15 @@ void blk::req_done(int qid)
                 WITH_LOCK(_queue_locks[q]) {
                     auto* q_ring = get_virt_queue(q);
                     drain_queue(q_ring);
-                    q_ring->wakeup_waiter();
+                    _queue_space[q].wake_all(_queue_locks[q]);
                 }
             }
         } else {
             /* Non-zero queues: poll, but hold the per-queue lock so we
              * don't race with qid=0's drain-all loop above. */
             WITH_LOCK(_queue_locks[qid]) {
-                if (!drain_queue(myqueue)) {
-                    // nothing processed; release lock before yielding
-                } else {
-                    myqueue->wakeup_waiter();
+                if (drain_queue(myqueue)) {
+                    _queue_space[qid].wake_all(_queue_locks[qid]);
                 }
             }
             sched::thread::yield();
@@ -404,26 +403,38 @@ int blk::make_request(struct bio* bio)
         hdr->type = type;
         hdr->ioprio = 0;
         hdr->sector = bio->bio_offset / sector_size;
-
-        queue->init_sg();
-        queue->add_out_sg(hdr, sizeof(struct blk_outhdr));
-
-        if (type == VIRTIO_BLK_T_DISCARD) {
-            req->discard_desc.sector = bio->bio_offset / sector_size;
-            req->discard_desc.num_sectors = bio->bio_bcount / sector_size;
-            req->discard_desc.flags = 0;
-            queue->add_out_sg(&req->discard_desc, sizeof(req->discard_desc));
-        } else if (bio->bio_data && bio->bio_bcount > 0) {
-            if (type == VIRTIO_BLK_T_OUT)
-                queue->add_out_sg(bio->bio_data, bio->bio_bcount);
-            else
-                queue->add_in_sg(bio->bio_data, bio->bio_bcount);
-        }
-
         req->res.status = 0;
-        queue->add_in_sg(&req->res, sizeof (struct blk_res));
 
-        queue->add_buf_wait(req);
+        // Submit without blocking while holding the queue lock.  If the avail
+        // ring is full, add_buf() returns false; wait on _queue_space (which
+        // releases _queue_locks[qid]) so the completion thread can take the
+        // lock, drain the used ring and wake us, then rebuild the sg and
+        // retry.  Holding the lock across a blocking wait here would deadlock
+        // against req_done(), which needs the same lock to drain and wake.
+        while (true) {
+            queue->init_sg();
+            queue->add_out_sg(hdr, sizeof(struct blk_outhdr));
+
+            if (type == VIRTIO_BLK_T_DISCARD) {
+                req->discard_desc.sector = bio->bio_offset / sector_size;
+                req->discard_desc.num_sectors = bio->bio_bcount / sector_size;
+                req->discard_desc.flags = 0;
+                queue->add_out_sg(&req->discard_desc, sizeof(req->discard_desc));
+            } else if (bio->bio_data && bio->bio_bcount > 0) {
+                if (type == VIRTIO_BLK_T_OUT)
+                    queue->add_out_sg(bio->bio_data, bio->bio_bcount);
+                else
+                    queue->add_in_sg(bio->bio_data, bio->bio_bcount);
+            }
+
+            queue->add_in_sg(&req->res, sizeof (struct blk_res));
+
+            if (queue->add_buf(req)) {
+                break;
+            }
+
+            _queue_space[qid].wait(_queue_locks[qid]);
+        }
 
         queue->kick();
 
