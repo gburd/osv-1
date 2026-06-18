@@ -59,6 +59,7 @@
 #include "drivers/console.hh"
 #include "drivers/null.hh"
 #include "drivers/crucible-blk.hh"
+#include "drivers/nvmeof-blk.hh"
 
 #include "libc/network/__dns.hh"
 #include <processor.hh>
@@ -195,6 +196,17 @@ static std::string opt_crucible_targets_indexed[MAX_CRUCIBLE_DEVICES];
 static std::string opt_crucible_uuid_indexed[MAX_CRUCIBLE_DEVICES];
 #endif
 
+#if CONF_drivers_nvmeof
+static std::string opt_nvmeof_target;
+static std::string opt_nvmeof_subnqn;
+static std::string opt_nvmeof_hostnqn;
+
+// Multi-device support (up to 8 devices)
+#define MAX_NVMEOF_DEVICES 8
+static std::string opt_nvmeof_target_indexed[MAX_NVMEOF_DEVICES];
+static std::string opt_nvmeof_subnqn_indexed[MAX_NVMEOF_DEVICES];
+#endif
+
 #if CONF_tracepoints_sampler
 static int sampler_frequency;
 static bool opt_enable_sampler = false;
@@ -268,6 +280,13 @@ static void usage()
         "  --crucible6-uuid=arg  Crucible device 6 region UUID\n"
         "  --crucible7=arg       Crucible device 7 downstairs servers\n"
         "  --crucible7-uuid=arg  Crucible device 7 region UUID\n"
+#endif
+#if CONF_drivers_nvmeof
+        "  --nvmeof=arg          NVMe/TCP target host:port\n"
+        "  --nvmeof-subnqn=arg   NVMe/TCP subsystem NQN\n"
+        "  --nvmeof-hostnqn=arg  NVMe/TCP host NQN (optional)\n"
+        "  --nvmeofN=arg         NVMe/TCP device N target host:port\n"
+        "  --nvmeofN-subnqn=arg  NVMe/TCP device N subsystem NQN\n"
 #endif
         "\n");
 }
@@ -483,6 +502,36 @@ static void parse_options(int loader_argc, char** loader_argv)
 
         if (options::option_value_exists(options_values, uuid_key)) {
             opt_crucible_uuid_indexed[i] = options::extract_option_value(options_values, uuid_key);
+        }
+    }
+#endif
+
+#if CONF_drivers_nvmeof
+    if (options::option_value_exists(options_values, "nvmeof")) {
+        opt_nvmeof_target = options::extract_option_value(options_values, "nvmeof");
+    }
+
+    if (options::option_value_exists(options_values, "nvmeof-subnqn")) {
+        opt_nvmeof_subnqn = options::extract_option_value(options_values, "nvmeof-subnqn");
+    }
+
+    if (options::option_value_exists(options_values, "nvmeof-hostnqn")) {
+        opt_nvmeof_hostnqn = options::extract_option_value(options_values, "nvmeof-hostnqn");
+    }
+
+    // Parse indexed NVMe/TCP devices (nvmeof0, nvmeof1, ...)
+    for (int i = 0; i < MAX_NVMEOF_DEVICES; i++) {
+        std::string target_key = "nvmeof" + std::to_string(i);
+        std::string subnqn_key = "nvmeof" + std::to_string(i) + "-subnqn";
+
+        if (options::option_value_exists(options_values, target_key)) {
+            opt_nvmeof_target_indexed[i] =
+                options::extract_option_value(options_values, target_key);
+        }
+
+        if (options::option_value_exists(options_values, subnqn_key)) {
+            opt_nvmeof_subnqn_indexed[i] =
+                options::extract_option_value(options_values, subnqn_key);
         }
     }
 #endif
@@ -770,6 +819,30 @@ void* do_main_thread(void *_main_args)
                                               opt_crucible_block_size, opt_crucible_read_only, i);
             if (ret != 0) {
                 kprintf("loader: Crucible device %d initialization returned error %d (boot continues)\n",
+                        i, ret);
+            }
+        }
+    }
+#endif
+
+#if CONF_drivers_nvmeof
+    // Legacy single device support (--nvmeof)
+    if (!opt_nvmeof_target.empty()) {
+        int ret = nvmeof::nvmeof_init(opt_nvmeof_target, opt_nvmeof_subnqn,
+                                      opt_nvmeof_hostnqn, 0);
+        if (ret != 0) {
+            kprintf("loader: NVMe/TCP initialization returned error %d (boot continues)\n", ret);
+        }
+    }
+
+    // Multi-device support (--nvmeof0, --nvmeof1, ...)
+    for (int i = 0; i < MAX_NVMEOF_DEVICES; i++) {
+        if (!opt_nvmeof_target_indexed[i].empty()) {
+            int ret = nvmeof::nvmeof_init(opt_nvmeof_target_indexed[i],
+                                          opt_nvmeof_subnqn_indexed[i],
+                                          opt_nvmeof_hostnqn, i);
+            if (ret != 0) {
+                kprintf("loader: NVMe/TCP device %d initialization returned error %d (boot continues)\n",
                         i, ret);
             }
         }

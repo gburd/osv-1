@@ -1016,6 +1016,11 @@ drivers += drivers/crucible-hash.o
 drivers += drivers/crucible-client.o
 drivers += drivers/crucible-blk.o
 endif
+ifeq ($(conf_drivers_nvmeof),1)
+drivers += drivers/nvmeof-connection.o
+drivers += drivers/nvmeof-client.o
+drivers += drivers/nvmeof-blk.o
+endif
 endif # x64
 
 ifeq ($(arch),aarch64)
