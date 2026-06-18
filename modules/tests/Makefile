@@ -140,6 +140,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-zfs-multirec.so \
 	tst-io_uring.so \
 	tst-crucible-blk.so \
+	tst-nvmeof-blk.so \
 	tst-crucible-zfs.so \
 	tst-crucible-bench.so \
 	tst-align.so tst-cxxlocale.so misc-tcp-close-without-reading.so \
