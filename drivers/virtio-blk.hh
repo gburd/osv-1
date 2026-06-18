@@ -10,6 +10,7 @@
 #include "drivers/virtio.hh"
 #include "drivers/virtio-device.hh"
 #include <osv/bio.h>
+#include <osv/waitqueue.hh>
 #include <vector>
 
 namespace virtio {
@@ -189,6 +190,11 @@ private:
     // active, make_request() selects the queue by CPU id so the queues act
     // as independent submission channels with no cross-CPU lock contention.
     std::vector<mutex> _queue_locks;
+    // Per-queue "ring has free space" condition, guarded by the matching
+    // _queue_locks[qid].  A producer that fills the avail ring waits here
+    // (releasing the lock) so the completion thread can drain the used ring
+    // and wake it; the completion thread wakes all waiters after draining.
+    std::vector<waitqueue> _queue_space;
 };
 
 }
