@@ -23,10 +23,13 @@ namespace nvmeof {
 /**
  * NVMe/TCP initiator client.
  *
- * Owns a single TCP Connection to an nvmet-tcp target and implements the
- * minimal NVMe/TCP path: ICReq/ICResp negotiation, Fabrics Connect for the
- * admin queue and one I/O queue, Identify Controller/Namespace, and
- * synchronous read/write/flush on a single namespace.
+ * Owns two TCP Connections to an nvmet-tcp target -- one for the admin queue
+ * (qid 0) and one for the I/O queue (qid 1).  NVMe/TCP maps each NVMe queue to
+ * its own TCP connection, each with its own ICReq/ICResp negotiation, so the
+ * admin and I/O Fabrics Connect commands cannot share a socket.  Implements the
+ * minimal NVMe/TCP path: per-connection ICReq/ICResp negotiation, Fabrics
+ * Connect for both queues, Identify Controller/Namespace on the admin queue,
+ * and synchronous read/write/flush on the I/O queue.
  *
  * Thread-safety: every *_sync() holds _io_mutex across the whole
  * command-submit-through-response-receive sequence.  The Connection's own
@@ -113,42 +116,61 @@ public:
     /** Logical block size in bytes. */
     uint32_t get_block_size() const { return _block_size; }
 
-    /** Whether the underlying connection is up. */
-    bool is_connected() const { return _conn && _conn->is_connected(); }
+    /** Whether the underlying connections are up. */
+    bool is_connected() const {
+        return _conn && _conn->is_connected() &&
+               _io_conn && _io_conn->is_connected();
+    }
 
 private:
     /** Allocate a fresh command id (16-bit wrap is fine for sync ops). */
     u16 next_cid() { return static_cast<u16>(_cid_counter.fetch_add(1)); }
 
-    /** ICReq/ICResp negotiation; stores _maxh2cdata. */
-    void negotiate_connection();
+    /** ICReq/ICResp negotiation on one connection; stores _maxh2cdata/_cpda. */
+    void negotiate_connection(Connection& conn);
 
-    /** Fabrics Connect for the given queue id; captures cntlid on qid 0. */
-    void fabrics_connect(u16 qid, u16 sqsize);
+    /**
+     * Fabrics Connect for the given queue id over the given connection;
+     * captures cntlid on qid 0.
+     */
+    void fabrics_connect(Connection& conn, u16 qid, u16 sqsize);
 
-    /** Identify with the given CNS/nsid into buf (4096 bytes). */
+    /** Fabrics Property Get of a 4-byte controller register (admin queue). */
+    u32 prop_get(u32 offset);
+
+    /** Fabrics Property Set of a 4-byte controller register (admin queue). */
+    void prop_set(u32 offset, u32 value);
+
+    /**
+     * Enable the controller (Property Set CC with EN=1 and the spec-mandated
+     * queue-entry sizes) and poll CSTS.RDY.  Must run after the admin Fabrics
+     * Connect and before any non-fabrics admin command (Identify).
+     */
+    void enable_controller();
+
+    /** Identify with the given CNS/nsid into buf (4096 bytes), admin queue. */
     void identify_locked(u32 cns, u32 nsid, void* buf);
 
     /**
      * Build and send a CapsuleCmd PDU (64-byte SQE + optional in-capsule
-     * data).  Caller must hold _io_mutex.
+     * data) on conn.  Caller must hold _io_mutex.
      */
-    void send_capsule_cmd_locked(const void* sqe, const void* data,
-                                 uint32_t data_len);
+    void send_capsule_cmd_locked(Connection& conn, const void* sqe,
+                                 const void* data, uint32_t data_len);
 
     /** Receive a CapsuleResp PDU and copy out the CQE.  Holds _io_mutex. */
-    void recv_rsp_locked(nvme_cq_entry_t& cqe_out);
+    void recv_rsp_locked(Connection& conn, nvme_cq_entry_t& cqe_out);
 
     /**
      * Receive C2HData PDUs (copying datal bytes at datao into buf) and the
      * terminating CapsuleResp, returning 0 on success or EIO.  Used for
      * reads and Identify.  Caller must hold _io_mutex.
      */
-    int recv_data_and_completion(void* buf, uint32_t buf_len);
+    int recv_data_and_completion(Connection& conn, void* buf, uint32_t buf_len);
 
     /** Send the H2CData PDU(s) satisfying one R2T.  Caller holds _io_mutex. */
-    void send_h2c_data(u16 cid, u16 ttag, u32 r2to, u32 r2tl, const void* buf,
-                       uint32_t buf_len);
+    void send_h2c_data(Connection& conn, u16 cid, u16 ttag, u32 r2to, u32 r2tl,
+                       const void* buf, uint32_t buf_len);
 
     /** Fill an SGL1 describing in-capsule data (type 0x0, offset subtype). */
     static void fill_incapsule_sgl(nvme_sgl_descriptor& sgl, uint32_t len);
@@ -165,12 +187,14 @@ private:
     std::string _hostnqn;
     u8 _hostid[16];
 
-    std::unique_ptr<Connection> _conn;
+    std::unique_ptr<Connection> _conn;       // admin queue (qid 0)
+    std::unique_ptr<Connection> _io_conn;    // I/O queue (qid 1)
     std::atomic<uint16_t> _cid_counter{1};
 
     u16 _cntlid{0xffff};       // controller id from admin Connect response
     uint32_t _maxh2cdata{0};   // negotiated from ICResp (0 == no limit)
     uint8_t _cpda{0};          // controller PDU data alignment from ICResp
+    uint32_t _inline_data_size{0};  // max in-capsule write payload (from ioccsz)
     uint32_t _block_size{0};
     uint64_t _block_count{0};
 

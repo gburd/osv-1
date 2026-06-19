@@ -182,6 +182,44 @@ struct __attribute__((packed)) nvmeof_connect_data {
 };
 static_assert(sizeof(nvmeof_connect_data) == 1024, "Connect data must be 1024 bytes");
 
+/*
+ * Fabrics Property Set command (64-byte SQE).  Writes an NVMe controller
+ * property (e.g. CC) across the fabric.  attrib bits 2:0 select the access
+ * size (0 = 4 bytes, 1 = 8 bytes); ofst is the property offset; value is the
+ * little-endian value to write.
+ */
+struct __attribute__((packed)) nvmeof_prop_set_cmd {
+    u8  opc;            // NVME_FABRICS_OPC
+    u8  psdt;           // bits 7:6 PSDT (01b = SGL); nvmet rejects PRP fabrics cmds
+    u16 cid;
+    u8  fctype;         // NVME_FCTYPE_PROP_SET
+    u8  rsvd2[35];
+    u8  attrib;         // bits 2:0 access size: 0 = 4B, 1 = 8B
+    u8  rsvd3[3];
+    u32 ofst;           // property offset
+    u64 value;          // value to write
+    u8  rsvd4[8];
+};
+static_assert(sizeof(nvmeof_prop_set_cmd) == 64, "Property Set must be 64 bytes");
+
+/*
+ * Fabrics Property Get command (64-byte SQE).  Reads an NVMe controller
+ * property; the controller returns the value in the response CQE
+ * command-specific field (DW0 for a 4-byte property, DW0:DW1 for 8 bytes).
+ */
+struct __attribute__((packed)) nvmeof_prop_get_cmd {
+    u8  opc;            // NVME_FABRICS_OPC
+    u8  psdt;           // bits 7:6 PSDT (01b = SGL); nvmet rejects PRP fabrics cmds
+    u16 cid;
+    u8  fctype;         // NVME_FCTYPE_PROP_GET
+    u8  rsvd2[35];
+    u8  attrib;         // bits 2:0 access size: 0 = 4B, 1 = 8B
+    u8  rsvd3[3];
+    u32 ofst;           // property offset
+    u8  rsvd4[16];
+};
+static_assert(sizeof(nvmeof_prop_get_cmd) == 64, "Property Get must be 64 bytes");
+
 } // namespace nvmeof
 
 #endif // NVMEOF_PDU_HH
