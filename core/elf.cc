@@ -1380,7 +1380,7 @@ program::program(void* addr)
     assert(_core->module_index() == core_module_index);
     _core->load_segments();
     _core->process_headers();
-    set_search_path({"/", "/usr/lib"});
+    set_search_path({"/", "/usr/lib", "/usr/lib/fs"});
     // Our kernel already supplies the features of a bunch of traditional
     // shared libraries:
     static const auto supplied_modules = {
