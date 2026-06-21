@@ -19,4 +19,5 @@
 /tests/tst-crucible-bench.so: tests/tst-crucible-bench.so
 /tests/tst-shm-consistency.so: tests/tst-shm-consistency.so
 /tests/tst-zfs-db-sim.so: tests/tst-zfs-db-sim.so
+/tests/tst-zfs-dbsim-dev.so: tests/tst-zfs-dbsim-dev.so
 /tests/tst-fs-bench.so: tests/tst-fs-bench.so
