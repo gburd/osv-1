@@ -3,3 +3,4 @@
 /zfs.so: zfs.so
 /libzfs.so: libzfs.so
 /libuutil.so: libuutil.so
+/tests/tst-zfs-dbsim-dev.so: tests/tst-zfs-dbsim-dev.so
