@@ -13,6 +13,7 @@
 #include <string.h>
 #include <exception>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <link.h>
 #include <stdio.h>
@@ -281,7 +282,20 @@ LFS64(posix_fadvise) __attribute__((nothrow));
 OSV_LIBC_API
 int posix_fallocate(int fd, off_t offset, off_t len)
 {
-    return ENOSYS;
+    if (offset < 0 || len <= 0) {
+        return EINVAL;
+    }
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        return errno;
+    }
+    off_t end = offset + len;
+    if (end > st.st_size) {
+        if (ftruncate(fd, end) < 0) {
+            return errno;
+        }
+    }
+    return 0;
 }
 LFS64(posix_fallocate) __attribute__((nothrow));
 
