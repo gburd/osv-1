@@ -706,6 +706,10 @@ endif
 ifeq ($(conf_drivers_hyperv),1)
 bsd += bsd/sys/dev/hyperv/vmbus/hyperv.o
 endif
+endif
+
+# ENA (AWS Elastic Network Adapter) is arch-neutral: it is a pci::device
+# driver with no port I/O, so it builds for both x64 and aarch64 (Graviton).
 ifeq ($(conf_networking_stack),1)
 ifeq ($(conf_drivers_ena),1)
 bsd += bsd/sys/contrib/ena_com/ena_eth_com.o
@@ -713,7 +717,6 @@ bsd += bsd/sys/contrib/ena_com/ena_com.o
 bsd += bsd/sys/dev/ena/ena_datapath.o
 bsd += bsd/sys/dev/ena/ena.o
 $(out)/bsd/sys/dev/ena/%.o: CXXFLAGS += -Ibsd/sys/contrib
-endif
 endif
 endif
 
@@ -1004,11 +1007,6 @@ drivers += drivers/xenclock.o
 drivers += drivers/xenfront.o drivers/xenfront-xenbus.o drivers/xenfront-blk.o
 drivers += drivers/xenplatform-pci.o
 endif
-ifeq ($(conf_networking_stack),1)
-ifeq ($(conf_drivers_ena),1)
-drivers += drivers/ena.o
-endif
-endif
 ifeq ($(conf_drivers_crucible),1)
 drivers += drivers/crucible-connection.o
 drivers += drivers/crucible-request.o
@@ -1052,6 +1050,14 @@ ifeq ($(conf_drivers_scsi),1)
 drivers += drivers/scsi-common.o
 endif
 endif # aarch64
+
+# ENA (AWS Elastic Network Adapter) is arch-neutral: it is a pci::device
+# driver with no port I/O, so it builds for both x64 and aarch64 (Graviton).
+ifeq ($(conf_networking_stack),1)
+ifeq ($(conf_drivers_ena),1)
+drivers += drivers/ena.o
+endif
+endif
 
 ifeq ($(conf_tracepoints),1)
 objects += arch/$(arch)/arch-trace.o
@@ -1579,6 +1585,7 @@ libc += misc/lockf.o
 libc += misc/mntent.o
 libc_to_hide += misc/mntent.o
 musl += misc/nftw.o
+$(out)/musl/src/misc/nftw.o: CFLAGS += -Wno-maybe-uninitialized
 libc += misc/__longjmp_chk.o
 
 musl += signal/killpg.o
