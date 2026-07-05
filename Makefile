@@ -40,7 +40,6 @@ endif
 ###########################################################################
 
 include conf/base.mk
-include bsd/sys/cddl/openzfs_sources.mk
 
 # The build mode defaults to "release" (optimized build), the other option
 # is "debug" (unoptimized build). In the latter the optimizer interferes
@@ -77,6 +76,9 @@ arch := $(ARCH)
 
 # ARCH_STR is like ARCH, but uses the full name x86_64 instead of x64
 ARCH_STR := $(arch:x64=x86_64)
+
+# OpenZFS source object lists are arch-conditional, so include after arch is set.
+include bsd/sys/cddl/openzfs_sources.mk
 
 ifeq (,$(wildcard conf/$(arch).mk))
     $(error unsupported architecture $(arch))
