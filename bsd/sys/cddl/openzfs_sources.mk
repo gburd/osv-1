@@ -104,7 +104,7 @@ openzfs-zfs += $(OPENZFS)/module/zfs/vdev_queue.o
 openzfs-zfs += $(OPENZFS)/module/zfs/vdev_raidz.o
 openzfs-zfs += $(OPENZFS)/module/zfs/vdev_raidz_math.o
 openzfs-zfs += $(OPENZFS)/module/zfs/vdev_raidz_math_scalar.o
-# x86_64 SIMD implementations
+# x86_64 SIMD implementations (compile to empty on non-x86 due to #ifdef guards)
 openzfs-zfs += $(OPENZFS)/module/zfs/vdev_raidz_math_avx2.o
 openzfs-zfs += $(OPENZFS)/module/zfs/vdev_raidz_math_avx512bw.o
 openzfs-zfs += $(OPENZFS)/module/zfs/vdev_raidz_math_avx512f.o
@@ -266,13 +266,19 @@ openzfs-icp += $(OPENZFS)/module/icp/algs/sha2/sha512_impl.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/skein/skein.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/skein/skein_block.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/skein/skein_iv.o
+ifeq ($(arch),x64)
 openzfs-icp += $(OPENZFS)/module/icp/asm-x86_64/aes/aeskey.o
+endif
 # Note: generic_impl.c is a template included by other .c files, not compiled directly
 
 # ============================================================
-# ICP Assembly routines (x86_64 SIMD crypto implementations)
+# ICP Assembly routines (arch-specific SIMD crypto implementations)
+# The x86_64 aes_*.S files have no top-level __x86_64__ guard and contain raw
+# x86 instructions, so they must only be listed for the x64 build. The
+# aarch64 .S files are all #if defined(__aarch64__) guarded.
 # ============================================================
 openzfs-icp-asm :=
+ifeq ($(arch),x64)
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_amd64.o
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_aesni.o
 # openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/gcm_pclmulqdq.o
@@ -280,6 +286,13 @@ openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_aesni.o
 # openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/ghash-x86_64.o
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha256-x86_64.o
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha512-x86_64.o
+endif
+ifeq ($(arch),aarch64)
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/sha2/sha256-armv8.o
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/sha2/sha512-armv8.o
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/blake3/b3_aarch64_sse2.o
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/blake3/b3_aarch64_sse41.o
+endif
 
 # ============================================================
 # ZSTD compression module (from module/zstd/)
