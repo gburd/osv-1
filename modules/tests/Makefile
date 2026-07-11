@@ -230,6 +230,8 @@ tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa.so
 
+tests += tst-numa-mempolicy.so
+
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
 $(out)/tests/tst-elf-permissions.so: COMMON += -Wl,-z,relro
