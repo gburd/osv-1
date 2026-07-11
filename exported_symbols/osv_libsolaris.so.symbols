@@ -40,6 +40,8 @@ osv_alloc_page
 osv_free_page
 osv_free_pages
 osv_pagecache_map_page
+osv_pagecache_map_arc_page
+osv_pagecache_register_arc_rele
 osv_reclaimer_thread
 physmem
 proc0

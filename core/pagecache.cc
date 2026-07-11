@@ -259,6 +259,27 @@ public:
     }
 };
 
+// Callback into libsolaris.so used to release a borrowed ARC dbuf hold when
+// its cached_page_arc is dropped.  Set once via osv_pagecache_register_arc_rele().
+static void (*arc_dbuf_rele)(void*) = nullptr;
+
+// A read-cache page borrowed from a pinned ZFS ARC dbuf.  Unlike cached_page
+// (whose _page it does not own) and cached_page_write (which frees its own
+// page), this page IS owned by the ARC: we must not free it, but we must
+// release the dbuf hold that keeps it resident when the page is dropped.
+class cached_page_arc : public cached_page {
+private:
+    void* _db;
+public:
+    cached_page_arc(hashkey key, void* db, void* page)
+        : cached_page(key, page), _db(db) {}
+    virtual ~cached_page_arc() {
+        if (_db && arc_dbuf_rele) {
+            arc_dbuf_rele(_db);
+        }
+    }
+};
+
 static std::unordered_map<hashkey, cached_page*> read_cache;
 static std::unordered_map<hashkey, cached_page_write*> write_cache;
 static std::deque<cached_page_write*> write_lru;
@@ -362,6 +383,28 @@ void map_read_cached_page(hashkey *key, void *page)
 extern "C" void osv_pagecache_map_page(void *key, void *page)
 {
     map_read_cached_page(static_cast<hashkey*>(key), page);
+}
+
+// Insert a borrowed ARC page (see osv/pagecache.hh).  Ownership of the dbuf
+// hold @db transfers to the read cache on success; if the key is already
+// present the hold is released immediately so no double-map/leak occurs.
+extern "C" void osv_pagecache_map_arc_page(void *key, void *db, void *page)
+{
+    hashkey* hk = static_cast<hashkey*>(key);
+    SCOPE_LOCK(read_lock);
+    if (find_in_cache(read_cache, *hk)) {
+        if (arc_dbuf_rele) {
+            arc_dbuf_rele(db);
+        }
+        return;
+    }
+    cached_page* cp = new cached_page_arc(*hk, db, page);
+    read_cache.emplace(*hk, cp);
+}
+
+extern "C" void osv_pagecache_register_arc_rele(void (*rele)(void*))
+{
+    arc_dbuf_rele = rele;
 }
 
 extern "C" void *osv_alloc_page(void)
