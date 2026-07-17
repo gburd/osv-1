@@ -62,9 +62,11 @@ size_t get_physmem(void)
 OSV_LIBSOLARIS_API
 int cv_timedwait(kcondvar_t *cv, mutex_t *mutex, clock_t tmo)
 {
-    // tmo is an absolute deadline expressed in ddi_get_lbolt() ticks
-    // (wall-clock nanoseconds / nsec_per_tick).  Convert to a relative
-    // duration by subtracting the current lbolt before handing to the condvar.
+#ifdef CONF_ZFS_OPENZFS
+    // OpenZFS passes an ABSOLUTE deadline in ddi_get_lbolt() ticks (its
+    // cv_timedwait parameter is literally named abstime; callers pass
+    // ddi_get_lbolt() + N).  Convert to a relative duration by subtracting the
+    // current lbolt before handing to the condvar.
     auto now_ns = osv::clock::wall::now().time_since_epoch().count();
     clock_t now_ticks = (clock_t)(now_ns / (TSECOND / hz));
     clock_t delta = tmo - now_ticks;
@@ -73,4 +75,16 @@ int cv_timedwait(kcondvar_t *cv, mutex_t *mutex, clock_t tmo)
     }
     auto ret = cv->wait(mutex, std::chrono::nanoseconds(ticks2ns(delta)));
     return ret == ETIMEDOUT ? -1 : 0;
+#else
+    // Legacy BSD/Illumos ZFS passes a RELATIVE timeout in ticks (e.g.
+    // cv_timedwait(cv, lock, hz) == "wait one second"; see arc.c/txg.c).
+    // Treating it as an absolute deadline would make every timed wait return
+    // immediately once uptime exceeds hz, busy-spinning the ARC/txg sync
+    // threads and livelocking zpool create.
+    if (tmo <= 0) {
+        return -1;
+    }
+    auto ret = cv->wait(mutex, std::chrono::nanoseconds(ticks2ns(tmo)));
+    return ret == ETIMEDOUT ? -1 : 0;
+#endif
 }

@@ -77,7 +77,13 @@ static void mkfs(int ac, char** av)
     // Setting it via -m (rather than a later 'zfs set mountpoint=') avoids a
     // remount, which the OSv libzfs mount shim cannot perform (dmu_objset_own
     // returns EBUSY for the already-owned root objset).
+#ifdef CONF_ZFS_OPENZFS
     vector<string> zpool_args = {"zpool", "create", "-f", "-R", "/zfs", "-m", "/", "osv", dev_name};
+#else
+    // BSD zpool defaults the root mountpoint to / already and rejects the -m
+    // scheme, so omit it.
+    vector<string> zpool_args = {"zpool", "create", "-f", "-R", "/zfs", "osv", dev_name};
+#endif
 
     get_blk_devices(zpool_args);
 
