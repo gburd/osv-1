@@ -383,6 +383,7 @@ OPENZFS_CFLAGS := \
 	-Wno-unused-function \
 	-Wno-pointer-sign \
 	-Wno-incompatible-pointer-types \
+	-Dcv_timedwait=openzfs_cv_timedwait \
 	-include $(OPENZFS)/include/os/osv/zfs/sys/zfs_context_os.h
 
 # Lua files need setjmp.h and must #undef panic (conflict with struct member)

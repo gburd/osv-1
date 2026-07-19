@@ -8,6 +8,7 @@ copyin
 copyinstr
 copyout
 cv_timedwait
+openzfs_cv_timedwait
 debug
 destroy_bio
 device_close

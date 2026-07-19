@@ -6,7 +6,7 @@ import os
 #   conf_zfs=openzfs also ships libzfs_core/libzutil/libshare/libtpool, which
 #   the legacy BSD ZFS userspace does not build.
 _libs = ['zpool.so', 'zfs.so', 'libzfs.so', 'libuutil.so']
-if os.environ.get('conf_zfs', 'openzfs') == 'openzfs':
+if os.environ.get('conf_zfs', 'bsd') == 'openzfs':
     _libs += ['libzfs_core.so', 'libzutil.so', 'libshare.so', 'libtpool.so']
 
 _manifest = os.path.join(os.path.dirname(__file__), 'usr.manifest')

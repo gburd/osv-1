@@ -48,14 +48,13 @@ include conf/base.mk
 # is compiled per build.  A handful of shared kernel/compat sources behave
 # differently between the two (e.g. cv_timedwait uses an absolute deadline for
 # OpenZFS but a relative timeout for BSD), gated on CONF_ZFS_OPENZFS.
-conf_zfs ?= openzfs
+conf_zfs ?= bsd
 ifeq ($(conf_zfs),openzfs)
 include bsd/sys/cddl/openzfs_sources.mk
 # CONF_ZFS_OPENZFS selects the OpenZFS conventions in the few shared sources
 # that differ between the two ZFS implementations (scoped per-object rather
 # than global so it cannot perturb the rest of the kernel build).
 $(out)/tools/mkfs/mkfs.o: CXXFLAGS += -DCONF_ZFS_OPENZFS
-$(out)/bsd/porting/netport1.o: CXXFLAGS += -DCONF_ZFS_OPENZFS
 endif
 
 # The build mode defaults to "release" (optimized build), the other option
