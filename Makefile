@@ -2802,7 +2802,7 @@ libzfs-osv-cxx-objects = $(out)/$(OZFS)/lib/libzfs/os/osv/libzfs_mnttab_os.o
 libzfs-new-objects += $(libzfs-osv-cxx-objects)
 $(libzfs-osv-cxx-objects): $(OZFS)/lib/libzfs/os/osv/libzfs_mnttab_os.cc
 	$(makedir)
-	$(call quiet, $(CXX) $(CXXFLAGS) $(ozfs-cflags-common) -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv -isystem $(OZFS)/lib/libzutil -isystem $(OZFS)/lib/libnvpair -c -o $@ $<, CXX libzfs_mnttab_os.cc)
+	$(call quiet, $(CXX) $(CXXFLAGS) $(filter-out -Wno-pointer-sign -Wno-incompatible-pointer-types -Wno-implicit-function-declaration,$(ozfs-cflags-common)) -isystem $(OZFS)/lib/libspl/include -isystem $(OZFS)/lib/libspl/include/os/osv -isystem $(OZFS)/lib/libzutil -isystem $(OZFS)/lib/libnvpair -c -o $@ $<, CXX libzfs_mnttab_os.cc)
 
 $(libzfs-new-objects): kernel-defines =
 $(libzfs-new-objects): post-includes-bsd =
