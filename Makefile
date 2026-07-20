@@ -50,6 +50,15 @@ include conf/base.mk
 # OpenZFS but a relative timeout for BSD), gated on CONF_ZFS_OPENZFS.
 conf_zfs ?= bsd
 ifeq ($(conf_zfs),openzfs)
+# The external/openzfs submodule is pinned to a PUBLISHED upstream OpenZFS tag
+# (github.com/openzfs/zfs, zfs-2.4.2).  Our OSv platform-layer changes live as a
+# git patch series in modules/open_zfs/patches/ and are applied here before the
+# OpenZFS sources are compiled, so we never maintain an OpenZFS fork.  The stamp
+# file makes this idempotent; `make clean-openzfs-patches` (below) reverts.
+openzfs_patch_stamp := external/openzfs/.osv-patches-applied
+$(shell if [ -d external/openzfs/module ] && [ ! -f $(openzfs_patch_stamp) ]; then \
+	git -C external/openzfs apply --whitespace=nowarn $(addprefix ../../modules/open_zfs/patches/,$(notdir $(wildcard modules/open_zfs/patches/*.patch))) 2>/dev/null \
+	&& touch $(openzfs_patch_stamp); fi)
 include bsd/sys/cddl/openzfs_sources.mk
 # CONF_ZFS_OPENZFS selects the OpenZFS conventions in the few shared sources
 # that differ between the two ZFS implementations (scoped per-object rather
