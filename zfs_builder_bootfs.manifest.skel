@@ -12,3 +12,4 @@
 /tools/cpiod.so: tools/cpiod/cpiod.so
 /usr/lib/libgcc_s.so.1: %(libgcc_s_dir)s/libgcc_s.so.1
 /zfs-bench.so: zfs-bench.so
+/zfs-featd.so: zfs-featd.so
