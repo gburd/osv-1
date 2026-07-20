@@ -1,8 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: OSv contributors <osv@example.com>
-Date: Mon, 20 Jul 2026 15:30:00 +0000
-Subject: [PATCH 20/20] zfs: back getmntent/getmntany with the live OSv VFS
- mount table
+From ce86406376b2a097d93abab7c50dd749f48f35b1 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Mon, 20 Jul 2026 15:48:53 +0000
+Subject: [PATCH] zfs: back getmntent/getmntany with live OSv VFS mount table
 
 zfs_unmount()/zfs destroy/zpool export decide whether a dataset needs
 unmounting by looking it up via libzfs_mnttab_find() ->
@@ -10,20 +9,24 @@ libzfs_mnttab_update() -> getmntent().  On OSv the getmntent/getmntany
 stubs in libzfs_util_os.c always returned EOF, so datasets auto-mounted
 by the kernel (zfs_domount at pool/dataset create time, not through
 libzfs do_mount) were invisible.  The objset therefore stayed owned and
-destroy/export failed with EBUSY / "dataset is busy".
+destroy/export failed with EBUSY / dataset is busy.
 
 Replace the stubs with an implementation that enumerates the real VFS
 mounts via osv::current_mounts() (exported from the kernel), filtered to
-ZFS.  Remove the old stubs from libzfs_util_os.c.
+ZFS.  Paired with the patch 0004 change making MNTTAB=/etc/mnttab openable
+so libzfs_mnttab_find() actually reaches getmntany().
+
+Copyright (C) 2026 Greg Burd.
+
 ---
- lib/libzfs/os/osv/libzfs_mnttab_os.cc | 106 ++++++++++++++++++++
- lib/libzfs/os/osv/libzfs_util_os.c   | 17 ---------------
+ lib/libzfs/os/osv/libzfs_mnttab_os.cc | 106 ++++++++++++++++++++++++++
+ lib/libzfs/os/osv/libzfs_util_os.c    |  17 -----
  2 files changed, 106 insertions(+), 17 deletions(-)
  create mode 100644 lib/libzfs/os/osv/libzfs_mnttab_os.cc
 
 diff --git a/lib/libzfs/os/osv/libzfs_mnttab_os.cc b/lib/libzfs/os/osv/libzfs_mnttab_os.cc
 new file mode 100644
-index 0000000..1111111
+index 000000000..ec2e016d5
 --- /dev/null
 +++ b/lib/libzfs/os/osv/libzfs_mnttab_os.cc
 @@ -0,0 +1,106 @@
@@ -134,15 +137,13 @@ index 0000000..1111111
 +
 +} // extern "C"
 diff --git a/lib/libzfs/os/osv/libzfs_util_os.c b/lib/libzfs/os/osv/libzfs_util_os.c
-index 2222222..3333333 100644
+index 3fcee722c..97b7a0daa 100644
 --- a/lib/libzfs/os/osv/libzfs_util_os.c
 +++ b/lib/libzfs/os/osv/libzfs_util_os.c
-@@ -80,21 +80,3 @@ zfs_userns(zfs_handle_t *zhp, const char *nspath, int attach)
- 	(void) zhp, (void) nspath, (void) attach;
- 	errno = ENOTSUP;
+@@ -82,20 +82,3 @@ zfs_userns(zfs_handle_t *zhp, const char *nspath, int attach)
  	return (-1);
  }
--
+ 
 -/*
 - * getmntent implementation for OSv (no /proc/self/mounts).
 - * libzfs_mnttab_update() calls this; we always return EOF.
@@ -161,4 +162,5 @@ index 2222222..3333333 100644
 -	return (-1); /* not found */
 -}
 -- 
-2.43.0
+2.47.0
+
