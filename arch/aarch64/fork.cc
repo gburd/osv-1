@@ -47,10 +47,14 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp,
     volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
     char *stack_to_free = child_stack_mem;
 
-    auto t = sched::thread::make([resume_sp, resume_pc] {
-        u64 app_tcb = sched::thread::current()->get_app_tcb();
-        if (app_tcb) {
-            asm volatile ("msr tpidr_el0, %0; isb" :: "r"(app_tcb) : "memory");
+    // TLS: the child is a real OSv thread with its own fresh setup_tcb() block.
+    // Only override tpidr_el0 if the parent had installed its own app TCB via
+    // arch_prctl (parent_app_tcb != 0); otherwise keep the child's private OSv
+    // TLS (the clean case for a musl app built against OSv's libc).
+    u64 parent_app_tcb = parent->get_app_tcb();
+    auto t = sched::thread::make([resume_sp, resume_pc, parent_app_tcb] {
+        if (parent_app_tcb) {
+            asm volatile ("msr tpidr_el0, %0; isb" :: "r"(parent_app_tcb) : "memory");
         }
         asm volatile
           ("mov sp, %0 \n\t"    // install the private copied stack

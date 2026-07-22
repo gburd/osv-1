@@ -19,7 +19,6 @@
 
 #include "arch.hh"
 #include "tls-switch.hh"
-#include "msr.hh"
 #include <errno.h>
 #include <string.h>
 #include <cstdlib>
@@ -57,24 +56,27 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
     volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
     char *stack_to_free = child_stack_mem;
 
-    // Capture the parent's ACTUAL fsbase (its live TLS base).  app_tcb only
-    // records a base for threads whose TLS was installed via arch_prctl(SET_FS);
-    // an app's main thread can have app_tcb==0 while running on a real non-zero
-    // fsbase.  The child must resume on the SAME TLS the caller used, so read
-    // the live fsbase directly and restore it when app_tcb is unset.
-    // NOTE: the child SHARES this TLS block with the parent -- OSv fork() does
-    // not give the child a private TLS copy.  That is fine for OSv-native code
-    // and short fork+exec/fork+_exit paths, but a glibc app that relies on
-    // per-process private TLS after fork (e.g. multi-backend PostgreSQL) will
-    // collide.  A private-TLS-per-child copy is a documented future step (see
-    // documentation/fork.md).
-    u64 parent_fsbase = processor::rdmsr(msr::IA32_FS_BASE);
+    // TLS handling.  The child is a real OSv sched::thread, so its constructor
+    // already ran setup_tcb() and installed a FRESH, private OSv TLS block
+    // (with its own errno and all libc __thread state).  Two cases:
+    //
+    //  (1) The app uses OSv's libc TLS (the normal dynamically-linked path,
+    //      app_tcb == 0): the child's own fresh TCB is exactly right -- do NOT
+    //      touch fsbase, let the child run on its private per-thread TLS.  This
+    //      is the clean case and fork() "just works" for TLS.
+    //  (2) The app installed its own TCB via arch_prctl(SET_FS) (app_tcb != 0,
+    //      e.g. a glibc binary's __libc_setup_tls): the child would need a
+    //      private COPY of that app TCB.  We do not duplicate it here yet;
+    //      the child inherits the parent's app_tcb (shared), which is the
+    //      documented multi-process-glibc limitation.  A musl app built against
+    //      OSv's libc takes path (1) and avoids this entirely.
+    u64 parent_app_tcb = parent->get_app_tcb();
 
-    auto t = sched::thread::make([resume_sp, resume_pc, parent_fsbase] {
-        u64 app_tcb = sched::thread::current()->get_app_tcb();
-        u64 tls = app_tcb ? app_tcb : parent_fsbase;
-        if (tls) {
-            arch::set_fsbase(tls);
+    auto t = sched::thread::make([resume_sp, resume_pc, parent_app_tcb] {
+        // Only override the child's own (fresh) TLS if the parent had installed
+        // an app TCB via arch_prctl; otherwise keep the child's private OSv TCB.
+        if (parent_app_tcb) {
+            arch::set_fsbase(parent_app_tcb);
         }
         asm volatile
           ("movq %0, %%rsp \n\t"    // install the private copied stack

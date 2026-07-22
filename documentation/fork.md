@@ -38,16 +38,17 @@ what does not, and why.
 
 ## What does NOT work (and why)
 
-- **Shared TLS (thread-local storage).** The forked child restores the parent's
-  fsbase and thus shares the parent's TLS block, rather than getting a private
-  copy. For OSv-native code and short fork+exec / fork+_exit paths this is fine.
-  But a glibc/musl program that relies on **per-process private TLS after fork**
-  will collide: e.g. stock multi-backend PostgreSQL boots its postmaster and
-  listens, but its first internal `fork()`'d child hangs in the first nontrivial
-  libc call (`getenv`) because parent and child share one TLS block. Making
-  fork() copy TLS per child (glibc-TCB-layout-specific) is the next required step
-  to carry real multi-process glibc workloads; until then such programs need the
-  threaded model instead (see the multithreaded-postgres port).
+- **Shared TLS (thread-local storage) - only for apps that install their own
+  TCB.** A forked child is a real OSv thread, so it gets its OWN fresh, private
+  OSv TLS block (its own `errno` and libc `__thread` state) automatically. For a
+  program that uses OSv's (musl-derived) libc the normal way, fork() TLS "just
+  works" - the child does not share the parent's TLS. The exception is a program
+  that installs its OWN thread pointer via `arch_prctl(ARCH_SET_FS)` (e.g. a
+  glibc-ABI binary's `__libc_setup_tls`): OSv records that as `app_tcb`, and the
+  fork child currently inherits the SAME `app_tcb` (shared), which collides. The
+  fix for such binaries is to build them against OSv's own musl libc instead of
+  glibc, so they take the clean per-thread-TLS path. (This was the wall stock
+  glibc-built PostgreSQL hit; a musl build avoids it.)
 
 - **Memory isolation.** The child shares the parent's heap and global variables
   (only the stack is copied). A child that **writes** to shared globals or
