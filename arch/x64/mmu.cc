@@ -120,7 +120,16 @@ void flush_tlb_all()
 
 static pt_element<4> page_table_root __attribute__((init_priority((int)init_prio::pt_root)));
 
+// Virtual pointer to the current thread's PML4 (child AS's private PML4 when
+// running in a forked child, else the kernel PML4).  Defined in core/mmu.cc.
+pt_element<4> *current_pt_root();
+
 pt_element<4> *get_root_pt(uintptr_t virt __attribute__((unused))) {
+    return current_pt_root();
+}
+
+// Virtual pointer to the kernel (AS0) PML4.
+pt_element<4> *kernel_pml4() {
     return &page_table_root;
 }
 

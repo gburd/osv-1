@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <memory>
 #include <osv/sched.hh>
+#include <osv/mmu.hh>
 #include <osv/mutex.h>
 #include <osv/condvar.h>
 #include <osv/app.hh>
@@ -180,6 +181,14 @@ pid_t fork(void)
     }
     pid_t cpid = child->id();
 
+    // Stage 2 fork: give the child its OWN address space, a COW clone of the
+    // parent's.  Private writable mappings become copy-on-write in both parent
+    // and child; the kernel half of the page table is shared.  The child
+    // thread runs in this address space (its CR3 is loaded on context switch).
+    mmu::address_space *child_as =
+        mmu::clone_address_space(sched::thread::current()->address_space());
+    child->set_address_space(child_as);
+
     // Register the child BEFORE starting it so a fast child->exit cannot race
     // ahead of the parent's bookkeeping.
     fork::register_child(cpid, parent);
@@ -187,11 +196,12 @@ pid_t fork(void)
     // Single cleanup: free the copied user stack and, if the child fell off the
     // end without exit(), record a default status.  Real exit codes are
     // recorded by exit()/execve() via fork::child_exited() before this runs.
-    child->set_cleanup([cpid, stack_to_free] {
+    child->set_cleanup([cpid, stack_to_free, child_as] {
         fork::child_exited(cpid, 0);
         if (stack_to_free) {
             free(stack_to_free);
         }
+        mmu::destroy_address_space(child_as);
     });
 
     child->start();
