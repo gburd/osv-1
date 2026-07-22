@@ -132,6 +132,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-smoke.so tst-bsd-evh.
 	tst-eventfd.so tst-remove.so misc-wake.so tst-epoll.so misc-lfring.so \
 	tst-fork.so \
 	tst-fork-cow.so \
+	tst-fork-deep.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
