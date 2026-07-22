@@ -56,6 +56,10 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp,
         if (parent_app_tcb) {
             asm volatile ("msr tpidr_el0, %0; isb" :: "r"(parent_app_tcb) : "memory");
         }
+        // Run pthread_atfork child handlers in the child's context before
+        // resuming user code.
+        extern "C" void __osv_run_atfork_child();
+        __osv_run_atfork_child();
         asm volatile
           ("mov sp, %0 \n\t"    // install the private copied stack
            "mov x0, #0 \n\t"    // fork() returns 0 in the child

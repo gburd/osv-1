@@ -78,6 +78,10 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
         if (parent_app_tcb) {
             arch::set_fsbase(parent_app_tcb);
         }
+        // Run pthread_atfork child handlers in the child's context (e.g. reset
+        // the malloc arena lock) before resuming user code.
+        extern "C" void __osv_run_atfork_child();
+        __osv_run_atfork_child();
         asm volatile
           ("movq %0, %%rsp \n\t"    // install the private copied stack
            "xorq %%rax, %%rax \n\t" // fork() returns 0 in the child

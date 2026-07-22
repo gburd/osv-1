@@ -24,6 +24,13 @@
 extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
                                   void **out_stack_to_free);
 
+// atfork handler chains (defined in libc/pthread.cc).  glibc/musl register
+// these internally; fork() must run prepare() in the parent before forking,
+// parent() in the parent after, and child() in the child after.
+extern "C" void __osv_run_atfork_prepare();
+extern "C" void __osv_run_atfork_parent();
+extern "C" void __osv_run_atfork_child();
+
 namespace osv {
 namespace fork {
 
@@ -163,8 +170,11 @@ pid_t fork(void)
     void *caller_sp  = __builtin_frame_address(0);
 
     void *stack_to_free = nullptr;
+    // POSIX: run pthread_atfork prepare handlers in the parent before forking.
+    __osv_run_atfork_prepare();
     sched::thread *child = fork_thread(caller_ret, caller_sp, &stack_to_free);
     if (!child) {
+        __osv_run_atfork_parent();  // undo prepare-side locking
         errno = ENOMEM;
         return -1;
     }
@@ -185,6 +195,11 @@ pid_t fork(void)
     });
 
     child->start();
+
+    // POSIX: run atfork parent handlers in the parent after the fork.  (The
+    // child runs its atfork child handlers in its own context, in the arch
+    // fork_thread trampoline, before resuming user code.)
+    __osv_run_atfork_parent();
 
     // Parent path: return the child's pid.  (The child resumes in fork()'s
     // caller with return value 0, on its private stack.)
