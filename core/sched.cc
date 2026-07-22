@@ -6,6 +6,7 @@
  */
 
 #include <osv/sched.hh>
+#include <osv/mmu.hh>
 #include <list>
 #include <osv/mutex.h>
 #include <osv/rwlock.h>
@@ -1087,6 +1088,10 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
     , _joiner(nullptr)
 {
     trace_thread_create(this);
+    // Inherit the creating thread's address space (AS0 for the very first
+    // threads).  fork() reassigns the child thread to its private child AS.
+    _current_as = sched::s_current ? sched::s_current->_current_as
+                                   : mmu::kernel_address_space();
 
     if (!main && sched::s_current) {
         auto app = application::get_current().get();

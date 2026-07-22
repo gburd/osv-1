@@ -93,6 +93,14 @@ void thread::switch_to()
     barrier();
     set_fsbase(reinterpret_cast<u64>(_tcb));
     barrier();
+    // Address-space (CR3) switch for fork COW.  Only touch CR3 when the target
+    // thread lives in a different address space than the outgoing one, so the
+    // common single-address-space case pays nothing (and no TLB flush).  The
+    // kernel half of every AS is identically mapped, so the switch code, kernel
+    // stacks and kernel heap remain valid across the write.
+    if (_current_as != old->_current_as) {
+        processor::write_cr3(mmu::pt_root_phys(_current_as));
+    }
     auto c = _detached_state->_cpu;
     old->_state.exception_stack = c->arch.get_exception_stack();
     // save the old thread SYSCALL caller stack pointer in the syscall stack descriptor
