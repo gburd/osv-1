@@ -61,8 +61,9 @@ what does not, and why.
 - **`clone()` with namespace-unshare flags** (`CLONE_NEWNS`, `CLONE_NEWPID`,
   etc.) returns `ENOSYS` — there are no namespaces to unshare.
 
-- **aarch64.** The stack-copy resume trampoline is implemented for x86-64;
-  aarch64 `fork()` currently returns an error pending the equivalent arch code.
+- **aarch64.** Implemented and validated: the stack-copy + `br` resume
+  trampoline works on aarch64 (Graviton) as well as x86-64. `tst-fork` passes
+  10/10 on both architectures.
 
 ## Implementation
 
