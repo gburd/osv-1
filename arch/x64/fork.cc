@@ -19,6 +19,7 @@
 
 #include "arch.hh"
 #include "tls-switch.hh"
+#include "msr.hh"
 #include <errno.h>
 #include <string.h>
 #include <cstdlib>
@@ -56,10 +57,24 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
     volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
     char *stack_to_free = child_stack_mem;
 
-    auto t = sched::thread::make([resume_sp, resume_pc] {
+    // Capture the parent's ACTUAL fsbase (its live TLS base).  app_tcb only
+    // records a base for threads whose TLS was installed via arch_prctl(SET_FS);
+    // an app's main thread can have app_tcb==0 while running on a real non-zero
+    // fsbase.  The child must resume on the SAME TLS the caller used, so read
+    // the live fsbase directly and restore it when app_tcb is unset.
+    // NOTE: the child SHARES this TLS block with the parent -- OSv fork() does
+    // not give the child a private TLS copy.  That is fine for OSv-native code
+    // and short fork+exec/fork+_exit paths, but a glibc app that relies on
+    // per-process private TLS after fork (e.g. multi-backend PostgreSQL) will
+    // collide.  A private-TLS-per-child copy is a documented future step (see
+    // documentation/fork.md).
+    u64 parent_fsbase = processor::rdmsr(msr::IA32_FS_BASE);
+
+    auto t = sched::thread::make([resume_sp, resume_pc, parent_fsbase] {
         u64 app_tcb = sched::thread::current()->get_app_tcb();
-        if (app_tcb) {
-            arch::set_fsbase(app_tcb);
+        u64 tls = app_tcb ? app_tcb : parent_fsbase;
+        if (tls) {
+            arch::set_fsbase(tls);
         }
         asm volatile
           ("movq %0, %%rsp \n\t"    // install the private copied stack

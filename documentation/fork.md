@@ -38,6 +38,17 @@ what does not, and why.
 
 ## What does NOT work (and why)
 
+- **Shared TLS (thread-local storage).** The forked child restores the parent's
+  fsbase and thus shares the parent's TLS block, rather than getting a private
+  copy. For OSv-native code and short fork+exec / fork+_exit paths this is fine.
+  But a glibc/musl program that relies on **per-process private TLS after fork**
+  will collide: e.g. stock multi-backend PostgreSQL boots its postmaster and
+  listens, but its first internal `fork()`'d child hangs in the first nontrivial
+  libc call (`getenv`) because parent and child share one TLS block. Making
+  fork() copy TLS per child (glibc-TCB-layout-specific) is the next required step
+  to carry real multi-process glibc workloads; until then such programs need the
+  threaded model instead (see the multithreaded-postgres port).
+
 - **Memory isolation.** The child shares the parent's heap and global variables
   (only the stack is copied). A child that **writes** to shared globals or
   heap-allocated data expecting a private copy will affect the parent. Code that
