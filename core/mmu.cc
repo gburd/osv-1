@@ -371,6 +371,18 @@ address_space *clone_address_space(address_space *parent)
             uintptr_t s = reinterpret_cast<uintptr_t>(si.begin);
             share_ranges.push_back({s, s + si.size});
         }
+        // Likewise every OTHER live thread's stack: those threads keep running
+        // in the PARENT address space and perform context switches (irqs off) on
+        // their own stacks, which OSv forbids faulting on.  COW-protecting them
+        // would fault the next switch.  The forked child is single-threaded and
+        // never touches sibling stacks, so sharing them is safe.
+        sched::with_all_threads([&share_ranges](sched::thread &t) {
+            auto si = t.get_stack_info();
+            if (si.begin) {
+                uintptr_t s = reinterpret_cast<uintptr_t>(si.begin);
+                share_ranges.push_back({s, s + si.size});
+            }
+        });
         cow_share_ranges = &share_ranges;
 
         for (unsigned slot = 0; slot < pte_per_page; slot++) {
