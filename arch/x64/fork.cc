@@ -24,6 +24,10 @@
 #include <cstdlib>
 #include <osv/sched.hh>
 
+// Run pthread_atfork child handlers in the child's context (e.g. reset the
+// malloc arena lock) before resuming user code.  Defined in libc/pthread.cc.
+extern "C" void __osv_run_atfork_child();
+
 sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_to_free)
 {
     auto parent = sched::thread::current();
@@ -80,7 +84,6 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
         }
         // Run pthread_atfork child handlers in the child's context (e.g. reset
         // the malloc arena lock) before resuming user code.
-        extern "C" void __osv_run_atfork_child();
         __osv_run_atfork_child();
         asm volatile
           ("movq %0, %%rsp \n\t"    // install the private copied stack
