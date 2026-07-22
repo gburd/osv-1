@@ -472,7 +472,7 @@ void exit(int status)
     // this thread; only the top-level application's exit() shuts OSv down.
     if (osv::fork::exit_current_child(status)) {
         // recorded + notified parent; terminate only this child thread
-        sched::thread::current()->complete();
+        sched::thread::exit(); // noreturn: ends only this child thread
         // not reached
     }
     debugf("program exited with status %ld\n", status);

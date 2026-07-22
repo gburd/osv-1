@@ -198,5 +198,7 @@ pid_t vfork(void)
     // vfork contract of "child borrows the parent's memory until exec/_exit")
     // is actually served more faithfully than fork's copy semantics.  Map to
     // fork(); the shared-memory behavior matches vfork's documented contract.
-    return fork();
+    // fork() is ::fork() here (an unqualified `fork` would resolve to the
+    // osv::fork namespace brought in by `using namespace osv`).
+    return ::fork();
 }

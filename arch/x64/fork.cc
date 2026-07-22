@@ -18,6 +18,7 @@
  */
 
 #include "arch.hh"
+#include "tls-switch.hh"
 #include <errno.h>
 #include <string.h>
 #include <cstdlib>
