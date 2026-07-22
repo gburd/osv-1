@@ -7,6 +7,7 @@
 
 #include <osv/drivers_config.h>
 #include <osv/sched.hh>
+#include <osv/fork.hh>
 #include <osv/elf.hh>
 #include <stdlib.h>
 #include <cstring>
@@ -464,6 +465,16 @@ int pclose(FILE *stream)
 
 void exit(int status)
 {
+    // On OSv exit() historically shuts down the whole unikernel.  But a fork()
+    // child (or an exec'd child app) is a "process" that must exit on its own
+    // without taking the machine down.  If the current thread is a registered
+    // fork child, record its status for the parent's waitpid() and end just
+    // this thread; only the top-level application's exit() shuts OSv down.
+    if (osv::fork::exit_current_child(status)) {
+        // recorded + notified parent; terminate only this child thread
+        sched::thread::current()->complete();
+        // not reached
+    }
     debugf("program exited with status %ld\n", status);
     osv::shutdown();
 }

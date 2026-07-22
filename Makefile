@@ -1057,6 +1057,7 @@ objects += arch/$(arch)/firmware.o
 objects += arch/$(arch)/hypervisor.o
 objects += arch/$(arch)/interrupt.o
 objects += arch/$(arch)/clone.o
+objects += arch/$(arch)/fork.o
 ifeq ($(conf_drivers_pci),1)
 objects += arch/$(arch)/pci.o
 objects += arch/$(arch)/msi.o
@@ -1660,11 +1661,13 @@ musl += prng/srand48.o
 libc += random.o
 
 libc += process/execve.o
+libc += process/fork.o
 musl += process/execle.o
 musl += process/execv.o
 musl += process/execl.o
 libc += process/waitpid.o
-musl += process/wait.o
+# process/wait.o (musl) is superseded by our waitpid.cc, which provides
+# wait()/waitpid()/wait4() backed by the fork() child registry.
 
 musl += setjmp/$(musl_arch)/setjmp.o
 musl += setjmp/$(musl_arch)/longjmp.o
