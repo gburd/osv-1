@@ -122,6 +122,66 @@ vma_list_type vma_list;
 // should hold the lock for write
 rwlock_t vma_list_mutex;
 
+// -----------------------------------------------------------------------------
+// Stage 2 fork: per-process address space object.
+//
+// For now (Stage 1) an address_space is a thin bundle over a vma_list and a
+// page-table root.  "AS0" (kernel_as, below) references the pre-existing global
+// vma_list / vma_list_mutex and the arch page_table_root so that existing
+// behaviour is completely unchanged: every thread still runs in AS0.  Child
+// address spaces (created by clone_address_space in Stage 3) get their own
+// vma_list and a private PML4 whose kernel half is shared with AS0.
+struct address_space {
+    // The VMA container and its lock.  For AS0 these alias the globals.
+    vma_list_type *vmas;
+    rwlock_t *vmas_mutex;
+    // Physical address of this AS's PML4 (the CR3 value).  0 == "use the arch
+    // page_table_root" (AS0 before the runtime page tables are switched in).
+    phys pt_root;
+    bool is_kernel;
+
+    address_space(vma_list_type *l, rwlock_t *m, phys root, bool kernel)
+        : vmas(l), vmas_mutex(m), pt_root(root), is_kernel(kernel) {}
+};
+
+// AS0: kernel + initial application.  Aliases the global vma_list.  pt_root is
+// filled in lazily (0 means "arch page_table_root", see pt_root_phys()).
+__attribute__((init_priority((int)init_prio::vma_list)))
+address_space kernel_as{&vma_list, &vma_list_mutex, 0, true};
+
+address_space *kernel_address_space()
+{
+    return &kernel_as;
+}
+
+// Arch hook: physical address of the kernel PML4 (CR3 value for AS0).
+phys kernel_pt_root_phys();
+
+phys pt_root_phys(address_space *as)
+{
+    if (as->pt_root) {
+        return as->pt_root;
+    }
+    // AS0 (or any AS with pt_root not yet cached): the arch kernel root.
+    return kernel_pt_root_phys();
+}
+
+// Stage 1 stubs -- filled in for real in Stage 3.  clone returns AS0 so that a
+// forked child keeps running in the shared address space exactly as before
+// (no behaviour change until the CR3-switch + COW clone land).
+address_space *clone_address_space(address_space *parent)
+{
+    return parent;
+}
+
+void destroy_address_space(address_space *as)
+{
+    if (!as || as == &kernel_as) {
+        return;
+    }
+    // Real teardown (free private page tables + vmas) lands in Stage 3.
+}
+
 // A mutex serializing modifications to the high part of the page table
 // (linear map, etc.) which are not part of vma_list.
 mutex page_table_high_mutex;

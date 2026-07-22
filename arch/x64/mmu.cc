@@ -129,6 +129,14 @@ void switch_to_runtime_page_tables()
     processor::write_cr3(page_table_root.next_pt_addr());
 }
 
+// Physical address of the kernel (AS0) PML4 -- the CR3 value that maps OSv
+// text/data + the identity/phys ranges.  Used as the shared base for cloned
+// child address spaces and as AS0's pt_root.
+phys kernel_pt_root_phys()
+{
+    return page_table_root.next_pt_addr();
+}
+
 enum {
     page_fault_prot  = 1ul << 0,
     page_fault_write = 1ul << 1,
