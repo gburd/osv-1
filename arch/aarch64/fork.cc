@@ -35,9 +35,12 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp,
     if (!child_stack_mem) {
         return nullptr;
     }
-    memcpy(child_stack_mem, si.begin, stack_size);
+    // Copy ONLY the live top [caller_sp .. stack_base) into the top of the
+    // child buffer (app stacks are demand-paged; copying from si.begin faults).
     char *child_base = child_stack_mem + stack_size;
     ptrdiff_t bias = child_base - stack_base;
+    size_t live = static_cast<size_t>(stack_base - sp);
+    memcpy(child_base - live, sp, live);
     char *child_sp = sp + bias;
 
     volatile u64 resume_sp = reinterpret_cast<u64>(child_sp);

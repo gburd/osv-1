@@ -41,11 +41,15 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
     if (!child_stack_mem) {
         return nullptr;
     }
-    // Copy the WHOLE stack region so any absolute in-stack addresses keep their
-    // offset; bias the resume SP by (child_base - parent_base).
-    memcpy(child_stack_mem, si.begin, stack_size);
+    // Copy ONLY the live top of the stack, [caller_sp .. stack_base), into the
+    // TOP of the child buffer.  App (pthread) stacks are demand-paged: only the
+    // used top is mapped, so copying from si.begin would fault on the first
+    // unmapped page.  Keeping the copy at the top of the child buffer preserves
+    // the base-relative bias so a biased SP resolves correctly.
     char *child_base = child_stack_mem + stack_size;
     ptrdiff_t bias = child_base - stack_base;
+    size_t live = static_cast<size_t>(stack_base - sp);
+    memcpy(child_base - live, sp, live);
     char *child_sp = sp + bias;
 
     volatile u64 resume_sp = reinterpret_cast<u64>(child_sp);
