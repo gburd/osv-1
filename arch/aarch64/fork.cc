@@ -4,22 +4,66 @@
  * This work is open source software, licensed under the terms of the
  * BSD license as described in the LICENSE file in the top-level directory.
  *
- * fork_thread() for aarch64.
- *
- * The x86-64 implementation (arch/x64/fork.cc) copies the parent's user stack
- * and resumes the child at fork()'s return site with x0/rax=0.  The aarch64
- * port of the same mechanism is a follow-up; until then fork() returns ENOSYS
- * on aarch64 rather than silently misbehaving.
+ * fork_thread() for aarch64 -- mirrors arch/x64/fork.cc.  fork() (fork.cc)
+ * passes the caller's return address and stack pointer; we copy the parent's
+ * user stack, bias the SP into the copy, and start a child thread that installs
+ * the copied stack, sets x0=0 (fork()'s return value in the child), and returns
+ * to fork()'s caller.
  */
 
+#include "arch.hh"
+#include <errno.h>
+#include <string.h>
+#include <cstdlib>
 #include <osv/sched.hh>
-#include <osv/kernel_config_core_syscall.h>
-#include <osv/syscalls_config.h>
 
-sched::thread *fork_thread()
+sched::thread *fork_thread(void *caller_ret, void *caller_sp,
+                           void **out_stack_to_free)
 {
-    // Not yet implemented on aarch64 (needs the stack-copy + x0=0 resume
-    // trampoline analogous to arch/x64/fork.cc).  Returning nullptr makes
-    // fork() fail with ENOMEM/ENOSYS rather than corrupt memory.
-    return nullptr;
+    auto parent = sched::thread::current();
+    auto parent_pinned_cpu = parent->pinned() ? sched::cpu::current() : nullptr;
+
+    auto si = parent->get_stack_info();
+    char *stack_base = static_cast<char*>(si.begin) + si.size;
+    char *sp = static_cast<char*>(caller_sp);
+    if (sp < static_cast<char*>(si.begin) || sp > stack_base) {
+        return nullptr;
+    }
+    size_t stack_size = si.size;
+
+    char *child_stack_mem = static_cast<char*>(malloc(stack_size));
+    if (!child_stack_mem) {
+        return nullptr;
+    }
+    memcpy(child_stack_mem, si.begin, stack_size);
+    char *child_base = child_stack_mem + stack_size;
+    ptrdiff_t bias = child_base - stack_base;
+    char *child_sp = sp + bias;
+
+    volatile u64 resume_sp = reinterpret_cast<u64>(child_sp);
+    volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
+    char *stack_to_free = child_stack_mem;
+
+    auto t = sched::thread::make([resume_sp, resume_pc] {
+        u64 app_tcb = sched::thread::current()->get_app_tcb();
+        if (app_tcb) {
+            asm volatile ("msr tpidr_el0, %0; isb" :: "r"(app_tcb) : "memory");
+        }
+        asm volatile
+          ("mov sp, %0 \n\t"    // install the private copied stack
+           "mov x0, #0 \n\t"    // fork() returns 0 in the child
+           "br %1 \n\t"         // resume in fork()'s caller
+           : : "r"(resume_sp), "r"(resume_pc) : "x0", "memory");
+    }, sched::thread::attr().
+        stack(4096 * 4),
+        false,
+        true);
+    t->set_app_tcb(parent->get_app_tcb());
+    if (parent_pinned_cpu) {
+        t->pin(parent_pinned_cpu);
+    }
+    if (out_stack_to_free) {
+        *out_stack_to_free = stack_to_free;
+    }
+    return t;
 }

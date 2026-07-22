@@ -17,12 +17,12 @@
 #include <osv/app.hh>
 #include "../libc.hh"
 
-// Arch hook (arch/<arch>/clone.cc): create a child thread that resumes at the
-// same point fork() was called, on a PRIVATE COPY of the parent's current user
-// stack, returning 0 in the child.  Reuses the register/continuation machinery
-// that clone_thread() already implements for pthread_create; the only delta is
-// that fork supplies a copied stack instead of a caller-provided one.
-extern sched::thread *fork_thread();
+// Arch hook (arch/<arch>/fork.cc): create a child thread that resumes in
+// fork()'s CALLER (at caller_ret, with caller_sp) on a private copy of the
+// parent's user stack, returning 0 in the child.  Hands back the copied stack
+// via out_stack_to_free so fork() can release it when the child is reaped.
+extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
+                                  void **out_stack_to_free);
 
 namespace osv {
 namespace fork {
@@ -151,11 +151,19 @@ pid_t wait_child(pid_t pid, int *status, int options)
 using namespace osv;
 
 extern "C"
+__attribute__((noinline))
 pid_t fork(void)
 {
     pid_t parent = getpid();
 
-    sched::thread *child = fork_thread();
+    // Capture the point fork() will return to in its caller, and the caller's
+    // stack pointer (fork()'s own frame base == caller SP at the return).  The
+    // child thread resumes exactly there, on a private copy of the stack.
+    void *caller_ret = __builtin_return_address(0);
+    void *caller_sp  = __builtin_frame_address(0);
+
+    void *stack_to_free = nullptr;
+    sched::thread *child = fork_thread(caller_ret, caller_sp, &stack_to_free);
     if (!child) {
         errno = ENOMEM;
         return -1;
@@ -166,19 +174,20 @@ pid_t fork(void)
     // ahead of the parent's bookkeeping.
     fork::register_child(cpid, parent);
 
-    // Arrange the child's exit to record status + notify the parent.  The child
-    // thread's completion carries its exit code via _exit()/thread completion;
-    // we hook it through a cleanup that fork::child_exited() consumes.
-    child->set_cleanup([cpid] {
-        // Default status if the child fell off the end without _exit(); real
-        // exit codes are recorded by exit()/execve() via fork::child_exited().
+    // Single cleanup: free the copied user stack and, if the child fell off the
+    // end without exit(), record a default status.  Real exit codes are
+    // recorded by exit()/execve() via fork::child_exited() before this runs.
+    child->set_cleanup([cpid, stack_to_free] {
         fork::child_exited(cpid, 0);
+        if (stack_to_free) {
+            free(stack_to_free);
+        }
     });
 
     child->start();
 
-    // Parent path: return the child's pid.  (The child, resuming on its copied
-    // stack inside fork_thread(), returns 0 from this same call site.)
+    // Parent path: return the child's pid.  (The child resumes in fork()'s
+    // caller with return value 0, on its private stack.)
     return cpid;
 }
 
