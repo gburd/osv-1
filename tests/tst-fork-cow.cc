@@ -37,6 +37,10 @@ static int failures = 0;
 // mutating it.
 static volatile int private_global = 0x1111;
 
+// The MAP_SHARED region pointer, kept in a global so accessing it does not
+// depend on the (biased) stack in the current fork-thread model.
+static volatile int *shared_ptr;
+
 int main()
 {
     printf("=== tst-fork-cow ===\n");
@@ -50,16 +54,17 @@ int main()
         printf("=== tst-fork-cow done: %d failures ===\n", failures);
         return 1;
     }
+    shared_ptr = shared;
     shared[0] = 0xAAAA;      // parent's initial value in the shared region
-    printf("shared region at %p, initial shared[0]=%x\n", (void*)shared, shared[0]);
 
     pid_t pid = fork();
     if (pid == 0) {
-        // CHILD: mutate BOTH the private global and the shared region.
-        private_global = 0x2222;      // must stay private to the child
-        shared[0]      = 0xBBBB;      // must be visible to the parent
+        // CHILD: mutate BOTH the private global and the shared region.  Use the
+        // global shared_ptr (not a stack local) to avoid any stack-copy bias.
+        private_global = 0x2222;         // must stay private to the child
+        shared_ptr[0]  = 0xBBBB;         // must be visible to the parent
         // Read back locally to be sure the writes landed in the child.
-        _exit((private_global == 0x2222 && shared[0] == 0xBBBB) ? 0 : 1);
+        _exit((private_global == 0x2222 && shared_ptr[0] == 0xBBBB) ? 0 : 1);
     }
 
     CHECK(pid > 0, "fork() returned child pid to parent");
@@ -76,7 +81,6 @@ int main()
           "COW: parent's private global unchanged by child's write");
     // (2) Sharing preserved: the child's write to the MAP_SHARED region IS seen
     //     by the parent.
-    printf("after child: shared[0]=%x (expect BBBB)\n", shared[0]);
     CHECK(shared[0] == 0xBBBB,
           "SHARED: child's write to MAP_SHARED region visible in parent");
 

@@ -6,6 +6,7 @@
  */
 
 #include <osv/fork.hh>
+#include <osv/kernel_config_fork.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -17,6 +18,7 @@
 #include <osv/condvar.h>
 #include <osv/app.hh>
 #include "../libc.hh"
+
 
 // Arch hook (arch/<arch>/fork.cc): create a child thread that resumes in
 // fork()'s CALLER (at caller_ret, with caller_sp) on a private copy of the
@@ -31,7 +33,6 @@ extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
 extern "C" void __osv_run_atfork_prepare();
 extern "C" void __osv_run_atfork_parent();
 extern "C" void __osv_run_atfork_child();
-
 namespace osv {
 namespace fork {
 
