@@ -124,6 +124,7 @@ vma_list_type vma_list;
 // should hold the lock for write
 rwlock_t vma_list_mutex;
 
+#if CONF_fork
 // -----------------------------------------------------------------------------
 // Stage 2 fork: per-process address space object.
 //
@@ -487,6 +488,7 @@ void destroy_address_space(address_space *as)
     }
     delete as;
 }
+#endif // CONF_fork
 
 // A mutex serializing modifications to the high part of the page table
 // (linear map, etc.) which are not part of vma_list.
@@ -1853,6 +1855,7 @@ static void vm_sigbus(uintptr_t addr, exception_frame* ef)
 }
 
 // --- fork COW write-fault resolver ----------------------------------------
+#if CONF_fork
 //
 // Walk the CURRENT address space's page table to the leaf PTE for `addr`.  If
 // it is a copy-on-write page (write-protected + cow bit, set by
@@ -1898,6 +1901,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     mmu::flush_tlb_all();
     return true;
 }
+#endif // CONF_fork
 
 void vm_fault(uintptr_t addr, exception_frame* ef)
 {
@@ -1917,6 +1921,7 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
 #endif
     addr = align_down(addr, mmu::page_size);
 
+#if CONF_fork
     // Resolve against the CURRENT thread's address space (child AS after fork,
     // else AS0).  A COW write fault copies the page privately for this side.
     address_space *as = kernel_address_space();
@@ -1949,6 +1954,18 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
         vma->fault(addr, ef);
     }
     trace_mmu_vm_fault_ret(addr, ef->get_error());
+#else // !CONF_fork -- original single-address-space fault path
+    WITH_LOCK(vma_list_mutex.for_read()) {
+        auto vma = find_intersecting_vma(addr);
+        if (vma == vma_list.end() || access_fault(*vma, ef->get_error())) {
+            vm_sigsegv(addr, ef);
+            trace_mmu_vm_fault_sigsegv(addr, ef->get_error(), "slow");
+            return;
+        }
+        vma->fault(addr, ef);
+    }
+    trace_mmu_vm_fault_ret(addr, ef->get_error());
+#endif // CONF_fork
 }
 
 vma::vma(addr_range range, unsigned perm, unsigned flags, bool map_dirty, page_allocator *page_ops)

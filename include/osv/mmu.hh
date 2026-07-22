@@ -22,6 +22,7 @@
 #include <osv/trace.hh>
 #include <osv/kernel_config_memory_debug.h>
 #include <osv/kernel_config_memory_jvm_balloon.h>
+#include <osv/kernel_config_fork.h>
 
 struct exception_frame;
 #if CONF_memory_jvm_balloon
@@ -372,6 +373,7 @@ error  advise(void* addr, size_t size, int advice);
 
 void vm_fault(uintptr_t addr, exception_frame* ef);
 
+#if CONF_fork
 // -----------------------------------------------------------------------------
 // Per-process address space (Stage 2 fork COW).
 //
@@ -403,6 +405,7 @@ address_space *clone_address_space(address_space *parent);
 // Tear down a child address_space (frees its private page tables + VMAs).
 // Never call on the kernel address space.
 void destroy_address_space(address_space *as);
+#endif // CONF_fork
 
 std::string procfs_maps();
 std::string sysfs_linear_maps();
