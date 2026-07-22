@@ -7,6 +7,18 @@
 
 #include <unistd.h>
 #include <errno.h>
+#include <osv/kernel_config_fork.h>
+
+#if !CONF_fork
+// Without fork() support, execve() keeps its historical stub behavior.
+#include <osv/stubbing.hh>
+#include "../libc.hh"
+int execve(const char *path, char *const argv[], char *const envp[])
+{
+    WARN_STUBBED();
+    return libc_error(ENOEXEC);
+}
+#else
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -83,3 +95,4 @@ int execve(const char *path, char *const argv[], char *const envp[])
     // not reached
     return 0;
 }
+#endif // CONF_fork

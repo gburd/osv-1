@@ -63,6 +63,7 @@
 #include <osv/kernel_config_core_epoll.h>
 #include <osv/kernel_config_networking_stack.h>
 #include <osv/kernel_config_core_syscall.h>
+#include <osv/kernel_config_fork.h>
 
 #include <osv/syscalls_config.h>
 
@@ -497,6 +498,7 @@ int sys_clone(unsigned long flags, void *child_stack, int *ptid, unsigned long n
     // fork()-style clone (a new "process"); on OSv we route that through the
     // thread-backed fork() emulation (see libc/process/fork.cc).
     if (!(flags & CLONE_THREAD)) {
+#if CONF_fork
        // fork()/vfork() land here (glibc/musl implement them via clone with an
        // exit signal and no CLONE_THREAD).  Route to the thread-backed fork().
        // Namespace-unshare clones (CLONE_NEWNS 0x00020000 etc.) are not
@@ -507,6 +509,12 @@ int sys_clone(unsigned long flags, void *child_stack, int *ptid, unsigned long n
            return -1;
        }
        return fork();
+#else
+       // fork() support not compiled in (CONFIG_fork=n): preserve OSv's
+       // historical behavior of only supporting thread clones.
+       errno = ENOSYS;
+       return -1;
+#endif
     }
     //
     //Validate we have non-empty stack

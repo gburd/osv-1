@@ -10,6 +10,19 @@ OSv instead provides a **thread-backed fork() emulation** that supports the
 common, compatible subset of fork semantics. This document describes what works,
 what does not, and why.
 
+## Off by default: the `fork` configure flag
+
+All of the fork() machinery - the fork()/vfork()/execve()/waitpid()
+implementations, the per-child address space, and the copy-on-write changes -
+is gated behind the `CONFIG_fork` kconfig option (make variable `conf_fork`),
+which defaults to **n**. When it is disabled (the default), NONE of this code
+is compiled into the kernel: the fork object files are excluded from the build,
+fork()/vfork() return ENOSYS as before, and OSv behaves exactly as it did with
+no change to its single-address-space model or performance. Build with
+`conf_fork=1` (or enable "Include fork() support" in `make menuconfig`) only for
+workloads that need fork(). This keeps the default OSv unchanged while offering
+fork() to those who require it.
+
 ## What works
 
 - **`fork()` twin return.** `fork()` creates a new OSv thread (the "child") that
