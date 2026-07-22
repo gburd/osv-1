@@ -210,20 +210,6 @@ int getpagesize()
 }
 
 OSV_LIBC_API
-int vfork()
-{
-    WARN_STUBBED();
-    return -1;
-}
-
-OSV_LIBC_API
-int fork()
-{
-    WARN_STUBBED();
-    return -1;
-}
-
-OSV_LIBC_API
 pid_t setsid(void)
 {
     WARN_STUBBED();
@@ -697,14 +683,6 @@ char *tmpnam_r(char *s)
 
 OSV_LIBC_API
 pid_t wait3(int *status, int options, struct rusage *usage)
-{
-    WARN_STUBBED();
-    errno = ECHILD;
-    return -1;
-}
-
-OSV_LIBC_API
-pid_t wait4(pid_t pid, int *status, int options, struct rusage *usage)
 {
     WARN_STUBBED();
     errno = ECHILD;

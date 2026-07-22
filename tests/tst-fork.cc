@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cassert>
 #include <cstring>
+#include <cerrno>
 
 static int failures = 0;
 #define CHECK(cond, msg) do { \
