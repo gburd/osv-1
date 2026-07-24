@@ -181,6 +181,8 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-fork-conn-socket.so \
 	tst-cow-range-cover.so \
 	tst-fork-fdleak.so \
+	tst-fork-posix-shm.so \
+	tst-fork-sigchld-latch.so \
 	tst-fork-arena-freelist.so \
 	tst-fork-sigchld-latch.so \
 	tst-fork-irq-cow.so \
