@@ -167,6 +167,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-fork-file-mmap.so \
 	tst-fork-socket.so \
 	tst-fork-conn-socket.so \
+	tst-fork-posix-shm.so \
 	tst-fork-sigchld-latch.so \
 	tst-fork-arena-freelist.so \
 	tst-fork-irq-cow.so \
