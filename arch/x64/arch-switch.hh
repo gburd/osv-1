@@ -178,8 +178,38 @@ void thread::switch_to()
     // As the catch-all solution, reset FPU state and more specifically
     // its status word. For details why we need it please see issue #1020.
     asm volatile ("emms");
-    processor::fldcw(fpucw);
-    processor::ldmxcsr(mxcsr);
+#if CONF_fork
+    if (switch_as) {
+        // [fork-stack] signature-F lost-wakeup fix.  fpucw/mxcsr above are C
+        // locals the compiler spills to rbp-relative stack slots.  The
+        // switch_as asm has just swapped rsp/rbp AND CR3 to the INCOMING fork
+        // child, so reloading fpucw/mxcsr from those %rbp-relative slots now
+        // reads the incoming child's stack under the incoming (COW-diverged)
+        // address space -- garbage, not the values fnstcw/stmxcsr saved.  When
+        // that garbage has reserved MXCSR bits set, ldmxcsr #GP-faults and the
+        // thread being resumed can NEVER run again: the checkpointer (or any
+        // forked backend/bgworker) wedges forever with the latch/epoll wakeup
+        // already delivered -- one facet of the intermittent "checkpoint
+        // starting" stall.  The FPU control word here is a CPU-global reset
+        // (issue #1020) and every OSv thread runs with the canonical control
+        // words; switch_to does no fxsave/fxrstor, so no per-thread FPU data is
+        // preserved across a switch regardless.  Restore the canonical control
+        // words from a KERNEL-IDENTITY-MAPPED static (same VA->phys in every
+        // address space, never COW): both fldcw and ldmxcsr take that fixed
+        // address, so the reload neither READS the incoming child's garbage
+        // stack (-> ldmxcsr #GP) nor WRITES it (a COW write-fault under the
+        // incoming AS in this non-preemptable window -> assert(preemptable())
+        // abort).  The static avoids both.
+        static const unsigned short canon_fpucw = 0x37f;
+        static const unsigned int   canon_mxcsr = 0x1f80;
+        asm volatile ("fldcw %0" : : "m" (canon_fpucw));
+        asm volatile ("ldmxcsr %0" : : "m" (canon_mxcsr));
+    } else
+#endif
+    {
+        processor::fldcw(fpucw);
+        processor::ldmxcsr(mxcsr);
+    }
 }
 
 void thread::switch_to_first()
