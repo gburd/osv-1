@@ -130,6 +130,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-mmap-file-cow.so \
 	tst-membarrier.so \
 	tst-mremap.so \
+	tst-close-range.so \
 	tst-elf-permissions.so misc-mutex.so misc-sockets.so tst-condvar.so \
 	tst-queue-mpsc.so tst-af-local.so tst-pipe.so tst-yield.so \
 	misc-ctxsw.so tst-read.so tst-symlink.so tst-openat.so \
