@@ -1253,6 +1253,16 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
 
     _clear_id = nullptr;
     _robust_list_head = nullptr;
+#if CONF_fork
+    // Preallocate this thread's reusable coherent wait_record slots on the
+    // identity kernel heap (coherent in every address space) ONCE, here in a
+    // normal allocation context -- never later in the wait/allocator path.
+    // See thread::_coherent_wr_buf.  128 bytes per slot >= sizeof(wait_record).
+    {
+        fork_arena::kernel_heap_scope kh;
+        _coherent_wr_buf = aligned_alloc(64, _coherent_wr_slots * 128);
+    }
+#endif
 }
 
 static std::list<std::function<void ()>> exit_notifiers
@@ -1311,6 +1321,9 @@ thread::~thread()
     }
     free_tcb();
     free_syscall_stack();
+#if CONF_fork
+    free(_coherent_wr_buf);
+#endif
     rcu_dispose(_detached_state.release());
 }
 

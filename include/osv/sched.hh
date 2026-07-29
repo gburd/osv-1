@@ -910,8 +910,37 @@ private:
     // park_timers never push_back()s a still-linked node (the intrusive-list
     // safe-link double-insert assert) and no erase touches a foreign cpu's list.
     cpu *_parked_cpu = nullptr;
+    // Reusable per-thread coherent wait_record slots (fork Stage-2 cross-AS
+    // coherence).  coherent_wait_record hands out one of THESE identity-heap
+    // records instead of malloc()ing one in the lock/wait path -- allocating
+    // there re-enters the memory allocator (the path runs under
+    // free_page_ranges_lock during page-pool refill) and recursed unboundedly
+    // (std_malloc -> refill -> mutex::lock -> aligned_new -> std_malloc) into a
+    // kernel-stack overflow: the F2b crash.  The buffer is one identity
+    // allocation done ONCE at thread construction (a normal, non-lock context),
+    // never in the wait path.  A pointer (not an inline over-aligned buffer)
+    // keeps thread's own alignment unchanged so `new sched::thread` is fine.
+    // A thread is BLOCKED in at most one wait at a time; the small depth
+    // covers legitimate nesting (a wait predicate that locks a fork-shared
+    // mutex; the allocator re-entering a lock) with no allocation.  Beyond the
+    // depth, coherent_wait_record falls back to its on-stack record, which
+    // allocates nothing, so recursion stays bounded.
+    static constexpr unsigned _coherent_wr_slots = 4;
+    void *_coherent_wr_buf = nullptr;   // identity: _coherent_wr_slots x 128B
+    unsigned _coherent_wr_depth = 0;
 #endif
 public:
+#if CONF_fork
+    // Reserve and return a free identity slot (128B each), or nullptr if the
+    // buffer is not (yet) allocated or all slots are in use -> the caller uses
+    // its on-stack record.
+    void *coherent_wr_take() {
+        if (!_coherent_wr_buf || _coherent_wr_depth >= _coherent_wr_slots)
+            return nullptr;
+        return static_cast<char*>(_coherent_wr_buf) + (_coherent_wr_depth++) * 128;
+    }
+    void coherent_wr_release() { _coherent_wr_depth--; }
+#endif
     void destroy();
 #if CONF_fork
     mmu::address_space *address_space() const { return _current_as; }

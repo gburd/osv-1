@@ -98,6 +98,8 @@ struct wait_record : public waiter {
 };
 
 #if CONF_fork
+static_assert(sizeof(wait_record) <= 128, "per-thread coherent_wr slot too small");
+static_assert(alignof(wait_record) <= 64, "per-thread coherent_wr slot underaligned");
 // fork() Stage 2 kernel-stack coherence.
 //
 // OSv has no separate kernel stack: kernel code runs on the app thread stack.
@@ -122,28 +124,30 @@ bool fork_child_needs_heap_wait_record();
 class coherent_wait_record {
     alignas(wait_record) char _stack[sizeof(wait_record)];
     wait_record *_wr;
-    bool _heap;
+    sched::thread *_slot_owner;
 public:
     explicit coherent_wait_record(sched::thread *t) {
-        _heap = fork_child_needs_heap_wait_record();
-        // wait_record is CACHELINE_ALIGNED (over-aligned); aligned_new honors
-        // it, and the stack buffer is alignas(wait_record).
-        if (_heap) {
-            // Force the identity kernel heap: this heap wait_record exists
-            // precisely so its VA is coherent across address spaces, which the
-            // COW fork arena would break (private per-AS copy).
-            fork_arena::kernel_heap_scope kh;
-            _wr = aligned_new<wait_record>(t);
+        // Cross-AS coherence needs the record in identity memory (not the COW
+        // per-AS stack).  Use one of the waiter's OWN preallocated identity
+        // slots -- NOT a fresh malloc: allocating here re-enters the memory
+        // allocator (this runs under free_page_ranges_lock during page-pool
+        // refill) and recursed unboundedly -> kernel-stack overflow (F2b).
+        void *slot = fork_child_needs_heap_wait_record()
+                         ? t->coherent_wr_take() : nullptr;
+        if (slot) {
+            _slot_owner = t;
+            _wr = new (slot) wait_record(t);
         } else {
+            // AS0/no-child fast path, or slots exhausted (deep nesting): the
+            // on-stack record allocates nothing.
+            _slot_owner = nullptr;
             _wr = new (_stack) wait_record(t);
         }
     }
     ~coherent_wait_record() {
-        if (_heap) {
-            _wr->~wait_record();
-            free(_wr);
-        } else {
-            _wr->~wait_record();
+        _wr->~wait_record();
+        if (_slot_owner) {
+            _slot_owner->coherent_wr_release();
         }
     }
     wait_record &get() { return *_wr; }
