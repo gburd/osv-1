@@ -136,9 +136,29 @@ inline bool is_sig_ign(const struct sigaction &sa) {
 }
 
 //Similar to signal actions and mask, list of "waiters" for a given signal
-//with number "signo" is stored at the index "signo - 1"
+//with number "signo" is stored at the index "signo - 1".
+//
+// Under CONF_fork this is an INTRUSIVE list: waiters[sigidx] is the head
+// thread* of a chain threaded through each waiting thread's OWN
+// _sig_wait_next[sigidx] link (see sched::thread::_sig_wait_next).  push/remove
+// are pure pointer splices with ZERO allocation under waiters_mutex.  The old
+// std::list<thread*> allocated a node per push, and under a fork-child COW AS
+// that malloc slow path recursed through file_vma/vn_lock into pool::alloc and
+// hung PG startup (F2b family).  conf_fork=0 keeps the original std::list so
+// the heavily-tested non-fork path is byte-identical.
+#if CONF_fork
+static std::array<sched::thread *, nsignals> waiters;  // head thread* (or nullptr)
+// Sentinel stored in a thread's _sig_wait_next[sigidx] when it is NOT on that
+// signal's waiters list (distinct from nullptr, which is a valid list tail).
+static sched::thread *const SIG_WAIT_UNLINKED = reinterpret_cast<sched::thread *>(-1);
+static inline sched::thread **sig_next_slot(sched::thread *t, unsigned sigidx)
+{
+    return reinterpret_cast<sched::thread **>(&t->sig_wait_links()[sigidx]);
+}
+#else
 typedef std::list<sched::thread *> thread_list;
 static std::array<thread_list, nsignals> waiters;
+#endif
 mutex waiters_mutex;
 
 int wake_up_signal_waiters(int signo)
@@ -147,7 +167,12 @@ int wake_up_signal_waiters(int signo)
     int consumers = 0;
 
     unsigned sigidx = signo - 1;
+#if CONF_fork
+    for (sched::thread *t = waiters[sigidx]; t;
+         t = *sig_next_slot(t, sigidx)) {
+#else
     for (auto& t: waiters[sigidx]) {
+#endif
         // Wake every thread blocked on this signal (unchanged), so a thread in
         // sigwait()/sigtimedwait() sees thread_pending_signal and returns.
         t->remote_thread_local_var<int>(thread_pending_signal) = signo;
@@ -169,28 +194,57 @@ void wait_for_signal(unsigned int sigidx)
 {
     SCOPE_LOCK(waiters_mutex);
 #if CONF_fork
-    // `waiters` is a GLOBAL kernel structure manipulated cross-address-space:
-    // a fork child and its parent both push/remove on the same list.  Its
-    // std::list nodes must therefore live in the identity-mapped kernel heap,
-    // never the copy-on-write fork arena -- a COW-private node would corrupt
-    // the shared list's next/prev pointers as seen from the other address
-    // space, and a later traversal (unwait_for_signal -> list::remove) would
-    // follow a dangling link and fault (see /tmp/pg-preempt-fix.txt).  This is
-    // the same rule already applied to thread objects and wait_records.
-    fork_arena::kernel_heap_scope kh;
-#endif
+    // Intrusive, ZERO-allocation push_front.  The link lives in the current
+    // thread's own identity-memory _sig_wait_next[sigidx] (coherent across
+    // address spaces, like the thread object), so nothing is malloc()ed under
+    // waiters_mutex -- a fork-child COW AS could otherwise recurse the malloc
+    // slow path through file_vma/vn_lock into pool::alloc and hang PG startup.
+    // Idempotent: SIG_BLOCK of an already-blocked signal must not double-link
+    // (the single per-signal slot cannot hold two chain positions).
+    sched::thread *cur = sched::thread::current();
+    if (!cur->sig_wait_links()) {
+        return;  // links not yet allocated (very early boot); nobody waits here
+    }
+    sched::thread **slot = sig_next_slot(cur, sigidx);
+    if (*slot != SIG_WAIT_UNLINKED) {
+        return;  // already on this signal's list
+    }
+    *slot = waiters[sigidx];
+    waiters[sigidx] = cur;
+#else
     waiters[sigidx].push_front(sched::thread::current());
+#endif
 }
 
 void unwait_for_signal(sched::thread *t, unsigned int sigidx)
 {
     SCOPE_LOCK(waiters_mutex);
 #if CONF_fork
-    // Match wait_for_signal(): keep list-node churn on the identity heap so the
-    // shared cross-AS list is never a COW arena page.
-    fork_arena::kernel_heap_scope kh;
-#endif
+    // Intrusive, ZERO-allocation remove (no-op if t is not on the list, so the
+    // unconditional SIG_SETMASK sweep over every signal is safe).
+    if (!t->sig_wait_links()) {
+        return;
+    }
+    sched::thread **slot = sig_next_slot(t, sigidx);
+    if (*slot == SIG_WAIT_UNLINKED) {
+        return;  // not on this signal's list
+    }
+    if (waiters[sigidx] == t) {
+        waiters[sigidx] = *slot;
+    } else {
+        for (sched::thread *p = waiters[sigidx]; p; ) {
+            sched::thread **pn = sig_next_slot(p, sigidx);
+            if (*pn == t) {
+                *pn = *slot;
+                break;
+            }
+            p = *pn;
+        }
+    }
+    *slot = SIG_WAIT_UNLINKED;
+#else
     waiters[sigidx].remove(t);
+#endif
 }
 
 void unwait_for_signal(unsigned int sigidx)

@@ -1261,6 +1261,13 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
     {
         fork_arena::kernel_heap_scope kh;
         _coherent_wr_buf = aligned_alloc(64, _coherent_wr_slots * 128);
+        // Intrusive per-signal wait links for libc/signal.cc `waiters` (see
+        // thread::_sig_wait_next).  One identity allocation, ONCE, here in a
+        // normal context -- never in the wait/allocator path.  nsignals == 64.
+        _sig_wait_next = static_cast<void**>(malloc(64 * sizeof(void*)));
+        // Sentinel (void*)-1 == "not linked on that signal's list".
+        for (unsigned i = 0; i < 64; i++)
+            _sig_wait_next[i] = reinterpret_cast<void*>(-1);
     }
 #endif
 }
@@ -1323,6 +1330,7 @@ thread::~thread()
     free_syscall_stack();
 #if CONF_fork
     free(_coherent_wr_buf);
+    free(_sig_wait_next);
 #endif
     rcu_dispose(_detached_state.release());
 }

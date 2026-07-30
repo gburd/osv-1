@@ -928,6 +928,18 @@ private:
     static constexpr unsigned _coherent_wr_slots = 4;
     void *_coherent_wr_buf = nullptr;   // identity: _coherent_wr_slots x 128B
     unsigned _coherent_wr_depth = 0;
+    // Intrusive per-signal wait links for libc/signal.cc `waiters`.  The old
+    // std::list<thread*> waiters allocated a list node under waiters_mutex on
+    // every sigprocmask; when a fork-child COW AS is current that malloc slow
+    // path builds a file_vma / vn_lock that re-enters pool::alloc and hangs PG
+    // startup (the 3fcc23b36 self-signal AS-routing turns startup self-signals
+    // into this path).  Instead each thread carries its OWN link per signal
+    // (identity memory, so coherent cross-AS like the thread object itself);
+    // wait_for_signal/unwait_for_signal splice pointers with ZERO allocation
+    // under the lock.  One identity buffer of `nsignals` thread* is allocated
+    // ONCE at construction (normal context), mirroring _coherent_wr_buf.  A
+    // slot holding _SIG_WAIT_UNLINKED means "not on that signal's list".
+    void **_sig_wait_next = nullptr;    // identity: [nsignals] thread* (or sentinel)
 #endif
 public:
 #if CONF_fork
@@ -940,6 +952,7 @@ public:
         return static_cast<char*>(_coherent_wr_buf) + (_coherent_wr_depth++) * 128;
     }
     void coherent_wr_release() { _coherent_wr_depth--; }
+    void **sig_wait_links() { return _sig_wait_next; }
 #endif
     void destroy();
 #if CONF_fork
