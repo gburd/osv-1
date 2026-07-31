@@ -142,6 +142,36 @@ void thread::switch_to()
         // the thread_state (heap) are identically mapped in every AS, so the
         // instruction fetch across the mov-to-cr3 and the %c[rip] load are
         // valid before and after the CR3 write.
+        // [fork-stack] latent lost-wakeup / COW-fault fix (see the block that
+        // this replaces below).  The old code re-tested `switch_as` and did the
+        // FPU-control-word reload in C++ AFTER this asm returned.  The compiler
+        // spills `switch_as` (and the fpucw/mxcsr locals) to %rbp-relative
+        // stack slots, and %rbp here already points at the INCOMING fork
+        // child's stack under the just-loaded child CR3.  So the post-swap
+        // `if (switch_as)` re-read (`mov -0x50(%rbp),%rdx; cmp %rdx,-0x48(%rbp)`)
+        // and the else-branch's `movzwl -0x52(%rbp)` / `mov %ax,-0x34(%rbp)`
+        // touch the child's COW stack in this irq-off, non-preemptable window:
+        // a COW write-fault there trips assert(preemptable()) (arch/x64/mmu.cc:38),
+        // or a mis-read `switch_as` takes the wrong branch and #GPs on garbage
+        // MXCSR -> the resumed child NEVER runs again (lost wakeup: a forked PG
+        // backend parks in switch_to and is never rescheduled -> boot/DROP
+        // DATABASE hang).  Dormant when the surrounding code compiles like
+        // c8f9c82b; near-certain once kill()'s layout shifts the fork timing.
+        //
+        // Fix: do the whole FPU-control-word restore INSIDE this asm, right at
+        // the `1:` resume, from a KERNEL-IDENTITY-MAPPED static (RIP-relative
+        // .rodata, same VA->phys in every AS, never COW).  No %rbp-relative
+        // (stack) read or write happens after the CR3 swap, so there is nothing
+        // to COW-fault or mis-read.  The canonical control words are correct for
+        // every OSv thread (issue #1020; switch_to does no fxsave/fxrstor, so no
+        // per-thread FPU data is preserved across a switch regardless), so this
+        // is semantically identical to the fldcw(fpucw)/ldmxcsr(mxcsr) below for
+        // the AS-crossing case.  The switch_as asm therefore RETURNS to C++
+        // already-FPU-restored; the shared post-asm reload runs only for the
+        // non-switch (same-AS) path, whose %rbp is the outgoing==incoming stack
+        // and is safe.
+        static const unsigned short canon_fpucw = 0x37f;
+        static const unsigned int   canon_mxcsr = 0x1f80;
         asm volatile
             ("mov %%rbp, %c[rbp](%0) \n\t"
              "movq $1f, %c[rip](%0) \n\t"
@@ -151,13 +181,18 @@ void thread::switch_to()
              "mov %2, %%cr3 \n\t"
              "jmpq *%c[rip](%1) \n\t"
              "1: \n\t"
+             "emms \n\t"
+             "fldcw %3 \n\t"
+             "ldmxcsr %4 \n\t"
              :
              : "a"(&old->_state), "c"(&this->_state), "d"(new_cr3),
+               "m"(canon_fpucw), "m"(canon_mxcsr),
                [rsp]"i"(offsetof(thread_state, rsp)),
                [rbp]"i"(offsetof(thread_state, rbp)),
                [rip]"i"(offsetof(thread_state, rip))
              : "rbx", "rsi", "rdi", "r8", "r9",
                "r10", "r11", "r12", "r13", "r14", "r15", "memory");
+        return;
     } else
 #endif
     asm volatile
@@ -175,41 +210,15 @@ void thread::switch_to()
            [rip]"i"(offsetof(thread_state, rip))
          : "rbx", "rdx", "rsi", "rdi", "r8", "r9",
            "r10", "r11", "r12", "r13", "r14", "r15", "memory");
-    // As the catch-all solution, reset FPU state and more specifically
-    // its status word. For details why we need it please see issue #1020.
+    // Same-AS (non-fork-crossing) path only: the AS-crossing switch_as case
+    // above already ran emms + the identity FPU restore INSIDE its asm and
+    // returned, so nothing here reads the incoming child's COW stack.  Here
+    // %rbp is the (same) resumed thread's stack under an unchanged CR3, so the
+    // fpucw/mxcsr rbp-relative reloads are safe.  This is the ONLY path for
+    // conf_fork=0 (no switch_as), keeping that build byte-identical to before.
     asm volatile ("emms");
-#if CONF_fork
-    if (switch_as) {
-        // [fork-stack] signature-F lost-wakeup fix.  fpucw/mxcsr above are C
-        // locals the compiler spills to rbp-relative stack slots.  The
-        // switch_as asm has just swapped rsp/rbp AND CR3 to the INCOMING fork
-        // child, so reloading fpucw/mxcsr from those %rbp-relative slots now
-        // reads the incoming child's stack under the incoming (COW-diverged)
-        // address space -- garbage, not the values fnstcw/stmxcsr saved.  When
-        // that garbage has reserved MXCSR bits set, ldmxcsr #GP-faults and the
-        // thread being resumed can NEVER run again: the checkpointer (or any
-        // forked backend/bgworker) wedges forever with the latch/epoll wakeup
-        // already delivered -- one facet of the intermittent "checkpoint
-        // starting" stall.  The FPU control word here is a CPU-global reset
-        // (issue #1020) and every OSv thread runs with the canonical control
-        // words; switch_to does no fxsave/fxrstor, so no per-thread FPU data is
-        // preserved across a switch regardless.  Restore the canonical control
-        // words from a KERNEL-IDENTITY-MAPPED static (same VA->phys in every
-        // address space, never COW): both fldcw and ldmxcsr take that fixed
-        // address, so the reload neither READS the incoming child's garbage
-        // stack (-> ldmxcsr #GP) nor WRITES it (a COW write-fault under the
-        // incoming AS in this non-preemptable window -> assert(preemptable())
-        // abort).  The static avoids both.
-        static const unsigned short canon_fpucw = 0x37f;
-        static const unsigned int   canon_mxcsr = 0x1f80;
-        asm volatile ("fldcw %0" : : "m" (canon_fpucw));
-        asm volatile ("ldmxcsr %0" : : "m" (canon_mxcsr));
-    } else
-#endif
-    {
-        processor::fldcw(fpucw);
-        processor::ldmxcsr(mxcsr);
-    }
+    processor::fldcw(fpucw);
+    processor::ldmxcsr(mxcsr);
 }
 
 void thread::switch_to_first()
