@@ -34,6 +34,19 @@ config sched_load_balance_ms
     is a good default; raise it to reduce balancing overhead on workloads that
     do not fan out.
 
+config sched_wake_idle_steer
+  prompt "Steer woken threads to idle CPUs"
+  def_bool $(shell,grep -q ^conf_sched_wake_idle_steer=0 conf/base.mk && echo n || echo y)
+  help
+    When waking an unpinned thread whose home CPU already has runnable work,
+    place it on an idle CPU instead (a Linux select_task_rq analog).  This
+    eagerly disperses a wakeup fan-out -- e.g. one network RX thread waking a
+    worker per client connection -- across idle CPUs at wake time, instead of
+    piling the workers onto the waker's CPUs and waiting for the periodic load
+    balancer to spread them.  Costs one CPU-array scan per wakeup, stopping at
+    the first idle CPU and only when the home CPU is loaded.  Disable to keep
+    strict wake-to-home-CPU cache locality.
+
 config threads_default_kernel_stack_size
   prompt "Kernel thread default stack size"
   int

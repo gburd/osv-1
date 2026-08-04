@@ -313,6 +313,11 @@ public:
     // understood on any CPU. Use this function when migrating the thread to a
     // different CPU, and the destination CPU should run update_after_sleep().
     void export_runtime();
+    // Same as export_runtime(), but for a thread that is not running on the
+    // current CPU (e.g. a blocked thread being steered to a new CPU at wake
+    // time): its local runtime is in "from"'s scale, not the current CPU's, so
+    // divide by from->c rather than cpu::current()->c.
+    void export_runtime(cpu* from);
     // Update the thread's local runtime after a sleep, when we potentially
     // missed one or more renormalization steps (which were only done to
     // runnable threads), or need to convert global runtime to local runtime.
@@ -764,7 +769,8 @@ public:
     void* get_exception_stack_top() { return _arch.exception_stack + sizeof(_arch.exception_stack); }
 private:
     static void wake_impl(detached_state* st,
-            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting));
+            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting),
+            bool may_steer = false);
     static void sleep_impl(timer &tmr);
     void main();
 #ifdef __x86_64__

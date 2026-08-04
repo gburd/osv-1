@@ -31,6 +31,7 @@
 #endif
 #include <osv/app.hh>
 #include <osv/kernel_config_sched_load_balance_ms.h>
+#include <osv/kernel_config_sched_wake_idle_steer.h>
 #include <osv/symbols.hh>
 #include <osv/stubbing.hh>
 #include <algorithm>
@@ -1424,7 +1425,62 @@ void thread::destroy()
 // *may* contain status::sending_lock (for waitqueue wait morphing).
 // it will transition from one of the allowed initial states to the
 // waking state.
-void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
+// Wake-time idle-CPU steering (a Linux select_task_rq analog).  thread::wake()
+// normally re-queues a blocked thread onto the CPU it last ran on (its "home").
+// When one thread wakes many others -- e.g. a single network RX thread waking a
+// backend per client connection -- those wakees pile onto the waker's few CPUs
+// while the rest of the machine sits idle, and the load balancer (the only
+// other spreader) reacts only periodically.  So on the wakeup, if the woken
+// thread is unpinned and its home CPU already has runnable work while some CPU
+// is idle, steer the wakeup to an idle CPU instead of home.  This disperses the
+// clump eagerly, at wake time, rather than waiting for a balancing pass.
+//
+// Kept cheap because it runs on the hot wakeup path: a single scan of the CPU
+// array that stops at the first idle CPU, and only when home is loaded.  Pinned
+// or migration-disabled threads (_migration_lock_counter != 0) are never
+// steered.  Returns the CPU to wake the thread on (home if no steering).
+static cpu* steer_to_idle_cpu(thread* t, cpu* home)
+{
+#if CONF_sched_wake_idle_steer
+    // Only steer application threads.  Kernel worker threads (page-pool
+    // refillers, the reaper, BSD taskqueues, etc.) are few, often effectively
+    // CPU-affine, and moving them buys nothing while widening the surface for
+    // scheduler-internal wakeup races; the clump we want to disperse is the
+    // application work (e.g. a server's per-connection worker threads).
+    if (!t->is_app()) {
+        return home;
+    }
+    // Never steer the CPU's currently-running thread: a self-wake (a running
+    // thread woken before it has descheduled) is handled by the
+    // "&t == thread::current()" fast path in handle_incoming_wakeups(), which
+    // does not run update_after_sleep(); migrating it there would leave its
+    // runtime exported (global) and trip ran_for()'s _renormalize_count assert.
+    if (t == thread::current()) {
+        return home;
+    }
+    // Never move a pinned or migration-disabled thread (migratable() checks
+    // _migration_lock_counter, which pin() bumps).
+    if (!t->migratable()) {
+        return home;
+    }
+    // If home has no other runnable work, waking there keeps cache locality;
+    // steering would only cost a migration for no dispersal benefit.
+    if (home->load() == 0) {
+        return home;
+    }
+    // Find an idle CPU to absorb the wakeup.  First idle CPU wins (cheap); if
+    // none is idle, leave the thread on its home CPU for the load balancer.
+    for (auto c : cpus) {
+        if (c != home && c->load() == 0) {
+            return c;
+        }
+    }
+#endif
+    return home;
+}
+
+void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask,
+                       bool may_steer)
 {
     status old_status = status::waiting;
     trace_sched_wake(st->t);
@@ -1441,8 +1497,34 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 #if CONF_lazy_stack_invariant
         assert(!sched::preemptable());
 #endif
+        // If home is loaded and an idle CPU exists, steer this wakeup there.
+        // Only steer a thread that was genuinely blocked (old_status ==
+        // waiting): a status::sending_lock wakeup is a mutex lock hand-off
+        // whose runtime/scheduling handoff is delicate, so leave it on its
+        // home CPU.  may_steer is set only by wake() (normal thread context,
+        // interrupts enabled, preemptable) -- never from the IRQ-context
+        // wake_with_irq_disabled() path, where a cross-CPU migration could nest
+        // inside an interrupt and trip reschedule_from_interrupt()'s
+        // exception-depth assert.
+        cpu* target = (may_steer && old_status == status::waiting)
+            ? steer_to_idle_cpu(st->t, tcpu) : tcpu;
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
+            if (target != tcpu) {
+                // Retarget the thread to the idle CPU before enqueueing it
+                // there.  The thread is in status::waking, so no other waker
+                // can touch it and the load balancer (which only moves queued
+                // threads) will not race us -- the same envelope thread::pin()
+                // relies on for its status::waking migrate case.  export_runtime
+                // converts the runtime from the home CPU's local scale to a
+                // global value that the destination's handle_incoming_wakeups()
+                // converts back via update_after_sleep().
+                st->t->_runtime.export_runtime(tcpu);
+                st->_cpu = target;
+                st->t->remote_thread_local_var(::percpu_base) = target->percpu_base;
+                st->t->remote_thread_local_var(current_cpu) = target;
+                tcpu = target;
+            }
             tcpu->incoming_wakeups[c].push_back(*st->t);
         }
         if (!tcpu->incoming_wakeups_mask.test_all_and_set(c)) {
@@ -1466,7 +1548,8 @@ void thread::wake()
     sched::ensure_next_stack_page_if_preemptable();
 #endif
     WITH_LOCK(rcu_read_lock) {
-        wake_impl(_detached_state.get());
+        wake_impl(_detached_state.get(),
+                  1 << unsigned(status::waiting), /*may_steer=*/true);
     }
 }
 
@@ -2209,6 +2292,14 @@ void thread_runtime::export_runtime()
 {
     if (_renormalize_count != -1) {
         _Rtt /= cpu::current()->c;;
+        _renormalize_count = -1; // special signal to update_after_sleep()
+    }
+}
+
+void thread_runtime::export_runtime(cpu* from)
+{
+    if (_renormalize_count != -1) {
+        _Rtt /= from->c;
         _renormalize_count = -1; // special signal to update_after_sleep()
     }
 }
