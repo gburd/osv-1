@@ -690,7 +690,21 @@ void net::receiver(struct rxq* rxq)
                 ? _ifn->if_classifier.post_packet(m_head, wake_batch)
                 : _ifn->if_classifier.post_packet(m_head);
             if (!fast_path) {
+                // The slow path pushes the packet up the stack (tcp_input etc.),
+                // which may take a blocking mutex.  When batching we hold the
+                // drain-pass rcu_read_lock (preemption-off); a blocking take
+                // under it trips the preemptable() assert.  Flush + drop the
+                // lock around the slow path (flushing first so no net_channel
+                // pointer recorded this pass can be rcu-freed during the gap),
+                // then re-take for the rest of the drain.
+                if (batch_wakes) {
+                    wake_batch.flush();
+                    osv::rcu_read_lock.unlock();
+                }
                 (*_ifn->if_input)(_ifn, m_head);
+                if (batch_wakes) {
+                    osv::rcu_read_lock.lock();
+                }
             }
 
             trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
