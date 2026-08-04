@@ -483,6 +483,11 @@ void net::receiver()
     // Runtime toggle for A/B; default on.
     net_channel_wake_batch wake_batch;
     const bool batch_wakes = net::batch_wakes_enabled();
+    // Slow-path (non-classified) packets are deferred to after the drain's
+    // rcu_read_lock is released: if_input() runs the full BSD stack (tcp_input
+    // etc.) which may demand-fault a page, and page_fault asserts preemptable()
+    // -- illegal under the rcu_read_lock the batch path holds across the drain.
+    std::vector<mbuf*> slow_path;
 
     while (1) {
 
@@ -569,7 +574,13 @@ void net::receiver()
                 ? _ifn->if_classifier.post_packet(m_head, wake_batch)
                 : _ifn->if_classifier.post_packet(m_head);
             if (!fast_path) {
-                (*_ifn->if_input)(_ifn, m_head);
+                if (batch_wakes) {
+                    // Cannot call if_input() here: we hold rcu_read_lock and the
+                    // BSD input path may fault.  Defer to after unlock (below).
+                    slow_path.push_back(m_head);
+                } else {
+                    (*_ifn->if_input)(_ifn, m_head);
+                }
             }
 
             trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
@@ -586,6 +597,12 @@ void net::receiver()
             // per destination CPU.  Still under the drain's rcu_read_lock.
             wake_batch.flush();
             osv::rcu_read_lock.unlock();
+            // Now preemptable again: run the deferred slow-path packets up the
+            // stack (tcp_input may fault, which is fine outside the rcu lock).
+            for (mbuf* m : slow_path) {
+                (*_ifn->if_input)(_ifn, m);
+            }
+            slow_path.clear();
         }
 
         // Update the stats
