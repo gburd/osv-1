@@ -334,3 +334,117 @@ void flush()
 }
 
 }
+
+// ---------------------------------------------------------------------------
+// Option B: per-CPU dispatch shards (net_shard_dispatch).
+//
+// Each CPU runs one dispatch worker with an SPSC ring of mbuf*.  The receiver
+// is the sole producer into every ring (it only hashes the packet and pushes
+// it to the owning dispatcher), and each dispatcher is the sole consumer of
+// its own ring.  A connection always hashes to the same dispatcher, so that
+// dispatcher is the sole producer into the connection's net_channel ring
+// (SPSC preserved).  The dispatcher classifies + pushes + wakes for its
+// connections on its own CPU, spreading the whole dispatch stage across CPUs.
+// ---------------------------------------------------------------------------
+namespace net_shard_dispatch {
+
+static const unsigned RING_SIZE = 512;
+
+struct shard {
+    ring_spsc<mbuf*, unsigned, RING_SIZE> ring;
+    sched::thread* thread = nullptr;
+    std::atomic<bool> fed{false};
+};
+
+static std::vector<shard*> shards;   // index == cpu id
+static bool _enabled = false;
+static std::function<net_channel* (mbuf*)> _classify;
+static std::function<void (mbuf*)> _slow;
+
+bool enabled()
+{
+    return _enabled;
+}
+
+static void shard_loop(shard* s)
+{
+    while (true) {
+        sched::thread::wait_until([s] {
+            return !s->ring.empty();
+        });
+        s->fed.store(false, std::memory_order_relaxed);
+        mbuf* m;
+        while (s->ring.pop(m)) {
+            net_channel* nc = _classify(m);
+            if (nc) {
+                nc->wake();
+            } else {
+                _slow(m);
+            }
+        }
+    }
+}
+
+void init(std::function<net_channel* (mbuf*)> classify,
+          std::function<void (mbuf*)> slow)
+{
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+    if (const char* e = getenv("OSV_NET_DISPATCH_SHARD")) {
+        if (e[0] != '0') {
+            _enabled = true;
+        }
+    }
+    if (!_enabled) {
+        return;
+    }
+    _classify = std::move(classify);
+    _slow = std::move(slow);
+    unsigned n = sched::cpus.size();
+    shards.resize(n, nullptr);
+    for (unsigned i = 0; i < n; i++) {
+        auto s = aligned_new<shard>();
+        s->thread = sched::thread::make([s] { shard_loop(s); },
+                sched::thread::attr().pin(sched::cpus[i])
+                    .name(std::string("net-shard") + std::to_string(i)));
+        shards[i] = s;
+        s->thread->start();
+    }
+    printf("net_shard_dispatch ARMED (%u per-CPU dispatch shards)\n", n);
+}
+
+bool dispatch(mbuf* m, unsigned hash)
+{
+    if (!_enabled) {
+        return false;
+    }
+    unsigned n = shards.size();
+    if (n < 2) {
+        return false;
+    }
+    unsigned idx = hash % n;
+    shard* s = shards[idx];
+    if (!s || !s->ring.push(m)) {
+        return false;   // ring full -> caller dispatches inline
+    }
+    s->fed.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+void flush()
+{
+    if (!_enabled) {
+        return;
+    }
+    for (shard* s : shards) {
+        if (s && s->fed.load(std::memory_order_relaxed)) {
+            s->fed.store(false, std::memory_order_relaxed);
+            s->thread->wake();
+        }
+    }
+}
+
+}

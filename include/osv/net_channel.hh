@@ -181,4 +181,29 @@ void flush();
 
 }
 
+// Option B: per-CPU dispatch shards (net_shard_dispatch).
+//
+// Partition connections across N per-CPU dispatch workers by a hash of the
+// connection.  Each net_channel therefore has exactly ONE dispatcher, so its
+// ring stays single-producer.  The receiver only computes the hash and hands
+// the raw packet to the owning dispatcher (the receiver is the sole producer
+// into each dispatcher's handoff ring); the dispatcher does classify + push +
+// wake for its connections on its own CPU.  This moves the whole dispatch
+// stage (classify + wake) off the single receiver and spreads it across CPUs.
+// Enabled at boot from OSV_NET_DISPATCH_SHARD.
+namespace net_shard_dispatch {
+
+bool enabled();
+// classify: classify+push a packet, returns the net_channel to wake or nullptr.
+// slow: handle an unclassified packet (the interface's if_input).
+void init(std::function<net_channel* (mbuf*)> classify,
+          std::function<void (mbuf*)> slow);
+// Hand a packet to the owning dispatcher chosen by hash.  Returns false if the
+// handoff ring was full (caller should dispatch inline as a fallback).
+bool dispatch(mbuf* m, unsigned hash);
+// Signal the fed dispatchers after a receiver drain pass.
+void flush();
+
+}
+
 #endif /* NETCHANNEL_HH_ */

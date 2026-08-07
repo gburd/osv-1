@@ -463,6 +463,35 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
     return false;
 }
 
+// Light connection hash for Option B shard routing: extract the TCP/IPv4
+// 4-tuple and combine it the same way the net_channel classifier keys
+// connections, so a connection always routes to one dispatch shard.  Returns
+// a spread value for non-TCP/IPv4 packets (they take the shard's slow path).
+static unsigned rx_conn_hash(mbuf* m)
+{
+    caddr_t h = m->m_hdr.mh_data;
+    if (unsigned(m->m_hdr.mh_len) < ETHER_HDR_LEN + sizeof(struct ip)) {
+        return 0;
+    }
+    auto eh = reinterpret_cast<struct ether_header*>(h);
+    if (ntohs(eh->ether_type) != ETHERTYPE_IP) {
+        return 0;
+    }
+    h += ETHER_HDR_LEN;
+    auto iph = reinterpret_cast<struct ip*>(h);
+    unsigned ip_size = iph->ip_hl << 2;
+    if (ip_size < sizeof(struct ip) || iph->ip_p != IPPROTO_TCP) {
+        return 0;
+    }
+    auto s = iph->ip_src.s_addr;
+    auto d = iph->ip_dst.s_addr;
+    auto th = reinterpret_cast<struct tcphdr*>(h + ip_size);
+    unsigned sp = ntohs(th->th_sport);
+    unsigned dp = ntohs(th->th_dport);
+    // Same combine as ipv4_tcp_conn_id::hash().
+    return (unsigned)(s ^ d) ^ sp ^ dp;
+}
+
 void net::receiver()
 {
     vring* vq = _rxq.vqueue;
@@ -470,6 +499,15 @@ void net::receiver()
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
+
+    // One-time init of the per-CPU dispatch shards (Option B), now that the
+    // interface and its classifier exist.  No-op unless OSV_NET_DISPATCH_SHARD
+    // is set.  The shard workers classify+push+wake / slow-path on their own
+    // CPU using these closures.
+    auto ifn = _ifn;
+    net_shard_dispatch::init(
+        [ifn] (mbuf* m) { return ifn->if_classifier.classify_and_push(m); },
+        [ifn] (mbuf* m) { (*ifn->if_input)(ifn, m); });
 
     while (1) {
 
@@ -543,13 +581,25 @@ void net::receiver()
             rx_packets++;
             rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
 
-            if (net_wake_dispatch::enabled()) {
-                // De-serialized dispatch: classify + enqueue here (we are the
-                // sole producer to each net_channel ring), but hand the wake
-                // to a per-CPU worker so the IPI + woken-backend scheduling
-                // run off this receiver CPU.  Fall back to an inline wake if
-                // the handoff ring is full, and to the slow path when the
-                // packet does not classify.
+            if (net_shard_dispatch::enabled()) {
+                // Option B: hash the connection and hand the raw packet to the
+                // owning per-CPU dispatch shard, which does classify+push+wake
+                // on its own CPU.  Fall back to inline dispatch if the shard
+                // ring is full.
+                unsigned h = rx_conn_hash(m_head);
+                if (!net_shard_dispatch::dispatch(m_head, h)) {
+                    bool fast_path = _ifn->if_classifier.post_packet(m_head);
+                    if (!fast_path) {
+                        (*_ifn->if_input)(_ifn, m_head);
+                    }
+                }
+            } else if (net_wake_dispatch::enabled()) {
+                // Option A: classify + enqueue here (we are the sole producer
+                // to each net_channel ring), but hand the wake to a per-CPU
+                // worker so the IPI + woken-backend scheduling run off this
+                // receiver CPU.  Fall back to an inline wake if the handoff
+                // ring is full, and to the slow path when the packet does not
+                // classify.
                 net_channel* nc = _ifn->if_classifier.classify_and_push(m_head);
                 if (nc) {
                     if (!net_wake_dispatch::defer_wake(nc)) {
@@ -582,7 +632,9 @@ void net::receiver()
 
         // Signal the per-CPU wake workers fed during this drain pass so they
         // wake their backends in parallel while we go back to the RX ring.
-        if (net_wake_dispatch::enabled()) {
+        if (net_shard_dispatch::enabled()) {
+            net_shard_dispatch::flush();
+        } else if (net_wake_dispatch::enabled()) {
             net_wake_dispatch::flush();
         }
     }
