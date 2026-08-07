@@ -874,6 +874,7 @@ void main_cont(int loader_argc, char** loader_argv)
 #if CONF_networking_stack
     net_init();
     net_wake_dispatch::init();
+    sched::arm_wakeprof();
     boot_time.event("Network initialized");
 #endif
 
