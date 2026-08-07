@@ -994,6 +994,9 @@ public:
     stat_counter stat_switches;
     stat_counter stat_preemptions;
     stat_counter stat_migrations;
+    // WAKEPROF: uptime-ns timestamp set at wake_impl(), read at switch-in to
+    // measure wake-to-run latency.  Instrumentation only; armed by env.
+    u64 _wakeprof_ts {0};
 private:
     thread_runtime::duration _total_cpu_time {0};
     std::atomic<u64> _cputime_estimator {0}; // for thread_clock()
@@ -1235,6 +1238,10 @@ void init(std::function<void ()> cont);
 
 void init_tls(elf::tls_data tls);
 size_t kernel_tls_size();
+
+// WAKEPROF: arm the wake-to-run latency profiler from OSV_WAKEPROF; no-op if
+// unset.  Instrumentation only.
+void arm_wakeprof();
 
 inline void acquire(mutex_t& mtx)
 {

@@ -11,6 +11,8 @@
 #include <osv/mutex.h>
 #include <osv/rwlock.h>
 #include <mutex>
+#include <cstdio>
+#include <cstdlib>
 #include <osv/debug.hh>
 #include <osv/irqlock.hh>
 #include <osv/align.hh>
@@ -54,6 +56,58 @@ using namespace osv;
 using namespace osv::clock::literals;
 
 namespace sched {
+
+// ===================== WAKEPROF (wake->run latency profiler) =====================
+// Env OSV_WAKEPROF=1 arms it.  Accumulates, per (approx) log2-ns bucket, the
+// wake-to-run latency (time from wake_impl() marking a thread runnable to its
+// switch-in), the runqueue depth seen at switch-in, and IPI-vs-local wake
+// counts.  A background thread prints to the console every 5s.  Purely
+// instrumentation; no scheduler behavior changes when disabled.
+namespace wakeprof {
+    bool enabled = false;
+    static const int NB = 28;          // buckets: <1ns .. up to ~2^27 ns (~134ms)
+    std::atomic<u64> hist[NB];         // wake->run latency, log2(ns) bucketed
+    std::atomic<u64> rq_hist[64];      // runqueue depth at switch-in
+    std::atomic<u64> n_samples{0};
+    std::atomic<u64> lat_sum_ns{0};
+    std::atomic<u64> lat_max_ns{0};
+    std::atomic<u64> ipi_wakeups{0};   // cross-CPU IPI wakeups
+    std::atomic<u64> local_wakeups{0}; // same-CPU wakeups (need_reschedule)
+    std::atomic<u64> switches{0};      // total switch-ins observed
+    inline int bucket(u64 ns) {
+        int b = 0;
+        while (ns > 1 && b < NB - 1) { ns >>= 1; b++; }
+        return b;
+    }
+    inline void record(u64 lat_ns, unsigned rqdepth) {
+        hist[bucket(lat_ns)].fetch_add(1, std::memory_order_relaxed);
+        rq_hist[rqdepth < 64 ? rqdepth : 63].fetch_add(1, std::memory_order_relaxed);
+        n_samples.fetch_add(1, std::memory_order_relaxed);
+        lat_sum_ns.fetch_add(lat_ns, std::memory_order_relaxed);
+        u64 om = lat_max_ns.load(std::memory_order_relaxed);
+        while (lat_ns > om && !lat_max_ns.compare_exchange_weak(om, lat_ns)) {}
+    }
+    void dump() {
+        u64 n = n_samples.load(), sw = switches.load();
+        u64 s = lat_sum_ns.load(), mx = lat_max_ns.load();
+        printf("WAKEPROF samples=%lu sw=%lu avg_ns=%lu max_ns=%lu ipi=%lu local=%lu\n",
+               (unsigned long)n, (unsigned long)sw,
+               (unsigned long)(n ? s / n : 0), (unsigned long)mx,
+               (unsigned long)ipi_wakeups.load(), (unsigned long)local_wakeups.load());
+        printf("WAKEPROF lat_hist(log2ns):");
+        for (int i = 0; i < NB; i++) {
+            u64 v = hist[i].load();
+            if (v) printf(" b%d=%lu", i, (unsigned long)v);
+        }
+        printf("\n");
+        printf("WAKEPROF rq_depth_at_switchin:");
+        for (int i = 0; i < 64; i++) {
+            u64 v = rq_hist[i].load();
+            if (v) printf(" d%d=%lu", i, (unsigned long)v);
+        }
+        printf("\n");
+    }
+}
 
 TRACEPOINT(trace_sched_idle, "");
 TRACEPOINT(trace_sched_idle_ret, "");
@@ -380,6 +434,17 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     n->cputime_estimator_set(now, n->_total_cpu_time);
     assert(n->_detached_state->st.load() == thread::status::queued);
     trace_sched_switch(n, p->_runtime.get_local(), n->_runtime.get_local());
+
+    if (wakeprof::enabled) {
+        wakeprof::switches.fetch_add(1, std::memory_order_relaxed);
+        u64 wts = n->_wakeprof_ts;
+        if (wts) {
+            u64 now_ns = osv::clock::uptime::now().time_since_epoch().count();
+            u64 lat = now_ns > wts ? now_ns - wts : 0;
+            wakeprof::record(lat, runqueue.size());
+            n->_wakeprof_ts = 0;
+        }
+    }
 
     if (called_from_yield) {
         enqueue(*p);
@@ -1396,6 +1461,9 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
             return;
         }
     }
+    if (wakeprof::enabled) {
+        st->t->_wakeprof_ts = osv::clock::uptime::now().time_since_epoch().count();
+    }
     auto tcpu = st->_cpu;
     WITH_LOCK(preempt_lock_in_rcu) {
         unsigned c = cpu::current()->id;
@@ -1413,8 +1481,10 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
             // FIXME: warrant an interruption
             if (tcpu != current()->tcpu()) {
                 tcpu->send_wakeup_ipi();
+                if (wakeprof::enabled) wakeprof::ipi_wakeups.fetch_add(1, std::memory_order_relaxed);
             } else {
                 need_reschedule = true;
+                if (wakeprof::enabled) wakeprof::local_wakeups.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -2157,6 +2227,22 @@ void init(std::function<void ()> cont)
 void init_tls(elf::tls_data tls_data)
 {
     tls = tls_data;
+}
+
+void arm_wakeprof()
+{
+    if (const char* e = getenv("OSV_WAKEPROF")) {
+        if (e[0] != '0') {
+            wakeprof::enabled = true;
+            thread::make([] {
+                while (true) {
+                    sched::thread::sleep(std::chrono::seconds(5));
+                    wakeprof::dump();
+                }
+            }, thread::attr().name("wakeprof").detached())->start();
+            printf("WAKEPROF ARMED (dumping every 5s)\n");
+        }
+    }
 }
 
 size_t kernel_tls_size()
