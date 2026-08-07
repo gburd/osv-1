@@ -1,0 +1,12 @@
+=== virtio-net multiqueue: BOOT STABILITY (patched kernel, upstream/master + fix) ===
+Kernel: OSv v0.57.0-375-gae077860 + virtio-net-multiqueue patch
+Host: 96-vCPU x86-64 bare-metal, KVM, qemu 9.0.2
+Image: native-example (single virtio-blk disk, virtio-net-pci, virtio-rng)
+Harness: 10 boots per -smp level; success = eth0 configured + "Booted up" + no abort/panic/exhaustion
+
+SMP=4  : 10/10 boots reached ready
+SMP=16 : 10/10 boots reached ready
+SMP=48 : 10/10 boots reached ready   <-- was: -smp 48 boot CRASH (MSI-X vector exhaustion) before fix
+
+Single-disk -smp 48 now boots (eth0: 192.168.122.15, Booted up ~320ms).
+Next: multi-virtio-blk MSI-X exhaustion A/B (stock vs patched) to prove the budget fix.

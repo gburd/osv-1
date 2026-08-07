@@ -1,0 +1,21 @@
+shm: fix stale PTE bug, implement POSIX shm and ftruncate
+
+shm_file::put_page() previously returned without clearing the PTE
+when the page was reused.  After munmap, stale mappings persisted
+on the next VMA at the same virtual address, so a freshly-mmaped
+SHM segment could read whatever the previous tenant had written.
+Fix: call clear_pte(ptep) before returning false from put_page()
+(returning false so the TLB-gather path doesn't free the physical
+page; shm_file::close() owns it).
+
+Implement the rest of the POSIX shm surface that the fix exposed:
+
+  - shm_open() / shm_unlink() honour /dev/shm semantics.
+  - shmctl(IPC_STAT) reports correct nattch / size / mode.
+  - shm_file::truncate() resizes a segment in-place (the existing
+    sys_ftruncate() now delegates through fp->truncate() for files
+    without a backing dentry, e.g. SHM and io_uring queues).
+
+Tests: tst-shm-consistency.cc, 30 cases covering nattch transitions,
+dual-mapping write visibility, file-backed MAP_SHARED across two
+mappings, and IPC_RMID idempotency.  All pass on ZFS and ramfs.

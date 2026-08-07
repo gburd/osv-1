@@ -1,0 +1,53 @@
+=== APPLES-TO-APPLES HARNESS: first matched A/B (OSv+PG vs Linux+PG, same host) ===
+Boxes (BOTH TERMINATED + all EBS deleted):
+  DB host  i-034a01ae6b9b4dfa1  osv-abhost   m5d.4xlarge (16 vCPU, 61G) us-east-2/2a  vol-0edd8d9b2fb20674f(300G, deleted)
+  Driver   i-04ce0784b6dbb3079  osv-abdriver m5d.4xlarge (16 vCPU)      us-east-2/2a  vol-0775c2649fcadffcd(100G, deleted)
+
+TOPOLOGY THAT WORKED (real NIC, NOT slirp):
+  Linux bridge br0 (host 192.168.100.1/24) + tap0 enslaved to br0, qemu -netdev tap,vhost=on.
+  Guest static IP 192.168.100.2/24. iptables DNAT ens5(172.31.5.69):5432 -> 192.168.100.2:5432,
+  MASQUERADE guest egress. Driver box hits DB-host private 172.31.5.69:5432 (intra-SG) -> DNAT -> guest.
+  inet_server_addr()=192.168.100.2 on BOTH sides (proved NOT loopback; real virtio-net path).
+
+VIRTUALIZATION (identical A and B; ONLY the guest OS differs):
+  qemu-system-x86_64 -machine pc -accel tcg,thread=multi -cpu max -m 8G -smp 8 -nographic -no-reboot \
+    <OS-SOURCE> \
+    -device virtio-blk-pci,id=blk1,drive=hd1 -drive file=<pgdata>.raw,if=none,id=hd1,format=raw,cache=none,aio=native \
+    -netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on \
+    -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56
+  A (OSv):   <OS-SOURCE> = -kernel loader.elf -append "--rootfs=ramfs --ip=eth0,192.168.100.2,... <PG cmd>"
+             + -device virtio-blk-pci,id=blk0,drive=hd0 -drive file=usr.img,if=none,id=hd0,cache=writeback,aio=threads
+  B (Linux): <OS-SOURCE> = -device virtio-blk-pci,id=blk0,drive=hd0 -drive file=debian12.qcow2,...,format=qcow2
+             + -drive file=seed.iso,if=virtio,format=raw,readonly=on   (cloud-init config only)
+  => byte-identical machine/accel/cpu/mem/smp/virtio-net-vhost-tap/virtio-blk-data. Only OS boot differs.
+
+WHY TCG not KVM: metal is quota-blocked. Service Quotas shows Standard=192 vCPU but EC2 LIVE-enforces
+  32 vCPU for the metal bucket (real run: VcpuLimitExceeded "limit of 32"; dry-run misleadingly passes).
+  No .metal <=32 vCPU exists -> no /dev/kvm -> qemu TCG (software emulation) on m5d.4xlarge.
+  Both guests run identical TCG -> FAIRNESS PRESERVED; the tap+vhost wedge test is orthogonal to CPU mode.
+
+MATCHED A/B pgbench (scale=5, dur=15s, driver = system pgbench 16.14 on the driver box, IDENTICAL invocation):
+                        RW_c1 RW_c8 RW_c16 RW_c32   RO_c1 RO_c8 RO_c16 RO_c32
+  OSv  (musl PG18.4,ZFS) 101   224   200    103      721  2000   1109    710   [shared_buffers=256MB]
+  Linux(glibc PG18.4,ext4)121  577   526    479      789  4861   4739   4630   [shared_buffers=1GB]
+
+*** THE KEY VALIDATION: c16 AND c32 COMPLETED on BOTH sides. ***
+  The qemu-slirp single-queue RX wedge (which wedged the 250wh/8VU build and would wedge c16/c32) is
+  CLEARED by the real tap+vhost NIC. The gating M1-parity blocker (#1 in the gap analysis) is UNBLOCKED.
+
+HONEST CAVEATS (for the follow-on):
+  1. TCG-limited absolute tps (software emulation) -- ratios/absolute #s are NOT the real parity number;
+     that needs KVM metal (quota-blocked this run). The HARNESS + wedge-clearing are the deliverable.
+  2. Config mismatch this cut: OSv ran shared_buffers=256MB (8GB and even 1GB hung OSv boot under TCG --
+     TCG shared-mem zeroing is brutally slow; 256MB reached "ready" in 9s), Linux ran 1GB. 21-pg-config.env
+     sets 1GB for both; re-run OSv at a value that boots fast under KVM (metal) to match exactly.
+  3. fs axis: OSv=ZFS (raidz1-capable, single vdev here) vs Linux=ext4 (OpenZFS-on-Linux DKMS was too heavy
+     for this cut). ZFS-vs-ZFS is the target; note the fs delta.
+  4. plpgsql preload in 21-pg-config.env is needed for HammerDB stored-procs but HUNG OSv boot under TCG;
+     omit for pgbench (used here). HammerDB cell deferred (explicitly follow-on).
+
+HARNESS FILES (.local/ec2-assets/ab-harness/): 00-net-bridge.sh 10-boot-osv.sh 11-boot-linux.sh
+  20-osv-mkpool-initdb.sh 21-pg-config.env 22-osv-seed.sh 30-osv-build.sh 31-mk-seed-iso.sh
+  40-pgbench-driver.sh cpio_push.py linux-user-data linux-network-config.
+SECURITY AUDIT CLEAN: SG ingress = SSH from 73.4.58.126/32 + intra-SG only (NO 0.0.0.0/0 ingress);
+  only default 0.0.0.0/0 EGRESS (normal). No public bucket/AMI/snapshot created. Both boxes + all EBS gone.

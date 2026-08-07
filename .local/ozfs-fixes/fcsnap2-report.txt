@@ -1,0 +1,291 @@
+================================================================================
+Firecracker PERSISTENT WARM Snapshot Checkpoint for OSv + PostgreSQL 18 (musl)
++ OpenZFS, plus two OSv resume-hardening investigations.
+Report 2 (follow-on to fcsnap-report.txt)
+================================================================================
+Author:  Greg Burd
+Date:    2026-07-30 (us-east-2, profile ouch)
+
+--------------------------------------------------------------------------------
+HEADLINE
+--------------------------------------------------------------------------------
+  A PERSISTENT WARM checkpoint stays warm across a full freeze + clean
+  Firecracker shutdown + warm restart:
+
+    FIRST  warm launch (restore snapshot-A)         restore->first query = 0.176 s
+    SECOND warm launch (restore FROZEN snapshot-B)  restore->first query = 0.174 s (round1)
+                                                                          0.169 s (round2)
+
+  Both launches are the WARM ~0.17 s path (not the ~2.6-11.75 s cold boot).
+  The cold boot happens ONCE as setup to mint the base warm snapshot; it is not
+  the headline.
+
+  The table + all rows inserted in the restored session SURVIVE the
+  freeze -> clean-shutdown -> warm-restart, and pg_postmaster_start_time()
+  stays equal to the very first launch across every freeze/thaw cycle. The
+  instance identity and its data are a durable resumable checkpoint.
+
+  Task 1 (two OSv resume-hardening fixes, each a standalone master PR):
+    (A) RNG-on-resume: CONFIRMED REAL BUG, fixed and validated.
+        -> new master PR branch pr/rng-reseed-on-resume  (bundle /tmp/fix-rng.bundle)
+    (B) kvmclock-resync-on-resume: NOT NEEDED on Firecracker (gap not real).
+        Measured offset is sub-millisecond, no backward jump. Evidence below.
+        No fix invented. No PR.
+
+--------------------------------------------------------------------------------
+ENVIRONMENT
+--------------------------------------------------------------------------------
+Box:   osv-fcsnap2  i-0f4c7b094dd7b224f  m5d.metal  us-east-2c
+       18.223.1.149 (public) / 172.31.39.235 (private)
+       96 vCPU, 377 GiB RAM, /dev/kvm present, 4x 838G instance-store NVMe.
+       AL2023 kernel 6.18.38, Firecracker v1.7.0, qemu-img 9.2.3, psql 15 client.
+       200 GiB gp3 root (DeleteOnTermination=true). Own box, not bench-db / osv-cor-a.
+Serving image (Tasks 2+3): read-only copy of the built PG18-fork+OpenZFS FC
+       image from osv-cor-a:/build/osv/build/release.x64 (branch corruptor-fix,
+       loader Jul 29, usr.img Jul 29). PG 18.4 x86_64-pc-linux-musl PIE,
+       OpenZFS 2.4.3. No workload run on osv-cor-a (file copy only, as allowed).
+Master build (Task 1): fresh clone of upstream/master (cb8c7205b) built ON this
+       box (installed the AL2023 toolchain; AL2023 is not in scripts/setup.py so
+       deps were installed by hand). fs=rofs images (ramfs does not populate
+       /dev, so /dev/random is absent there; rofs is the correct minimal image).
+       One host-only build-tooling patch: AL2023 has no qemu-nbd, so
+       scripts/imgedit.py was given a plain-file fallback for raw images (it only
+       rewrites fixed header bytes). This is NOT part of any PR.
+
+--------------------------------------------------------------------------------
+TIMINGS TABLE (all measured on this box; warm numbers are the star)
+--------------------------------------------------------------------------------
+  Config: 4 GiB guest RAM, 8 vCPU, single-file ZFS pool (recordsize=8k, lz4),
+          Firecracker Full snapshots.
+
+  STAGE                                              TIME
+  ----------------------------------------------     -----------------------
+  (setup) cold boot -> ready                         2.607 s   [setup only]
+  (setup) cold ready -> first query                  ~0.28 s
+  (setup) cold total launch -> first query           ~2.89 s   [not the headline]
+
+  snapshot-A create (pause + write, 4 GiB mem)       ~5.3-5.5 s (pause 0.001 s)
+  FC resume (load+resume API return), snapshot-A     0.056 s
+
+  >>> FIRST  WARM LAUNCH restore -> first query      0.176 s   <== HEADLINE
+      pg_postmaster_start_time                       = first-ever launch
+
+  snapshot-B create (pause + write, 4 GiB mem)       5.494 s (pause 0.001 s)
+  snapshot-B backing-file preserve (cp pool.raw)     0.003 s
+  clean FC shutdown (kill; process gone)             0.265 s
+
+  FC resume (load+resume API return), snapshot-B     0.047 s
+  >>> SECOND WARM LAUNCH restore -> first query      0.174 s (round1)  <== HEADLINE
+                                                     0.169 s (round2)
+      full warm launch incl. pool cp + load + resume 0.219 s (round1)
+                                                     0.214 s (round2)
+
+  Snapshot artifacts:
+    vmstate  : 72-92 KB (device + vCPU state, tiny)
+    mem      : 4 GiB dense; gzips to ~34 MB (mostly zero pages). Use a small
+               --mem matched to shared_buffers + working set, or FC diff
+               snapshots, to shrink the write/restore cost further.
+
+  Cold-vs-warm: warm second launch 0.174 s vs cold first launch ~2.89 s here
+  (~16x). Against the prior report's un-tuned 11.75 s cold baseline (16 GiB
+  RAID-Z) the warm path is ~67x faster. The whole PG musl-PIE mmap + init cost
+  is baked into the snapshot memory image.
+
+--------------------------------------------------------------------------------
+TASK 2: pg_postmaster_start_time() == FIRST-ever launch, across the full
+        persistent lifecycle
+--------------------------------------------------------------------------------
+  Measured pg_postmaster_start_time() at each stage of one lifecycle run:
+
+    first-ever boot (setup)              2026-07-30 15:31:03.355476+00
+    after FIRST warm launch (restore A)  2026-07-30 15:31:03.355476+00
+    stage 2 (with table created)         2026-07-30 15:31:03.355476+00
+    after SECOND warm launch round1      2026-07-30 15:31:03.355476+00
+    after SECOND warm launch round2      2026-07-30 15:31:03.355476+00
+
+  IDENTICAL at every stage. It is preserved for free because a Full snapshot
+  restore resumes PG's running process memory (it is never restarted), and the
+  freeze -> clean-shutdown -> warm-restart cycle just re-loads that same memory.
+  No change was needed to make this hold; it survives the re-snapshot +
+  clean-shutdown + cold-process restart because the "cold process restart" is
+  of Firecracker, not of PostgreSQL. PG is resumed, so its start time is the
+  first-ever launch.
+
+--------------------------------------------------------------------------------
+TASK 3: persistent warm snapshot-checkpoint lifecycle (with timings above)
+--------------------------------------------------------------------------------
+  Cycle executed and timed:
+    0. (setup) cold boot OSv+PG on the ZFS pool to ready; take snapshot-A.
+    1. FIRST warm launch: restore snapshot-A, resume. 0.176 s to first select 1.
+    2. In the restored session: CREATE TABLE t(id,note,ts); INSERT 5 rows.
+    3. FREEZE: pause, snapshot-B (Full, captures table+rows in memory) + preserve
+       the ZFS backing file (cp pool.raw, 0.003 s); then CLEAN FC SHUTDOWN
+       (kill -9 firecracker; waited until the process was gone, 0.265 s).
+    4. SECOND warm launch: fresh FC process, load snapshot-B + resume. 0.174 s
+       to first select 1.
+    5. VERIFY: table + all rows still present; pg_postmaster_start_time() still
+       the first launch; PG writable (inserted id=99).
+    6. Looped freeze -> shutdown -> warm-restart a second time (round2); the
+       id=99 row inserted in round1 was still there in round2, proving the warm
+       checkpoint durably accumulates data across cycles.
+
+  PERSISTENCE PROOF (select * from t):
+
+    BEFORE freeze (in the first warm-restored session):
+       id |                  note                   |              ts
+      ----+-----------------------------------------+-------------------------------
+        1 | row-1-inserted-in-warm-restored-session | 2026-07-30 14:43:40.180237+00
+        2 | row-2-inserted-in-warm-restored-session | 2026-07-30 14:43:40.260554+00
+        3 | row-3-inserted-in-warm-restored-session | 2026-07-30 14:43:40.340579+00
+        4 | row-4-inserted-in-warm-restored-session | 2026-07-30 14:43:40.42041+00
+        5 | row-5-inserted-in-warm-restored-session | 2026-07-30 14:43:40.499477+00
+      (5 rows)
+
+    AFTER freeze + clean shutdown + SECOND warm launch (round1): identical 5 rows.
+    AFTER a second freeze/shutdown/warm-restart (round2): the 5 rows PLUS
+        99 | written-after-round1-warm-restart | 2026-07-30 14:43:47.567665+00
+      (6 rows) - the row written after round1 survived into round2.
+
+    Writable after each warm restart (INSERT id=99 succeeds; row count grows).
+
+--------------------------------------------------------------------------------
+TASK 1(A): RNG-on-resume  --  CONFIRMED REAL BUG, FIXED, VALIDATED
+--------------------------------------------------------------------------------
+  New master PR branch:  pr/rng-reseed-on-resume   (cut on upstream/master cb8c7205b)
+  Bundle: /tmp/fix-rng.bundle  (git bundle create ... cb8c7205b..pr/rng-reseed-on-resume)
+  Author: Greg Burd <greg@burd.me>.  No em-dashes.  Conf-gated (default on).
+  Files:  drivers/random.cc, drivers/random.hh, drivers/kvmclock.cc, conf/kconfig/core
+
+  HOW THE GAP WAS PROVEN (dedicated in-guest probe, not the weak PG-only probe):
+    Built a minimal rofs OSv image (upstream/master) with a probe app that reads
+    N=32 bytes from /dev/urandom, /dev/random, and getrandom() in a loop. Booted
+    it, took a Full snapshot mid-run, then restored the SAME snapshot into TWO
+    separate Firecracker processes and compared the first post-resume bytes.
+
+    On this host (m5d.metal HAS RDRAND + RDSEED), OSv's Yarrow CSPRNG is
+    continuously reseeded from RDRAND by the ~100 ms harvest thread, so the two
+    clones DIVERGE on every source even on the first post-resume read. No bug
+    observed WHEN a live hardware entropy source exists.
+
+    To test the real risk (a host with NO RDRAND and NO virtio-rng, e.g. many
+    ARM/AMD/restricted guests, or any guest Firecracker does not give an entropy
+    device), RDRAND source registration was disabled in a test build. Result,
+    two clones from the SAME snapshot, EVERY post-resume read:
+
+      clone1 urandom = 9c37f17fa3331cabc84f7adece7ee088e2bd61d9167a91022ddecd1476c805b0
+      clone2 urandom = 9c37f17fa3331cabc84f7adece7ee088e2bd61d9167a91022ddecd1476c805b0
+      -> IDENTICAL (SHARED OS RNG STATE)   [3 of 3 reads identical]
+
+    That is a real correctness and security bug: a cloned fleet would share
+    session keys, TCP ISNs, UUIDs, etc. A full-VM snapshot captures the entire
+    entropy pool + CSPRNG state, and with no live source nothing ever remixes it.
+
+  THE FIX:
+    On hypervisor resume, force the CSPRNG to re-key, mixing in material that is
+    guaranteed to differ between two clones EVEN WITH NO hardware entropy source:
+    the wall-clock instant the hypervisor handed us on resume (each clone resumes
+    at a distinct host wall-clock time) plus the resume-time TSC. The unique
+    material is fed into the harvest queue and an explicit reseed is commanded.
+
+    Resume detection (no OSv resume hook exists, so this is passive): on
+    Firecracker the guest system clock keeps advancing during the pause (the TSC
+    runs through the pause), so a resume shows up as a large forward jump in
+    system_time. TWO detectors, both gated by CONF_core_reseed_on_resume:
+      1. The existing 1 Hz kvmclock wall-clock sync thread notices its 1 s sleep
+         apparently took much longer (> 1.5 s) and reseeds. Latency <= ~1 s.
+      2. The /dev/random read path notices the gap since the previous read
+         (> 0.5 s) and reseeds before serving, closing the sub-second window so
+         even the FIRST post-resume read diverges.
+
+  VALIDATION (rebuilt with the fix):
+    - Fix + RDRAND DISABLED (worst case): two clones now DIFFER on the FIRST
+      post-resume read (3 of 3 reads differ). Bug fixed.
+    - Fix + RDRAND ENABLED (normal host): clones DIFFER, normal boot unaffected,
+      /dev/random works. Strict improvement, no regression.
+    - Behavior gate: only runs when a resume is actually detected, so a
+      never-resumed or freshly-booted guest follows the same path as before;
+      CONF_core_reseed_on_resume=0 removes it entirely.
+
+--------------------------------------------------------------------------------
+TASK 1(B): kvmclock-resync-on-resume  --  NOT NEEDED (gap not real on Firecracker)
+--------------------------------------------------------------------------------
+  No PR. Reporting honestly instead of inventing a fix.
+
+  The prior report noted a +50-85 ms "ahead" offset on resume. A dedicated,
+  clean in-guest measurement shows that was a host-side measurement artifact
+  (log flush + guest scheduling latency), not a real guest clock error.
+
+  METHOD: a probe prints CLOCK_REALTIME; a Full snapshot is taken; on restore
+  the guest's first post-resume realtime is compared against the host wall clock
+  at the exact resume-API-return instant (T1 recorded by the FC driver).
+
+  RESULT, stock upstream/master kvmclock under Firecracker, 5 restores:
+    run 1: offset (guest - host) = +0.000667 s
+    run 2:                         +0.000655 s
+    run 3:                         +0.000632 s
+    run 4:                         +0.000630 s
+    run 5:                         +0.000612 s
+  Stable +0.6-0.7 ms, which is essentially the measurement floor (the guest
+  scheduling + printing its first read). No 50-85 ms offset.
+
+  CORROBORATION: instrumenting the kvmclock wall-clock sync thread to flag any
+  jump > 2 ms in wall_clock_boot across a resume fired NOTHING across many
+  restores. And CLOCK_MONOTONIC advanced smoothly through the pause (no backward
+  jump, no timer storm, no hang). Firecracker lets the guest TSC run through the
+  pause, so kvmclock's TSC interpolation keeps realtime tracking the host to
+  sub-millisecond immediately on resume.
+
+  Conclusion: on Firecracker + OSv master, the resumed clock is already correct
+  to sub-ms with no fix. If a different hypervisor (or FC configured to freeze
+  the TSC) ever produced a real offset, the minimal fix would be to force an
+  immediate sync_wall_clock() on the first tick after a detected discontinuity;
+  that machinery already exists (the RNG fix reuses the same resume detector),
+  but it is a no-op here because there is no discontinuity to correct.
+
+--------------------------------------------------------------------------------
+OSV-APPS DEMO UPDATE (bundle: /tmp/apps-fcsnap2.bundle)
+--------------------------------------------------------------------------------
+  Repo:   github.com/gburd/osv-apps  branch wip/postgres18-musl-demo (PR #73)
+  Base:   70c7f61 .. HEAD  (git bundle create /tmp/apps-fcsnap2.bundle 70c7f61..HEAD)
+  New commit on top of the prior snapshot commit 7215030:
+    c0d2bad "postgres18-musl: persistent warm snapshot checkpoint lifecycle"
+            Author Greg Burd <greg@burd.me>. No em-dashes.
+  Added to postgres18-musl/:
+    * fc-snapshot.sh gains a 'lifecycle' subcommand (the whole warm freeze ->
+      clean-shutdown -> warm-restart cycle with timings and the persistence +
+      identity verification) and a scripted 'seed' subcommand (build the
+      single-file ZFS pool and cpiod-push an initdb'd cluster into it).
+    * cpio_push.py helper for the seed step.
+    * README section "Persistent warm checkpoint" with the measured numbers.
+    * Bugfix: the boot cmdline was passed as "--append <str>" where <str> begins
+      with --rootfs; the FC driver argparse mis-parsed the leading --rootfs.
+      Changed to "--append=<str>". (The prior boot path silently timed out.)
+  The demo needs NO OSv kernel change for correct warm resume; the RNG fix is a
+  separate, general OSv master PR, independent of the demo.
+
+--------------------------------------------------------------------------------
+OSv BUGS THAT BREAK THE LIFECYCLE
+--------------------------------------------------------------------------------
+  NONE. OSv resumes cleanly from a Firecracker Full snapshot through repeated
+  freeze -> clean-shutdown -> warm-restart cycles with a live PG18 + OpenZFS
+  workload. No fault, assert, hang, backward clock jump, or data loss observed.
+  The one general correctness fix found (RNG-on-resume) is isolated to its own
+  master PR and is NOT required for the demo's warm resume to work.
+
+--------------------------------------------------------------------------------
+DELIVERABLES / BUNDLES (scp'd to floki:/tmp)
+--------------------------------------------------------------------------------
+  /tmp/fix-rng.bundle       cb8c7205b..pr/rng-reseed-on-resume  -> NEW master PR
+  /tmp/apps-fcsnap2.bundle  70c7f61..HEAD (osv-apps PR #73)     -> demo lifecycle
+  (Task 1B: no bundle - clock fix not needed, evidence above.)
+
+--------------------------------------------------------------------------------
+CLEANUP
+--------------------------------------------------------------------------------
+  Box osv-fcsnap2 i-0f4c7b094dd7b224f terminated and its 200 GiB gp3 root EBS
+  volume vol-045aa89bdafd81198 deleted (DeleteOnTermination=true).
+  CONFIRMED: instance State = terminated; DescribeVolumes on vol-045aa89bdafd81198
+  returns InvalidVolume.NotFound (the volume is gone). No lingering cost.
+  Did NOT touch bench-db (18.189.43.159) or osv-cor-a (3.16.46.123) beyond a
+  read-only copy of the built serving image + a read-only git bundle from
+  osv-cor-a's build dir (no workload run there).

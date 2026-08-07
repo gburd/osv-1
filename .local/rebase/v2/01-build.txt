@@ -1,0 +1,23 @@
+build: NixOS toolchain compatibility and Boost upgrade
+
+Add a Nix flake that pins the OSv development toolchain (binutils,
+GCC, Boost, OpenSSL, libtool, autoconf) so the build is reproducible
+on NixOS hosts.  The default Boost is bumped from 1.71 to 1.89 with
+the Boost.Asio API changes that the upgrade requires:
+
+  - core/async-io: io_service::run() → io_context::run(), strand
+    rebound to io_context::executor_type, asio::buffer() unchanged.
+  - httpserver-api: matching API updates and a small build-system
+    dance because Boost 1.74+ stopped exposing the old asio headers
+    transparently.
+
+Drop the boost177 fallback dependency that was previously bundled
+to work around the toolchain mismatch.  Drop the dead OpenZFS
+patch-workflow scripts (we now track OpenZFS via a forked submodule
+on the osv-2.4.2 branch; the patches/ directory is empty).
+
+Touch-up: <algorithm> include in core/mmu.cc to fix a GCC 14
+narrowing diagnostic; .gitignore for .memelord/ memory cache.
+
+Verified: `nix develop` produces a working build environment;
+`make fs=zfs` succeeds end-to-end.

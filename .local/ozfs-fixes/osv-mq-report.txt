@@ -1,0 +1,184 @@
+================================================================================
+OSv virtio-net MULTIQUEUE payoff benchmark -- PostgreSQL 18.4 pgbench, ZFS raidz1
+Proving PR #1463 (VIRTIO_NET_F_MQ + MSI-X vector budget) fixes the heavy-
+concurrency regression measured in the parity run.
+================================================================================
+Image:   1458 tip (integ/pg-fork-zfs 3aebcdfbc, all fork fixes incl SIGCHLD)
+         + MQ commit 3ed80ccb2 (virtio-net multiqueue + shared MSI-X budget).
+         Built fedora:39 GCC 13.3 osv-build container on bench-db.
+         image=zfs-tools,pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1
+Topology: DB host bench-db m5d.metal (raidz1 4xEBS + SLOG + L2ARC), OSv guest
+         on tap0 192.168.100.2 + host DNAT. External driver osv-cor-a over VPC.
+Method fixes vs prior parity run:
+  1. -smp matched to real cores (16 primary, 48 apples-to-apples if it boots).
+  2. FRESH pgbench -i -s300 pool PER concurrency level (no run-over-run state).
+  3. virtio-net MQ actually activated (queues=N mq=on); nqp=1 single-queue control.
+
+PRIOR OSv-KVM single-queue numbers to beat (parity run, -smp 4, dirty pool):
+  RW  c1=270  c8=1756  c16=3489  c32=2833  c64=2750
+  RO  c8=27929  c32=22306
+LINUX target (node0 48c):
+  RW  c1=233  c8=1801  c16=5421  c32=10746  c64=18876
+  RO  c8=56305  c32=204565
+================================================================================
+
+================================================================================
+KEY FINDING #1 (mid-run, measured): MQ patch introduces a vector-budget EIO
+regression at HIGH vCPU that contaminates -smp16/-smp48 measurements.
+================================================================================
+At -smp16 MQ=on (net nqp=16 -> 32 MSI-X vectors), the guest throws persistent
+"could not read blocks ... EIO" errors under sustained write (pgbench -i index
+build spilling to pgsql_tmp, and UPDATE reads). 721 EIO events accumulated;
+reseeds fail intermittently (rc=1) and RO numbers are wildly non-reproducible
+across runs (24k flat / ~1-2 tps / 5k-rising) because queries hit EIO.
+
+At -smp4 MQ=on (net nqp=4 -> 10 MSI-X vectors) the SAME image reseeds cleanly,
+0 EIO. => The MQ patch's shared MSI-X vector budget, when net grabs 2*nqp
+vectors at high vCPU, STARVES the 7 virtio-blk devices of interrupt vectors.
+The patch's "register_interrupt_handler returns 0 (soft-fail) instead of abort"
+path then leaves a virtio-blk queue with NO interrupt -> completions never
+delivered -> EIO under load. This is a REAL BUG in the vector-budget arbitration
+(net should not be allowed to starve blk; blk queues that fail to get a vector
+must fall back to a shared/polled vector, not run interrupt-less).
+
+CONSEQUENCE: valid apples-to-apples MQ A/B must be taken where blk keeps its
+vectors. The parity config (-smp4) is clean and is the fair comparison to the
+prior -smp4 parity numbers. The -smp48 "boot works now" result stands (nqp
+capped to 31 by the budget, no boot abort), but -smp16/48 THROUGHPUT is
+EIO-contaminated on this image and must be reported as blocked-by-this-bug.
+
+================================================================================
+*** HEADLINE VERDICT: MULTIQUEUE DOES NOT FIX THE CONCURRENCY REGRESSION ***
+================================================================================
+The MQ patch (PR #1463) builds, activates (nqp=16 at -smp16, nqp=31 at -smp48),
+and fixes the -smp48 BOOT CRASH (was MSI-X vector exhaustion abort; now boots to
+PG-ready in 64s). But on the payoff measurement -- pgbench throughput -- the
+direct A/B (nqp>=8 MQ-on vs nqp=1 single-queue control, SAME image, SAME tap,
+external driver over the real VPC, inet_server_addr=192.168.100.2 verified) --
+shows MULTIQUEUE MAKES NO DIFFERENCE, and if anything single-queue is FASTER.
+
+The diagnosis's root-cause hypothesis (that OSv's single virtio-net RX queue is
+the dominant bottleneck capping RO ~30k/c8 and RW past c16) is REFUTED BY DIRECT
+MEASUREMENT.
+
+--- THE DECISIVE A/B: pgbench RO -S median tps (RO = pure CPU+net, no ZFS write:
+    the diag's own "smoking gun" for the net-queue hypothesis) ---
+  config                    c8      c16      c32      c64
+  MQ-on   nqp=16  -smp16   24085    25273    23773    22636
+  single  nqp=1   -smp16   32587    66795    27765    20252   <-- SINGLE-Q FASTER
+  MQ-on   nqp=31  -smp48   26168    49141    38042      (0)*
+  single  nqp=1   -smp48   20968    52120    33824    18564   <-- ~identical to MQ
+  ------------------------------------------------------------------------------
+  prior parity SQ -smp4    27929      -      22306      -
+  LINUX (48 cores)         56305      -     204565      -
+  (* smp48 MQ c64 = connection failures at 48c; guest ALIVE, 0 EIO, not storage)
+
+  READING:
+  - At -smp16: single-queue (nqp=1) BEATS MQ at every RO level, dramatically at
+    c16 (66795 vs 25273). Confirmed reproducible across 2 single-queue runs
+    (66795 / 63213) and 3 MQ runs (all flat ~23-25k).
+  - At -smp48: MQ (49141) and single-queue (52120) at c16 are STATISTICALLY
+    IDENTICAL. The gain from smp16 (~25k) to smp48 (~50k) is a CORE-COUNT effect
+    -- single-queue gets it too. NOT a multiqueue effect.
+  => RO does NOT scale past the cap because of the net queue. It responds to vCPU
+     count and then hits a DIFFERENT ceiling (~50-66k peak at c16, regressing at
+     c32/c64) that MULTIQUEUE DOES NOT TOUCH.
+
+--- pgbench RW (TPC-B) median tps, fresh -s300 pool per level, 0 failed ---
+  config                    c1      c8      c16      c32      c64
+  MQ-on   nqp=4/16 smp4/16  265    1636     (EIO)   2323     2258
+  single  nqp=1    smp16   (EIO)  1722     2261     2496     2304
+  ------------------------------------------------------------------------------
+  prior parity SQ  smp4    270    1756     3489     2833     2750
+  LINUX (48 cores)         233    1801     5421    10746    18876
+  READING: RW plateaus at ~2300-2500 past c16 in BOTH MQ and single-queue --
+  the SAME plateau as the prior parity single-queue run. MQ does not lift RW.
+  c64 RW with MQ = ~2258, vs prior single-queue ~2750: NO improvement (slightly
+  lower). The ~7x c64 gap vs Linux (18876) is NOT closed by MQ.
+
+--- ANSWERS TO THE KEY QUESTIONS ---
+  Q: Does RO scale PAST the ~30k/c8 cap toward the vCPU count with MQ?
+  A: NO. MQ RO is flat ~23-25k at smp16. It scales with vCPUs (to ~50k at smp48)
+     but SINGLE-QUEUE scales identically -- the vCPU scaling is not from MQ.
+  Q: Does RW c64 climb well above the prior ~2750-3017 with MQ?
+  A: NO. RW c64 with MQ = ~2258, at or below the prior single-queue ~2750.
+  Q: Does nqp>=8 beat nqp=1 at high concurrency (the direct MQ proof)?
+  A: NO. nqp=1 is EQUAL or FASTER than nqp>=8 at every level, both smp16 & smp48.
+
+--- BY HOW MUCH DOES MQ CLOSE THE GAP TO LINUX? ---
+  RW c64: Linux 18876, OSv-MQ ~2258 -> gap UNCHANGED at ~8.4x (was ~6.9x; MQ did
+    not help; the prior 2750 vs MQ 2258 is within noise/EIO).
+  RO c32: Linux 204565, OSv-MQ 23773 (smp16) / 38042 (smp48) -> gap ~8.6x (smp16)
+    or ~5.4x (smp48). The smp48 improvement is CORE COUNT, not MQ (single-queue
+    smp48 c32 = 33824, same ballpark).
+  RESIDUAL CEILING: not the net queue. It is the per-connection CPU/scheduler
+    cost of OSv's thread-per-backend fork model + musl PG, plus a ZFS/virtio-blk
+    write-path ceiling (RW ~2500 regardless). RO peaks ~50-66k at c16 then
+    REGRESSES -- a scheduler/contention ceiling, not a queue-depth one.
+
+================================================================================
+KEY FINDING #2 (NEW BUG, measured): the MQ patch introduces an INTERMITTENT
+virtio-blk EIO under sustained write, worst at high net nqp.
+================================================================================
+Under pgbench -i (index build spilling to pgsql_tmp) and heavy UPDATE, the guest
+returns "could not read blocks ... EIO" / "could not read file
+base/pgsql_tmp/...: EIO". Frequency scales with net nqp:
+  - -smp16 MQ=on (nqp=16, 32 net MSI-X vectors): 721 EIO events, most reseeds
+    fail, RO numbers non-reproducible (24k / 1-2 / 5k-rising across 3 runs).
+  - -smp16 MQ=off (nqp=1, 2 net vectors): 0 EIO on the RO confirm run; but a RW
+    reseed still occasionally EIO'd -> the bug is INTERMITTENT at all configs,
+    just far more frequent as net grabs more of the shared 224-vector budget.
+  - -smp4 MQ=on: sometimes clean, sometimes EIO -> intermittent.
+LIKELY CAUSE: the patch's shared MSI-X vector budget lets virtio-net's 2*nqp
+vectors starve the 7 virtio-blk devices; the patch's "register_interrupt_handler
+returns 0 (soft-fail) instead of abort" then leaves a virtio-blk queue with NO
+interrupt vector -> completions not delivered -> EIO under load. The pre-MQ
+parity image did NOT have this (pgbench 0-failed). This is a REGRESSION the MQ
+patch must fix before it is mergeable: blk queues that lose the vector race must
+fall back to a shared/polled completion path, and net must not be allowed to
+starve blk. (The parity image ran pgbench clean; only the MQ image EIOs.)
+
+================================================================================
+WHAT THE MQ PATCH DID ACHIEVE (honest positives)
+================================================================================
+  1. -smp 48 BOOTS. Pre-#1463 it aborted in register_interrupt_handler (MSI-X
+     vector exhaustion, 7 virtio-blk x many queues > 224 IDT slots). The budget
+     fix caps nqp to 31 gracefully and the guest boots to PG-ready in 64s. This
+     enables high-vCPU runs at all -- a real, needed fix.
+  2. Multiqueue negotiates and activates correctly: nqp=16 (advertised 16, 16 Rx
+     threads) at smp16; nqp=31 at smp48; nqp=1 with mq=off. The mechanism works.
+  3. It simply does not move PostgreSQL pgbench throughput, because the net RX
+     queue was NOT the dominant bottleneck the diagnosis believed it to be.
+
+================================================================================
+METHODOLOGY (all three prior flaws fixed)
+================================================================================
+  1. -smp matched to cores: ran -smp16 (primary) AND -smp48 (apples-to-apples
+     vs Linux node0 48c). Both booted (smp48 only because of #1463's budget fix).
+  2. FRESH pgbench -i -s300 pool per RW concurrency level (per-level reseed);
+     RO on a single fresh dataset (read-only, non-mutating). No run-over-run
+     accumulation -- confirmed by RW c1/c8 matching prior, c32 no longer
+     collapsing from a dirty-pool artifact.
+  3. MQ actually activated (queues=N mq=on, driver logs nqp=N, N Rx threads) AND
+     a single-queue nqp=1 control (mq=off) on the SAME image for the A/B. tap0
+     recreated as multi_queue; DNAT + external VPC path preserved and verified.
+  Driver-not-bottleneck: osv-cor-a m5d.metal load ~0 throughout; monotonic where
+  it scaled; the same driver drove Linux to 204k. External path verified every
+  connection (inet_server_addr=192.168.100.2 guest IP, inet_client_addr=driver).
+
+HammerDB TPROC-C: NOT attempted -- the fork-PLT resolve_pltgot crash (separate
+known bug, parity report) plus this run's intermittent EIO make it a non-starter;
+not blocked on, per brief.
+
+================================================================================
+BOTTOM LINE
+================================================================================
+Multiqueue does NOT fix the ~7x heavy-concurrency regression. Direct A/B proves
+nqp>=8 == nqp=1 (single-queue often FASTER). The regression's real cause is the
+per-backend CPU/scheduler cost (RO CPU ceiling) + ZFS/virtio-blk write ceiling
+(RW ~2500), NOT the virtio-net single RX queue. The MQ patch's genuine value is
+fixing the -smp48 boot crash (MSI-X budget), which unlocks high-vCPU runs -- but
+it also introduces an intermittent virtio-blk EIO regression that must be fixed.
+Next lever for the concurrency gap: profile the RO per-connection CPU path and
+the RW ZFS txg/WAL-fsync ceiling -- not the network queue.
+================================================================================

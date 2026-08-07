@@ -1,0 +1,15 @@
+PR #1464 - sched: disperse threads faster in the load balancer
+branch: pr/sched-load-balance
+bundle head: fc57b9bf795caa00a4f27429314ac9d0f8e4c8dc
+base (ancestor, in master): 95f478cb708aa32928119cc27f57bebbbb8d5763 (rebased onto current upstream/master)
+OLD remote head (for --force-with-lease): 4bb2531d05c7afc209f8f359215d3d434041e7ca
+
+PUSH (re-sign my HEAD commit first, then force-with-lease):
+  git fetch <this-bundle> pr/sched-load-balance
+  # verify HEAD, re-sign the single commit under greg@burd.me (ED25519 -> G)
+  git push --force-with-lease=pr/sched-load-balance:4bb2531d05c7afc209f8f359215d3d434041e7ca \
+      gh-fork pr/sched-load-balance
+Notes:
+- REBASED onto current master (was stale on ae077860c; would have silently reverted
+  merged #1425/#1434/#1448/#1457). Feature-only diff: core/sched.cc + conf/kconfig/threads.
+- Single commit. Re-sign it (currently amended unsigned on floki).

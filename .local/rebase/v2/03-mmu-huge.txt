@@ -1,0 +1,18 @@
+mmu: add MADV_HUGEPAGE and MAP_HUGETLB
+
+Implement the two Linux hugepage hint APIs against OSv's existing
+2 MiB / 1 GiB page support:
+
+  - madvise(MADV_HUGEPAGE, addr, len): mark a VMA range so that the
+    page-fault handler will try to back it with 2 MiB pages when
+    enough physically-contiguous memory is available.  The default
+    (MADV_NOHUGEPAGE) and an explicit MADV_HUGEPAGE produce the same
+    effect today; the hint is recorded for future use by the
+    allocator's huge-page heuristic.
+  - mmap(... MAP_HUGETLB ...): allocate the VMA directly out of the
+    huge-page pool (failing with ENOMEM rather than silently falling
+    back to small pages).  Honours MAP_HUGE_2MB / MAP_HUGE_1GB flags.
+
+Tests: tst-huge.cc exercises both APIs with mmap, mprotect, mlock,
+fault-on-write, and partial-unmap to verify no PTE leaks or stale
+mappings.

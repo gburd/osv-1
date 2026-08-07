@@ -1,0 +1,20 @@
+#!/bin/bash
+# KVM Linux+PG18 guest boot: SAME qemu cmdline as OSv except OS source (qcow2 vs loader.elf).
+set -u
+SMP="${SMP:-8}"; MEM="${MEM:-8G}"
+ROOT=/mnt/nvme/debian12.qcow2
+SEED=/mnt/nvme/seed.iso
+BLK=/mnt/nvme/pgdata-linux.raw
+TAP=tap0
+rm -f "$BLK"; truncate -s 80G "$BLK"
+echo "== BOOT Linux KVM: SMP=$SMP MEM=$MEM PG@192.168.100.2:5432 (tap0+vhost) =="
+nohup qemu-system-x86_64 -machine pc -accel kvm -cpu host -m "$MEM" -smp "$SMP" \
+  -nographic -no-reboot \
+  -device virtio-blk-pci,id=blk0,drive=hd0 -drive "file=$ROOT,if=none,id=hd0,format=qcow2,cache=writeback,aio=threads" \
+  -device virtio-blk-pci,id=blk1,drive=hd1 -drive "file=$BLK,if=none,id=hd1,format=raw,cache=none,aio=native" \
+  -drive "file=$SEED,if=virtio,format=raw,readonly=on" \
+  -netdev "tap,id=n0,ifname=$TAP,script=no,downscript=no,vhost=on" \
+  -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
+  > /tmp/linux.log 2>&1 &
+echo $! > /tmp/linux.qpid
+echo "linux qemu started; PG bootstrap via cloud-init (~2-3min for apt+initdb)"

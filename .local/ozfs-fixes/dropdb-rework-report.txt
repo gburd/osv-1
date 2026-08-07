@@ -1,0 +1,190 @@
+================================================================================
+DROP DATABASE REWORK -- ROOT-FIX (Option B) LANDED + FULL BOOT/PGBENCH VALIDATION
+================================================================================
+Author: Greg Burd   Classification: [fork-stack] (CONF_fork-gated)
+Box:    bench-db 18.189.43.159 (m5d.metal, profile OUCH), container osv-build, /b
+Base:   c8f9c82b3 (the QUALIFIED, 10/10-boot commit)
+Commit: 86a7d3b37  (REPLACES 3fcc23b36; 3fcc23b36 dropped)
+Bundle: /tmp/dropdb-rework.bundle (floki + box) == c8f9c82b3..86a7d3b37
+
+--------------------------------------------------------------------------------
+BOTTOM LINE (read first -- HONEST, both bars NOT both met)
+--------------------------------------------------------------------------------
+* BOOT REGRESSION: FIXED.  Fresh single-file boot-to-ready 13/13 (10/10 headline
+  + 3/3 confirm), fresh raidz1 5/5, pgbench 0-failed at -smp4 AND -smp8.  The
+  0/10 Bug B startup hang introduced by 3fcc23b36 is GONE.  Net-positive vs the
+  landed 3fcc23b36 (0/10 boot).
+* DROP DATABASE: NOT fixed in this commit.  It still wedges on the self
+  ProcSignalBarrier ("still waiting for backend with PID N ...", N=self).  The
+  fix for it (route a fork-backend self-signal's handler into the backend's own
+  COW AS) CANNOT be added to kill() without re-breaking boot -- proven below
+  with a 9-variant A/B.  So I did the ROOT FIX (Option B: the waiters
+  allocator-recursion) that is unambiguously boot-safe, and I am NOT claiming
+  the DROP DATABASE half is done.
+
+  => I chose OPTION B for the part that is tractable (the waiters recursion:
+     LANDED, boot-safe, validated).  The self-signal AS-routing half is BLOCKED
+     on a deeper, pre-existing Bug B facet (a COW-fault in a non-preemptable /
+     IRQ-disabled scheduler window) that ANY change to kill()'s compiled form
+     re-exposes.  Details + evidence below so you can decide the next step.
+
+--------------------------------------------------------------------------------
+1. THE FIX THAT LANDED (Option B root fix -- what / where / why boot-safe)
+--------------------------------------------------------------------------------
+WHERE: libc/signal.cc (waiters list), include/osv/sched.hh + core/sched.cc
+       (per-thread intrusive node buffer).  All #if CONF_fork.
+
+WHAT: the per-signal wait lists `waiters` were std::array<std::list<thread*>,
+  nsignals>.  Every sigprocmask() SIG_BLOCK/SIG_SETMASK did waiters[i].push_front
+  -> a std::list NODE MALLOC under waiters_mutex.  When a fork-child COW address
+  space is current, that malloc slow path (memory::pool::alloc) constructs an
+  mmu::file_vma whose vfs_file::stat -> vn_lock re-enters memory::pool::alloc ->
+  unbounded recursion -> PG startup hang.  This is the exact chain the
+  reconcile-report captured by live gdb (sigprocmask -> unwait_for_signal ->
+  waiters -> malloc -> pool::alloc -> file_vma -> vn_lock -> pool::alloc), the
+  same signature-F allocator-recursion family as F2a/F2b, at a NEW alloc site.
+
+  Mirroring F2b's per-thread coherent wait_record slot pool, each sched::thread
+  now carries an identity-memory array of `nsignals` intrusive link pointers
+  (thread::_sig_wait_next), malloc'd ONCE at thread construction in a normal
+  (non-lock) context.  waiters[sigidx] becomes the head thread* of a chain
+  threaded through each waiting thread's own _sig_wait_next[sigidx]:
+    wait_for_signal:   *slot = waiters[i]; waiters[i] = cur;   (idempotent)
+    unwait_for_signal: splice cur out of the chain; mark slot UNLINKED
+    wake_up_signal_waiters: walk the chain via *sig_next_slot(t,i)
+  ZERO allocation under waiters_mutex -> the pool::alloc recursion cannot occur.
+  The nodes are identity memory (coherent in every AS, like the thread object),
+  so the shared cross-AS list is never a COW arena page (the property the old
+  fork_arena::kernel_heap_scope was straining to preserve).
+
+WHY boot-safe: no allocation, no lock, no fault on the wait/unwait path.
+  Idempotent push (SIG_BLOCK of an already-blocked signal is a no-op -- the
+  single per-signal slot cannot hold two chain positions); no-op remove when the
+  thread is not on the list (so the unconditional SIG_SETMASK sweep over every
+  signal stays safe).  An early-boot guard (sig_wait_links()==nullptr -> return)
+  covers threads before their node buffer exists.
+
+WHY conf_fork=0 byte-identical: every hunk is inside #if CONF_fork.  The #else
+  keeps the original std::list<thread*> waiters and the std::list push/remove.
+  kill() is byte-identical to c8f9c82b (verified: `diff` of the kill() body).
+
+--------------------------------------------------------------------------------
+2. WHY THE DROP DATABASE SELF-SIGNAL FIX IS BLOCKED (the 9-variant A/B)
+--------------------------------------------------------------------------------
+The DROP DATABASE wedge is REAL and REPRODUCED on the booting build (external
+psql via user-net hostfwd, 127.0.0.1:5432):
+    CREATE DATABASE ... TEMPLATE template0;   -> CREATE DATABASE (rc=0)
+    DROP DATABASE ...;                          -> HANGS (psql rc=124 @ 60s)
+    select 1;                                   -> 1 (rc=0, backend healthy)
+    server log: "still waiting for backend with PID 668 to accept
+                 ProcSignalBarrier" (repeating; PID 668 == the waiter itself)
+So it needs the 3fcc23b36 idea: a fork-backend self-signal (kill(getpid(),
+SIGUSR1) from EmitProcSignalBarrier) must run its handler in the backend's OWN
+COW AS so HandleProcSignalBarrierInterrupt sets ProcSignalBarrierPending in the
+copy the backend reads.
+
+BUT every way of doing that in kill() re-breaks boot.  Controlled fresh-pool
+A/B, waiters fix present in ALL, ONLY kill() differs:
+
+  kill() form                                             single-file boot-to-ready
+  ------------------------------------------------------  -------------------------
+  (K0) byte-identical to c8f9c82b  [LANDED]               13/13 READY
+  (K1) 3fcc23b36: else if(pid==getpid()) current AS        0/N (hang)
+  (K2) inherit-skip (skip set_address_space for self)      0/2 (hang)
+  (K3) cached getpid() + skip                              0/2 (hang)
+  (K4) else if(pid==self && !OSV_PID) as_for_pid(self)     0/1 (hang)
+  (K5) lock-free current_address_space() self branch       0/1 (hang)
+  (K6) set_address_space else = current_address_space()    0/2 (hang)
+  (K7) if(target_as) set_address_space (drop AS0 force)    0/1 (hang)
+  (K8) narrow nested-ternary (pid==getpid && child AS)     0/2 (hang)
+  (K9) cached self_pid + caller_as, nested-ternary         0/2 (hang)
+  (K10) out-of-line noinline helper for the self case      0/2 (hang)
+
+Every non-K0 variant hangs or crashes (preemptable / rflags_if assert = a
+page_fault with preemption or IRQs disabled, faulting on a child COW address
+0x6000....).  DECISIVE detail: instrumentation on the self-signal branch printed
+ZERO self-signal / self-divert events before the wedge in K1 and K9 -- i.e. the
+new code NEVER EXECUTES during startup, yet its mere PRESENCE re-breaks boot.
+And forcing the K9 self-branch dead with a compile-time `false` restores 15/15.
+
+=> The regression is NOT the runtime behavior of the self-signal branch (it does
+   not fire pre-ready).  It is that ANY change to kill()'s compiled form
+   (an extra basic block, an extra lock-free read, even a single `call` to an
+   out-of-line helper) re-exposes a SECOND, latent facet of Bug B: a COW page
+   fault taken in a non-preemptable / IRQ-disabled scheduler window
+   (arch/x64/mmu.cc:38-39 assert).  This is the residual signature-F scheduler
+   race the F2b report explicitly named as "the next target"; the waiters fix
+   removed the allocator-recursion facet but not this scheduler/COW-fault facet.
+   It is timing/layout fragile (matches the reports' "intermittent 1-in-6 /
+   1/5" characterization): dormant when kill() compiles exactly like c8f9c82b,
+   near-certain when kill() is perturbed.
+
+Landing the self-signal routing on top of that latent race is net-negative
+(0/10 boot), so it is deliberately NOT included.  Fixing DROP DATABASE requires
+first hardening the COW-fault-in-non-preemptable-window facet (a scheduler
+change: pre-fault / make the offending fault site preemptable), after which the
+self-signal AS-routing can be re-added.  That is a separate, deeper task than
+this rework and was not attempted blind.
+
+--------------------------------------------------------------------------------
+3. VALIDATION EVIDENCE (fresh pool per boot; reap + fresh containers between)
+--------------------------------------------------------------------------------
+Build: ./scripts/build -j96 image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1
+       fs_size_mb=1024 ; loader.elf 73,103,232 bytes (== the boot-reliable form).
+
+BOOT-TO-READY (the regression -- now GONE):
+  fresh single-file 8k pool, -smp4:
+    rate-single.sh 10 4 :  pass=10 hang=0 crash=0 seedfail=0 of 10   (all READY ~8-9s)
+    confirm rate-single.sh 3 4 (post-commit rebuild): 3/3 READY
+    => 13/13 single-file boots-to-ready on the committed tree.
+  fresh raidz1(4-disk)+SLOG+L2ARC, -smp4:
+    rate-raidz.sh 5 :  ready=5 hang=0 mountsegv=0 othercrash=0 seedfail=0 of 5
+    => 5/5 raidz boots-to-ready, 0 Bug A mount-SEGV.
+
+PGBENCH (db=postgres, C locale; user-net hostfwd 127.0.0.1:5432):
+  -smp4: pgbench -i -s100 done in 15.24 s;
+         pgbench -c8 -j4 -T30 -> 74119 tx, 0 failed (0.000%), tps=2525.09
+  -smp8: pgbench -i -s100 done in 14.76 s;
+         pgbench -c8 -j4 -T30 -> 76619 tx, 0 failed (0.000%), tps=2633.72
+  reboot-clean between the two (fresh reseed).
+
+DROP DATABASE (on the booting build): CREATE DATABASE ok; DROP DATABASE HANGS
+  (rc=124), "still waiting for backend with PID N ... ProcSignalBarrier", N=self;
+  select 1 healthy.  == the exact wedge the self-signal fix targets, still open.
+
+--------------------------------------------------------------------------------
+4. conf_fork=0 IDENTITY
+--------------------------------------------------------------------------------
+All three files' changes are inside #if CONF_fork:
+  include/osv/sched.hh: _sig_wait_next member + sig_wait_links() accessor -- in
+    the existing #if CONF_fork private/public blocks.
+  core/sched.cc: ctor malloc + init and dtor free -- inside the existing
+    #if CONF_fork ctor/dtor hunks (next to _coherent_wr_buf).
+  libc/signal.cc: waiters type, wait/unwait/wake bodies are #if CONF_fork /
+    #else, the #else keeps the original std::list path; kill() is byte-identical
+    to c8f9c82b (self-signal branch of 3fcc23b36 removed).
+A conf_fork=0 object therefore compiles to the original std::list waiters path,
+byte-identical to before this commit.
+
+--------------------------------------------------------------------------------
+5. DELIVERABLES + CLEANUP
+--------------------------------------------------------------------------------
+  commit  86a7d3b37 on corruptor-fix (replaces 3fcc23b36; based on c8f9c82b3)
+  bundle  /tmp/dropdb-rework.bundle (floki:/tmp and box:/tmp) = c8f9c82b3..HEAD
+  qemu reaped; osv-build + osv-net left up; bench-db left running (user-managed).
+  No new EBS/instances.
+
+--------------------------------------------------------------------------------
+6. RECOMMENDATION
+--------------------------------------------------------------------------------
+* MERGE 86a7d3b37: it removes the 0/10 boot regression and is a real root fix
+  (the waiters allocator-recursion), independently hardening the signal wait
+  path.  It is strictly better than the landed 3fcc23b36 for the fleet.
+* DROP DATABASE remains blocked.  Next step (separate task): fix the
+  COW-fault-in-non-preemptable/IRQ-disabled-window facet of Bug B (scheduler
+  side), then re-add the self-signal AS-routing (any of K1/K5/K8 will then be
+  correct AND boot-safe).  Do NOT re-land the self-signal routing before that
+  facet is fixed -- it regresses boot to 0/10.
+
+================================================================================
+-- Greg Burd

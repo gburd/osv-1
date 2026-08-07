@@ -1,0 +1,15 @@
+apps: point submodule at Codeberg fork with new demo apps
+
+Move the apps submodule URL from cloudius-systems/osv-apps to
+codeberg.org/gregburd/osv-apps and bump it to a fork commit that
+adds two new demos used by the test suite:
+
+  - apps/zfs-demo/: minimal libzfs example (zpool_create + zfs_create
+    + write + read).
+  - apps/crucible-basic-test/: tiny client that opens /dev/crucible0
+    via BLKGETSIZE64 + pwrite/pread to confirm the upstairs-downstairs
+    pipeline is alive.  Build artefact is .gitignored (was previously
+    committed by accident; the fork commit removes it).
+
+The fork is a strict superset: every cloudius-systems/osv-apps
+commit is preserved, the new demos sit on top.

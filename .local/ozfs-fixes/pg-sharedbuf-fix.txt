@@ -1,0 +1,287 @@
+================================================================================
+[W-sharedbuf] PostgreSQL-on-OSv: the STORAGE / SHARED-BUFFER COHERENCE wall
+under a heavy `pgbench -i` bulk load -- ROOT-CAUSED + FIXED (a large ramfs
+segment DATA BUFFER landed in ONE forked backend's private COW address space;
+a sibling backend's read/write memcpy'd against that app-slot VA unmapped in
+its own page tables -> "page fault outside application" in the ramfs read/write
+path).  **** STOCK PostgreSQL 18.4 NOW SURVIVES A HEAVY pgbench -i -s 5 BULK
+LOAD ON OSv: 500k rows loaded + vacuum + primary keys, AND a sustained
+single-client TPC-B write bench (41,042 txns, 2053 tps, 0 failed) -- real
+output pasted. ****   The concurrent-writer path uncovered three more cross-AS
+coherence bugs (POSIX semaphores, waitqueues, epoll watcher lists), all fixed;
+sustained CONCURRENT load still hits two distinct, precisely-symbolized
+scheduler/AS-clone walls (documented, NOT fixed here).
+================================================================================
+Date:    2026-07-25   Host: floki (local, KVM)   Container: arena-dev (fedora:39)
+Worktree: /b/.local/worktrees/fork-arena  (host: /home/gburd/ws/osv/.local/worktrees/fork-arena)
+Branch:   integ/pg-fork-arena   HEAD at start: 43c37300f   HEAD now: b11388fbb
+Author:   Greg Burd
+Method:   boot image=pg18-fork (conf_fork=1, fs=ramfs) under KVM -m 4G -smp 2,
+          run `pgbench -i -s 5` from the container to hostfwd :5432, catch the
+          memcpy fault, attach gdb to the qemu -s stub, break vm_sigsegv, walk
+          the faulting AS's page tables, root-cause the unmapped app-slot VA,
+          fix the allocation, re-measure.  New regression test
+          tst-fork-shared-write.
+
+================================================================================
+VERDICT (one line)
+================================================================================
+The symbolized storage wall is a ramfs segment DATA BUFFER (VA 0x2000..) that a
+large file growth (> the fork arena's 2 MiB max_alloc) placed in the enlarging
+backend's private COW address space via malloc_large()'s app-slot map_anon
+path; a SIBLING forked backend read()ing/write()ing the same file memcpy's
+against that VA, which is unmapped in its own page tables.  gdb proved it
+directly.  Fix: allocate the segment buffer as physically-contiguous
+IDENTITY-mapped memory (in the kernel PML4 slots clone_address_space() shares
+verbatim), coherent in every address space.  With that, `pgbench -i -s 5`
+completes and a sustained single-client heavy write bench runs to completion.
+
+================================================================================
+THE gdb FINDING (which region, which cause -- proven, not inferred)
+================================================================================
+Reproduction (pg18-fork, ramfs /data): `pgbench -i -s 5` reached "creating
+primary keys", then:
+
+  page fault outside application, addr: 0x0000200011e36000
+  RIP: 0x000000004031304a <memcpy_repmov_ssse3+74>
+  #4  repmovsb ... at arch/x64/string.cc:96
+  #5  memcpy_repmov_ssse3 (n=32768, src=0x200011e36040, dest=0x200002a70000)
+  #7  uiomove (cp=0x200011e36040, n=32768, uio=...) at fs/vfs/subr_uio.cc:61
+  #8  ramfs_read_or_write_file_data (...) at fs/ramfs/ramfs_vnops.cc:490
+  #9  vfs_file::read (...) at fs/vfs/vfs_fops.cc:68
+  #10 sys_read (...) ; #11 pread (offset=22315008) at fs/vfs/main.cc:411
+
+  (gdb) p sched::thread::current()->_current_as
+    $ = 0x600008b24a00   <- a FORK-CHILD address space (not AS0/kernel)
+
+The memcpy SOURCE cp=0x200011e36040 is the ramfs file's segment data buffer --
+an app-slot VA (< 0x400000000000) that FAULTS: it is not present in the reading
+backend's page tables.  vm_fault resolves against the current thread's AS, finds
+no VMA covering 0x200011e36000, -> vm_sigsegv -> "page fault outside
+application" abort (kernel-context fault during the ramfs read).
+
+CAUSE (which of i/ii/iii): cause (i) -- the region is NOT in the faulting
+backend's address space AT ALL.  The buffer was allocated by a DIFFERENT process
+that enlarged the file:
+
+  fs/ramfs/ramfs_vnops.cc ramfs_enlarge_data_buffer() grows a file's segment
+  with malloc(new_segment_size).  A prior fix wrapped it in a
+  fork_arena::kernel_heap_scope so SMALL segments avoid the COW fork arena --
+  but that scope only SKIPS the arena.  Once a segment exceeds the arena's 2 MiB
+  max_alloc, std_malloc falls through to malloc_large(size, align, true, false),
+  whose `size >= huge_page_size && !contiguous` branch calls
+  mapped_malloc_large -> mmu::map_anon(): an APP-SLOT (VA < 0x400000000000)
+  anonymous mapping inserted into the CURRENT thread's address space's vma_list
+  and page tables.  With per-child COW address spaces that VMA/PTE exist ONLY in
+  the backend that grew the file.  A sibling backend (or a parallel worker, or
+  the checkpointer) reading/writing the same ramfs file then runs
+  ramfs_read_or_write_file_data -> uiomove -> memcpy against that app-slot VA,
+  unmapped in its own AS -> the fault above.
+
+  The ramfs segment MAP node and vnode were already identity-heap (prior fix);
+  only the large-segment DATA BUFFER regressed to app-slot mmap.  For pgbench -s
+  5, pgbench_accounts is ~64 MiB, so its segments blow past 2 MiB and hit this.
+
+================================================================================
+THE FIX (minimal, correct, #if CONF_fork; non-fork byte-identical)
+================================================================================
+fs/ramfs/ramfs_vnops.cc -- THE STORAGE-COHERENCE FIX.
+  Allocate the segment data buffer as physically-contiguous IDENTITY-mapped
+  memory: memory::alloc_phys_contiguous_aligned(size, page_size) (== the large
+  page-range allocator, VA >= 0x400000000000, in the kernel PML4 slots
+  clone_address_space() copies verbatim into every child).  Every address space
+  reaches the same file image.  Plain free() on it dispatches by address to
+  free_large (identity path), so the existing free(data) sites are correct from
+  any address space -- no free-site changes needed.  The non-fork (#else) path
+  keeps the exact original `malloc(new_segment_size)`.
+  (Chose alloc_phys_contiguous over broadening malloc_large: it is surgical --
+  only ramfs file growth is affected, not every kernel_heap_scope large alloc.)
+
+THREE MORE cross-AS coherence fixes uncovered while pushing the concurrent path
+(all #if CONF_fork; same rule: a kernel structure a cross-AS waker dereferences
+must be identity-mapped, never the COW fork arena):
+
+  libc/sem.cc -- pshared POSIX semaphore object onto the identity heap.
+    sem_init() stored only a POINTER in the shared sem_t; the posix_semaphore
+    object (its _val, _mtx, _waiters) was `new`'d on the app thread -> COW arena.
+    A waiter (sem_wait) blocked on its PRIVATE _waiters and a poster (sem_post)
+    in another backend bumped a PRIVATE _val -> lost wakeup; and post_unlocked()
+    GP-faulted dereferencing a stack wait_record cross-AS
+    (Assertion sched::preemptable() in sem_post -> thread::wake).  This alone
+    took a single-UPDATE `-c 2` bench from ~30 txns before hanging to ~4300.
+
+  core/semaphore.cc -- semaphore wait_record onto the identity heap when a
+    cross-AS wake is possible, via the SAME fork_child_needs_heap_wait_record()
+    gate lockfree::mutex/condvar use (on-stack fast path in AS0).
+
+  include/osv/waitqueue.hh + core/waitqueue.cc -- wait_object<waitqueue> now
+    holds its wait_record via coherent_wait_record (identity heap under fork),
+    like condvar; it links onto the shared _waiters_fifo (epoll activity
+    waiters, msleep, ...) that a cross-AS waker walks.
+    (include/osv/wait_record.hh: added a const get() overload for poll() const.)
+
+  fs/vfs/kern_descrip.cc -- file::epoll_add keeps f_epolls (the per-file list of
+    watching epoll instances) and its growth on the identity heap.  The
+    RX/netisr thread walks so->fp->f_epolls cross-AS (tcp_input.cc) to wake
+    watchers; a COW-arena vector made it see an empty list -> the epoll never
+    fired for the watching backend.
+
+================================================================================
+THE REGRESSION TEST -- tests/tst-fork-shared-write.cc (author Greg Burd)
+================================================================================
+Registered in modules/tests/Makefile.  Mirrors the pgbench -i pattern:
+  parent creates a file on ramfs (/tmp);
+  fork child A: ftruncate()s it to 8 MiB (forces ramfs_enlarge_data_buffer to
+    allocate ONE segment buffer > the 2 MiB arena max_alloc -> the app-slot
+    malloc_large path in A's AS on HEAD), then write()s a deterministic pattern;
+  fork child B (a DIFFERENT sibling AS that never wrote the file): read()s the
+    whole file back and verifies A's pattern -- the cross-AS read memcpy that
+    faults on HEAD;
+  the parent (AS0) also reads it back.
+Each child owns its verdict via its exit code; the parent waitpid-verifies.
+
+  Reproduces on HEAD (fix reverted):
+    child A: wrote+verified 8388608 bytes
+    page fault outside application, addr: 0x0000200000400000
+    RIP: 0x000000004031334a <memcpy_repmov_ssse3+74>
+    Aborted
+  Passes with the fix:
+    child A: wrote+verified 8388608 bytes
+    child B: read back 8388608 bytes, all match A's pattern
+    PASS: large ramfs file ... coherent when read by a sibling child and parent
+    tst-fork-shared-write done: 0 failures
+
+================================================================================
+VALIDATION -- fork suite green, non-fork clean
+================================================================================
+CONF_fork=1, fs=rofs/ramfs, image=tests, KVM -smp 2:
+  tst-fork-shared-write     PASS: 0 failures (NEW; reproduces on HEAD, passes fixed)
+  tst-fork                  done: 0 failures
+  tst-fork-cow              done: 0 failures (incl. "child's MAP_SHARED write
+                             visible in parent" -- the simple same-VA case)
+  tst-fork-deep             done: 0 failures
+  tst-fork-serial           PASS: 30/30 (sustained fork/reap)
+  tst-fork-arena-freelist   done: 0 failures
+  tst-fork-preempt          done: 0 failures
+  tst-fork-irq-cow          done: 0 failures
+  tst-fork-conn-socket      PASS
+  tst-fork-socket           PASS
+  tst-pgfork                done: 0 failures
+  tst-execve                done: 0 failures
+  tst-fork-posix-shm        FAIL (part 3) -- PRE-EXISTING on clean HEAD (verified
+                             by reverting ALL my changes), NOT a regression; see
+                             NEXT WALL (1) below.
+
+conf_fork=0 (all new code is #if CONF_fork; #else restores originals):
+  ./scripts/build conf_fork=0 fs=rofs image=tests -> CONF_fork==0 header,
+  loader links, all changed .o (semaphore.o, waitqueue.o, ramfs_vnops.o,
+  kern_descrip.o, sem.o) compile.  (Switching conf_fork needs clearing
+  build/*/.config + gen/include/osv/kernel_config_fork.h so kconfig
+  regenerates, per prior reports.)
+
+PG image rebuilt: ./scripts/build conf_fork=1 fs=ramfs image=pg18-fork -> ok.
+
+================================================================================
+****  THE PAYOFF -- HEAVY BULK LOAD SURVIVES (real output, KVM -m 4G -smp 2) ****
+================================================================================
+Before: `pgbench -i -s 5` faulted at "creating primary keys" / a checkpoint
+write ("page fault outside application", memcpy in ramfs read/write).  After:
+
+  ========== pgbench -i -s 5 (HEAVY BULK LOAD) ==========
+  dropping old tables... creating tables... generating data (client-side)...
+  100000 of 500000 tuples (20%) ... 500000 of 500000 tuples (100%) done
+  vacuuming...
+  creating primary keys...
+  done in 0.53 s (drop tables 0.00 s, create tables 0.00 s,
+    client-side generate 0.28 s, vacuum 0.10 s, primary keys 0.15 s).
+  === init exit 0 ===
+
+  ========== pgbench -c 1 -T 20 (SUSTAINED HEAVY TPC-B WRITE) ==========
+  progress: 5.0 s, 2072.8 tps, lat 0.481 ms stddev 0.453, 0 failed
+  progress: 10.0 s, 1844.6 tps, lat 0.542 ms stddev 0.562, 0 failed
+  progress: 15.0 s, 2061.4 tps, lat 0.485 ms stddev 0.502, 0 failed
+  progress: 20.0 s, 2229.6 tps, lat 0.448 ms stddev 0.374, 0 failed
+  transaction type: <builtin: TPC-B (sort of)>   scaling factor: 5
+  number of transactions actually processed: 41042
+  number of failed transactions: 0 (0.000%)
+  latency average = 0.487 ms   tps = 2052.755650
+
+  ========== pgbench -S -c 4 (CONCURRENT READ BENCH) ==========
+  progress: 5.0 s, 45687.4 tps, lat 0.086 ms stddev 0.159, 0 failed
+  progress: 10.0 s, 44049.7 tps, lat 0.089 ms stddev 0.131, 0 failed
+  (sustains ~45-50k tps for a bounded window, then hits NEXT WALL (2))
+
+THIS CLOSES THE STORAGE / SHARED-BUFFER COHERENCE WALL for the bulk load:
+stock PostgreSQL 18.4 completes a heavy `pgbench -i -s 5` and a sustained
+single-client TPC-B write workload on OSv.
+
+(Note: max_parallel_* were set to 0 in postgresql.conf to isolate the parallel-
+worker DSM path from the storage wall during investigation.  The single-writer
+bulk load + write bench above exercise the full WAL/buffer/checkpoint write
+path.  Re-enabling parallel workers is bounded by the same NEXT WALLs below.)
+
+================================================================================
+NEXT WALLS (distinct, precisely symbolized, NOT fixed here -- honest)
+================================================================================
+Sustained CONCURRENT load (pgbench -c 2+ write, or a long -S -c 4 read) still
+wedges/aborts.  Isolation: `-c 1` heavy write runs to completion (41k txns);
+`-S -c 4` reads sustain ~50k tps for a bounded window; a fresh `select 42`
+connection is served WHILE a concurrent bench is wedged.  So it is NOT the
+storage wall this report closes -- it is cross-child-COW scheduler / AS-clone
+coherence.  Two precise walls:
+
+  (1) POST-FORK MAP_SHARED WRITE-VISIBILITY RACE.
+      tst-fork-posix-shm part 3 (child writes a MAP_SHARED shm segment attached
+      POST-fork, parent must observe it) FAILs on clean HEAD too (pre-existing).
+      gdb proved parent and child map the SAME shm_file (this=0x600000b4ff00)
+      and the SAME physical page (phys=0x5fc00000) -- yet under normal timing
+      the parent never observes the child's write within 3 s.  It PASSES only
+      when gdb single-stepping / debug prints SERIALIZE the two CPUs.  Signature
+      of a cross-CPU visibility / missing-TLB-shootdown race on a post-fork
+      MAP_SHARED mapping, not a page-selection bug.
+
+  (2) park_timers BOOST INTRUSIVE-LIST DOUBLE-INSERT under concurrency:
+      Assertion failed: !safemode_or_autounlink || node_algorithms::inited(...)
+        (boost/intrusive/list.hpp: push_back: 273)
+        sched::cpu::park_timers(sched::thread&)+325
+        sched::cpu::reschedule_from_interrupt(...)
+        sched::thread::wait() <- epoll_file::wait <- epoll_wait
+      A thread is park_timers'd (parked_threads.push_back) while already linked,
+      during a context switch out of epoll_file::wait under concurrent load.
+      In the #if CONF_fork fork timer-park machinery (commit 1041518e5).
+
+Both are in the CONF_fork scheduler/timer/AS-clone code -- the next
+investigation for a full HammerDB run.
+
+Do NOT read this as "PG is production-ready on OSv" or "concurrent HammerDB
+works": sustained concurrent load trips walls (1)/(2).  But the milestone this
+report targeted -- SURVIVING A HEAVY pgbench -i BULK LOAD + a sustained heavy
+single-writer bench -- IS achieved, with the verbatim output above.
+
+================================================================================
+FILES CHANGED (committed b11388fbb on integ/pg-fork-arena, author Greg Burd)
+================================================================================
+  fs/ramfs/ramfs_vnops.cc      large segment data buffer -> identity contiguous
+                              memory (THE STORAGE-COHERENCE FIX). #if CONF_fork.
+  libc/sem.cc                  pshared posix_semaphore object -> identity heap.
+  core/semaphore.cc            semaphore wait_record -> identity heap (gated).
+  include/osv/waitqueue.hh      wait_object<waitqueue> -> coherent_wait_record.
+  core/waitqueue.cc            arm/disarm via the coherent record.
+  include/osv/wait_record.hh    const get() overload.
+  fs/vfs/kern_descrip.cc        file::epoll_add f_epolls -> identity heap.
+  tests/tst-fork-shared-write.cc  NEW regression test (author Greg Burd).
+  modules/tests/Makefile        register tst-fork-shared-write.so.
+
+SHIPPING-PR RELEVANCE: PR #1456 (per-child COW address spaces / MAP_SHARED
+coherence).  The ramfs fix and the three cross-AS coherence fixes are the SAME
+rule as the shipped struct-file / signal-table / thread-object / arena-freelist
+/ DSM-registry / mbuf / thread-stack / app-runtime / net_req fixes: any kernel
+structure a forked child or a cross-AS waker (RX/netisr/reaper/poster) reads
+must live on the identity kernel heap, never the COW fork arena -- and, for the
+storage case, a large ramfs/mmap buffer shared across backends must be
+identity-mapped, not an app-slot mmap private to one backend.
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+arena-dev: left UP, image=pg18-fork rebuilt with the fixes, PG re-verified
+completing pgbench -i -s 5.  On floki (KVM, no EC2).
+================================================================================

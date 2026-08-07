@@ -1,0 +1,22 @@
+=== virtio-net MULTIQUEUE activation proof (patched kernel, TAP+vhost) ===
+Host: 96-vCPU x86-64 metal, KVM, qemu 9.0.2, TAP multi_queue + vhost=on.
+Guest: OSv upstream/master ae077860 + virtio-net-multiqueue patch, -smp 16.
+NIC: virtio-net-pci mq=on, -netdev tap queues=8.
+
+Instrumented boot trace (temporary debugf, NOT in the committed patch):
+  F_MQ=1 CTRL_VQ=1 max_pairs=8 nqp=8 num_queues=17 ncpus=16
+      -> device offers 8 queue pairs + ctrl vq (17 vqs = 16 data + 1 ctrl)
+      -> driver activates all 8 pairs (nqp=8), one receiver thread each,
+         pinned across CPUs
+  ctrl_vq=16                    -> control virtqueue located at 2*max_pairs (spec-correct)
+  set_vq_pairs ack=0            -> CTRL_MQ_VQ_PAIRS_SET(8) ACKed VIRTIO_NET_OK by device
+  pre-fill -> DRIVER_OK-next    -> all 8 Rx rings filled, DRIVER_OK set, init complete
+
+SLIRP (user netdev, no MQ support) control case:
+  F_MQ=0 max_pairs=1 nqp=1      -> correct single-queue fallback, identical to old driver
+
+Conclusion: the driver negotiates F_MQ, reads max_virtqueue_pairs, activates N
+pairs with N pinned receiver threads, and sends CTRL_MQ_VQ_PAIRS_SET which the
+device ACKs. Single-queue hosts fall back to nqp=1 unchanged.
+("Booted up" not reached here only because the test bridge has no DHCP server;
+the driver reaches DRIVER_OK - the boot-stability sweep with SLIRP DHCP was 10/10.)

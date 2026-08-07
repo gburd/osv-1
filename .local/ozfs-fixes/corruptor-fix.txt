@@ -1,0 +1,164 @@
+CORRUPTOR FIX -- QUALIFICATION EVIDENCE (honest, complete)
+Author: Greg Burd
+Box: osv-cor-a (ec2-user@3.16.46.123), docker container osv-build, /build/osv
+Branch: corruptor-fix @ 14667a8d0 (clean production build, WALL3 diagnostics OFF)
+Build: scripts/build -j96 image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1
+Loader: OSv v0.57.0-442-g14667a8d ; nm confirms pool::flush_empty_pages +
+        pool::flush_all_empty_pages linked; 0 WALL3/PAGE_QUAR/quarantine symbols.
+Pool:   fresh 8k lz4 pool (ashift=12 -O compression=lz4 -O recordsize=8k) on a
+        real NVMe device /dev/nvme1n1 (838 GB), seeded by cpiod from data-init.
+
+================================================================================
+BOTTOM LINE (honest)
+================================================================================
+My fix is a REAL, CORRECT fix for the page-pool cross-CPU reclaim UAF and it
+DRAMATICALLY reduces the corruptor: the fast load-phase crash (RUN 3 fired at
+~7s during the first checkpoint) is GONE.  pgbench -i -s1000 now regularly loads
+all 100,000,000 rows + vacuum + primary keys (~115 s) with NO kernel assert and
+NO on-disk poisoning (reboot + scrub 0 errors).
+
+But OSv+PG does NOT YET fully qualify at default 8k: a SECOND, DISTINCT
+wild-write corruptor (plus a lost-wakeup hang) still surfaces under SUSTAINED
+CONCURRENT RW (pgbench -c16 -T120 + checkpoint frenzy), hitting ZFS metadata
+(range_tree), condvar wait-records, and page tables.  The prior 3-session
+analysis conflated these as "one corruptor"; qualification shows they are at
+least two independent wild-write sources.  My fix closes ONE (the page-pool
+cross-CPU reclaim UAF).  The residual is the metadata-canary hunt the prior
+session recommended and did not complete.
+
+================================================================================
+THE FIX (core/mempool.cc, include/osv/mempool.hh; gated CONF_fork)
+================================================================================
+The shared kernel small-object pool lives in the identity map (PML4 slots
+128..511, shared verbatim in every fork AS -- it is NOT COW-cloned; verified:
+the RUN-3 freed page 0x400126238000 and its 0x500 page-alias both decode to
+shared kernel slots 128/160).  So the prior "pool pages participate in fork COW"
+framing is WRONG; the real root is a lock-free use-after-free:
+
+  pool::free_same_cpu could return a backing page to page_pool (untracked_free_page)
+  while the lock-free MPSC garbage queue (unordered_queue_mpsc<free_object>) still
+  linked into that page via intrusive free_object::next -- a producer's in-flight
+  link store or the consumer's _poll_list look-ahead then wrote/read an 8-byte
+  pointer into the recycled page (the RUN-3 signature: a 0x500 page-alias pointer
+  stored at off 1128 of a freed 0x400 page).
+
+Fix (all under #if CONF_fork; conf_fork=0 -> byte-identical stock OSv):
+  - free_same_cpu never frees a pool page inline; it completes the free onto
+    local_free so the page stays fully-free on the per-CPU pool _free list and
+    bumps a per-CPU empty tally (_nr_empty).
+  - collect_garbage, AFTER draining EVERY incoming garbage sink for the CPU (the
+    single-consumer, preempt-locked quiescent point where _head==_poll_list==null
+    for every sink, so no MPSC link references any pool object), calls
+    flush_all_empty_pages -> flush_empty_pages, which releases each malloc pool's
+    SURPLUS empties (> max_retained_empty=4 per CPU) back to page_pool.  The page
+    is erased from _free BEFORE the DROP_LOCK+untracked_free_page, so no concurrent
+    same-CPU alloc can re-grab it during the drop.
+  - alloc keeps _nr_empty honest when a page leaves the fully-free state (0->1).
+  - Bounded retention (max_retained_empty) so a bursty free storm cannot pin
+    unbounded memory (naive never-reclaim -> OOM-then-fault).
+
+Correct under SMP: producers push to per-CPU sinks concurrently; the single
+consumer drains all sinks under that CPU's preempt_lock before flushing; a
+retained empty page (nalloc==0) has all objects on local_free and none queued,
+so it is MPSC-safe by construction.
+
+================================================================================
+CELL -smp4 -m32G recordsize=8k lz4 hugepages=OFF KVM  (multiple runs)
+================================================================================
+RUN A (my fix): pgbench -i -s1000 loaded all 100M rows; ~19 checkpoints OK; NO
+  preemptable / boost / SPL PANIC / VERIFY3 / zero-page in the kernel log.  A
+  TRANSIENT EIO hit the final "vacuum analyze":
+    could not read blocks 49263..49263 in file base/5/16399: EIO
+  KEY: on reboot + re-import (fresh ARC):
+    select count(*) from pgbench_accounts; -> 100000000  (twice, clean)
+    vacuum analyze pgbench_accounts;       -> VACUUM      (the op that EIO'd)
+  => block CLEAN ON DISK; EIO did NOT persist (contradicts the pre-fix
+     "persists on disk" corruptor).  On-disk poisoning is GONE.
+
+REBOOT + SCRUB (RUN A pool):
+    pool: pgdata   state: ONLINE
+    scan: scrub repaired 0B in 00:00:02 with 0 errors
+    config:  pgdata ONLINE 0 0 0 ;  vblk1 ONLINE 0 0 0
+    errors: No known data errors
+
+RUN B (my fix): pgbench -i -s1000 COMPLETED CLEAN:
+    done in 114.44 s (drop 0.01, create 0.01, generate 80.00, vacuum 0.87,
+                      primary keys 33.55)
+  Then pgbench -c16 -j4 -T120 sustained RW ran; during the subsequent checkpoint
+  frenzy the guest hit:
+    SPL PANIC range_tree.c:873 zfs_range_tree_remove_xor_add_segment():
+      VERIFY3U(start, <, end) failed (8512260440064 < 34443628544)
+
+RUN C (my fix): preemptable() assert during a checkpoint at ~29% of the load.
+RUN D (my fix): condvar::wake_all() crash at ~35% (page fault outside
+  application, addr 0xfffffffffffff000; _priority>0 assert; a wait-record link
+  clobbered; registers held a 0x500 page-alias and a 0xffff... garbage pointer).
+RUN Final: -i reached 58% then a LOST-WAKEUP HANG (no fault, postmaster stops
+  answering; prior-session signature F).
+
+A/B (max_retained_empty=0xffffffff, flush disabled / retain-all): also completed
+  -i then hit the SAME range_tree VERIFY3U (end=34443628544, constant) during
+  -c16.  => the residual corruptor is INDEPENDENT of the flush path; it is a
+  separate wild-write source exposed only under sustained concurrent RW.
+
+================================================================================
+INTERPRETATION
+================================================================================
+- FACE 1 fast page-pool UAF (RUN-3 boost-intrusive / 7s crash): FIXED.  Load
+  phase completes; no fast crash; no on-disk poisoning; scrub clean.
+- A SECOND corruptor remains under pgbench -c16 sustained RW: wild writes into
+  ZFS metadata (range_tree, constant end=34443628544 across runs -> possibly a
+  ZFS-on-OSv space-map/log-spacemap interaction, not only random memory
+  corruption), condvar wait-records, and page tables; plus a lost-wakeup hang.
+  This is the metadata-canary campaign the prior session scoped (name the DVA /
+  victim address, then a KVM hardware write-watchpoint on it -> writer PC).
+
+conf_fork=0 byte-identical: PROVEN (build + object compare).
+
+================================================================================
+conf_fork=0 BYTE-IDENTICAL PROOF
+================================================================================
+Every change is under #if CONF_fork; the only unguarded edit is
+  #include <osv/kernel_config_fork.h>   (emits no code; just defines CONF_fork)
+Built core/mempool.o twice with conf_fork=0 -- from the fix commit (14667a8d0)
+and from its parent (14667a8d0~1) -- and compared:
+  .data       IDENTICAL
+  .rodata     IDENTICAL
+  .bss        IDENTICAL
+  .data.rel.ro IDENTICAL
+  symbol table IDENTICAL
+  .text       differs in exactly 50 lines, ALL of the form
+                mov $<linenum>, %edx
+              i.e. __LINE__ constants in assert()/abort() message arguments,
+              shifted because the fix added CONF_fork-gated source lines.
+              ZERO instruction-logic differences.
+include/osv/mempool.hh at conf_fork=0: 0-line diff (byte-identical).
+=> With conf_fork=0 the allocator is functionally byte-identical to stock OSv;
+   the sole delta is assert line-number literals.  (Adding #line directives
+   would erase even that, but it is cosmetic in a fault message.)
+
+================================================================================
+SECOND CORRUPTOR -- newly localized (for the next session's canary campaign)
+================================================================================
+The residual wild-write exposed under pgbench -c16 sustained RW crashes in:
+  spa_log_spacemap.c:1112/1116 -> zfs_range_tree_remove_xor_add_segment()
+  (the LOG SPACEMAP feature, exercised during spa_sync/checkpoint).
+The VERIFY3U(start < end) fires with a WILD start and a CONSTANT end
+(34443628544 = 0x804000000) across independent runs -> the log-spacemap
+range-tree btree nodes (ZFS metadata on the identity heap) are being clobbered
+by a wild pointer, corrupting a segment's start.  Same victim class the prior
+session saw (data blocks, PTEs, entropy ring, condvar wait-records): a wild
+pointer scribbling identity-heap ZFS metadata under SMP + fork.
+
+0x500 (mem_area::page) alias pointers recur as the corruptor fingerprint (RUN-3
+off-1128 store; RUN-D condvar registers R10/R14=0x500108bff000).  These are
+page-sized (page/4..page) mallocs that take the alloc_page()+translate(page)
+path and are freed via free_page()->page_pool::l1 -- a DIFFERENT reclaim path
+than the small-object pool this fix hardened.  Recommended next step
+(unchanged from the prior session): metadata canary on the log-spacemap /
+range-tree btree node allocation -> name the victim DVA/address -> KVM hardware
+write-watchpoint on it -> writer PC -> classify (ZFS platform glue vs fork/COW).
+
+Also observed under sustained RW: a LOST-WAKEUP HANG (postmaster stops
+answering, no fault) at ~58% of a later -i -- prior-session signature F, a
+fork wait/wake coherence issue, likely related.

@@ -1,0 +1,92 @@
+================================================================================
+F2a ROOT CAUSE + FIX -- virtio-blk queue-lock deadlock (the TRUE -smp1 wedge)
+================================================================================
+Author: Greg Burd   Classification: [fork-stack] (bug is generic virtio-blk;
+        only exercised by fork+ZFS+PG heavy write load)
+Base:   corruptor-fix @ 1ae2602f (F1 FPU fix HEAD)   Box: osv-cor-a /b
+
+--------------------------------------------------------------------------------
+THE NAMED LOST-WAKE PRIMITIVE
+--------------------------------------------------------------------------------
+It is NOT a PG latch / self-pipe / epoll wake, and NOT a fork COW-coherence bug.
+UPDATE 3's "lost self-pipe->epoll wake / f_epolls incoherence" hypothesis was
+WRONG -- f_epolls (and the whole epoll_file: map/_activity/_activity_ring/
+_waiters/_activity_ring_owner) are ALREADY routed to the identity heap and are
+coherent.  The 405/407 "unwait_for_signal" backtraces were a halted-CPU snapshot
+artifact (all showed identical this=0x1770), not the real wait.
+
+The TRUE wedge is a virtio-blk PER-QUEUE-LOCK DEADLOCK between the block-device
+submit path and its completion thread:
+
+  Thread 294 (z_wr_iss, ZFS write-issue): blk::make_request() holds
+     _queue_locks[qid] and calls vring::add_buf_wait() INSIDE that lock.  The
+     virtqueue is full, so add_buf_wait() SLEEPS in wait_until(used_ring_can_gc)
+     waiting for the completion thread to advance _used_ring_host_head so it can
+     GC descriptors and make room.  (drivers/virtio-blk.cc:make_request ->
+     drivers/virtio-vring.cc:357 add_buf_wait.)  5.8e9 ns cpu_time, never returns.
+
+  Thread 22 (virtio-blk req_done, the ONE completion thread): blocked in
+     lockfree::mutex::lock() at drivers/virtio-blk.cc:379 -- WITH_LOCK(
+     _queue_locks[q]) -- trying to acquire the SAME per-queue lock thread 294
+     holds, so it can drain_queue() + wakeup_waiter().
+
+  => The producer holds the lock and waits for the consumer; the consumer needs
+     the lock to run.  Permanent deadlock.  Disk progress = 0 forever, `select 1`
+     still answers (postmaster net path is independent of the blk ring), 420s+
+     no self-recovery.  Exactly signature-F/F2a.
+
+At -smp1 there is one queue (qid = cpu_id % _num_queues = 0), fully self-
+contended, so once a checkpoint's write burst saturates the ring the deadlock is
+certain -- matching the ~1-in-3 wedge "at checkpoint starting: wal".
+
+--------------------------------------------------------------------------------
+WHICH STRUCTURE / WHERE IT WAS INTRODUCED
+--------------------------------------------------------------------------------
+Commit 1e3d8414 "virtio-blk: add multiqueue I/O support" replaced the single
+`_lock` with a per-queue `std::vector<mutex> _queue_locks` AND -- the bug --
+wrapped req_done()'s drain in WITH_LOCK(_queue_locks[q]).  The ORIGINAL
+single-queue driver held _lock across add_buf_wait() in make_request BUT req_done
+drained the used ring WITHOUT any lock (git show 1e3d8414~1:drivers/virtio-blk.cc)
+-- so the completion thread always drained freely and woke the full-ring waiter.
+The multiqueue change made completions contend on the producer's held lock,
+creating the deadlock.  The producer/consumer state is only truly shared on the
+u16 _used_ring_host_head counter (completion writes via get_buf_finalize,
+producer reads in get_buf_gc) -- the exact lock-free split the original driver
+relied on.  vring's own internal `_lock` member is dead/unused.
+
+--------------------------------------------------------------------------------
+THE FIX (drivers/virtio-blk.cc, blk::req_done)
+--------------------------------------------------------------------------------
+Remove WITH_LOCK(_queue_locks[q]) from req_done()'s drain loop; drain + wake the
+waiter without the per-queue submission lock, restoring the original single-queue
+driver's lock-free completion path.  The per-queue lock still serialises
+concurrent make_request() producers (its actual job); it must not gate
+completions.  Single completion thread => the drain is single-consumer; it races
+get_buf_gc only on _used_ring_host_head, same as upstream.  Not #if CONF_fork
+(generic virtio-blk correctness), but only reachable under fork+ZFS+PG heavy
+write load so behaviorally fork-gated.
+
+COMMIT: f2857073 (branch corruptor-fix, on /b).
+
+--------------------------------------------------------------------------------
+QUALIFICATION EVIDENCE (sigF-qualify3.sh: reseed pgdata.clean.raw each run,
+pgbench -i -s1000 then -c16 -j4 -T120; WEDGE = 120s no-progress + select1 answers)
+--------------------------------------------------------------------------------
+-smp1 32G KVM (the F2a regime):
+  run 1..10: CLEAN IRC=0 CRC=0 0-failed ~1440 tps  (10 CONSECUTIVE CLEAN)
+  run 11:    CRASH(-i) EIO could not read blocks (separate read-path facet, NOT F2a)
+  run 12:    CLEAN
+  TOTAL: clean=11 wedge=0 crash=1 of 12
+  => F2a permanent lost-wakeup wedge = 0 (was ~1-in-3 before).  MILESTONE MET.
+
+-smp4 32G KVM:
+  run 1,2,4,6: CLEAN ~2450 tps    wedge=0
+  run 3: CRASH(-c) EIO write (read/write-path facet)
+  run 5: CRASH(-i) Assertion failed bstree insert_before  == F2b (the -smp>1
+         scheduler-migration runqueue double-insert -- deliberately NOT fixed here)
+  TOTAL: clean=4 wedge=0 crash=2 of 6
+  => F2a (wedge) = 0 at -smp4 too; -smp>1 still hits the separate F2b, as expected.
+
+-smp1 hugepages ON (-mem-path /dev/hugepages -mem-prealloc): (see f2a-report.txt)
+
+This fix does NOT touch F2b (the -smp>1 migration bstree double-insert).

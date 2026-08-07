@@ -1,0 +1,11 @@
+config	hugepages	scale	mode	clients	metric	value	unit	status	notes
+OSv-KVM	off	10	catalog-cold-init	1	init	OK	-	OK	pgbench -i -s 10 cold catalog, done in 1.43s, no zero-page
+OSv-KVM	off	-	catalog-cast	1	pg_catalog.timestamp	OK	-	OK	'2024-01-01'::pg_catalog.timestamp -> value; FC wall NOT repro
+OSv-KVM	off	-	catalog-read-concurrent	16	OK/FAIL	16/0	backends	OK	16 cold concurrent logins reading pg_class+timestamp, FC=1/15 NOT repro
+OSv-KVM	off	10	pgbench-TPCB-reconnect	16	tps	5.77	tps	OK	-C reconnect storm, 188 xacts 0 failed, avg conn 2660ms, guest alive
+OSv-KVM	off	10	pgbench-RO-select	8	tps	34512.13	tps	OK	-S -c8 -T20, 642829 xacts 0 failed, io_method=worker, guest alive
+OSv-KVM	off	100	pgbench-TPCB-rw	1	tps	283.75	tps	OK	rw it1, 0 failed, warm (crashed on later run)
+OSv-KVM	off	100	pgbench-TPCB-rw	1	tps	285.38	tps	OK	rw it2, 0 failed, warm (crashed on later run)
+OSv-KVM	off	100	pgbench-TPCB-rw	1	tps	NA	tps	CRASH	rw it3 guest crash lfmutex owner-mismatch taskqueue_thread_loop
+OSv-KVM	off	1000	pgbench-init	1	init	NA	-	CRASH	attempt1 lfmutex crash on PK checkpoint; attempt2 EIO at 1GB seg -> pool poisoned
+OSv-KVM	on	-	ALL	-	-	NA	-	NOT-RUN	hugepages-on matrix not run: sustained RW crashes guest; no reportable matrix

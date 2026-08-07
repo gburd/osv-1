@@ -1,0 +1,37 @@
+tests: ZFS validation and benchmark suite
+
+Add the ZFS-focused tests that gate this branch's correctness story:
+
+Validation:
+  - tst-zfs-direct-io.so: O_DIRECT + buffered round-trips (9 cases)
+  - tst-zfs-trim.so: lzc_trim, partial-discard, busy pool (5 cases)
+  - tst-zfs-encryption.so: AES-256-GCM key load/unload, dataset
+    create/destroy under encryption, key-refcount on unmount
+    (21 cases — covers the wk_refcnt EBUSY fix in libzfs_dataset.c)
+  - tst-zfs-crucible-stress.so: concurrent reads/writes against a
+    Crucible-backed pool (excluded from the generic zfs-test image
+    manifest since it needs a real Crucible cluster).
+
+Benchmarks:
+  - tst-zfs-recordsize.so: throughput vs. recordsize at fixed
+    workload size, demonstrates the ARC cache-hit-rate dependence.
+  - tst-fs-bench.so: cross-filesystem benchmark (ZFS vs ramfs vs
+    rofs, with --dir to pick the mountpoint).
+  - tst-zfs-db-sim.so: synthetic Postgres-WAL workload, runs all
+    four configurations (C1/C3/C4/C5).  Requires a 4 GiB pool and
+    a 30 s inter-config sleep so the previous run's ARC has drained.
+
+Ergonomics:
+  - tst-zfs-* helpers replace shell-out-to-zpool with libzfs API
+    calls so the tests run inside the OSv unikernel (the userspace
+    zpool binary has a separate stale-pointer bug in its argv
+    handling).  Builds also become idempotent: re-running a test
+    no longer leaves stale datasets behind.
+  - update-openzfs.sh removed (was the patch-workflow utility, now
+    obsolete since we track via submodule).
+  - zfs-test image definition (modules/tests-zfs/) for the ZFS-only
+    test set.
+
+All registered in modules/tests/Makefile and zfs-tools/usr.manifest.
+The pool sizing in tst-zfs-trim and tst-zfs-db-sim is documented in
+the test source.

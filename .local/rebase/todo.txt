@@ -1,0 +1,99 @@
+# Rebase TODO — original order preserved up to 0d41fb93,
+# then NEW combined crucible commit inserts before 83d010ee,
+# then ZFS items absorbed into b08106ad,
+# then tail commits, with later wire-format/zfs/cleanup commits dropped.
+
+pick b234155f build: add Nix flake for reproducible development environment
+pick dd8f9751 block: add TRIM/DISCARD and multiqueue I/O support
+pick 981d5308 drivers: add Crucible distributed block storage driver
+pick 3d9b3950 drivers: add multi-volume Crucible support
+pick 2acf2c58 bsd: fix device_delete_child return type
+pick 124956b6 fs: implement io_uring async I/O interface
+pick 77c3fb2b drivers: remove unused Rust stubs from Crucible
+pick 2894cffc scripts: add VirtIO-BLK multiqueue QEMU configuration
+pick 8c77d780 mmu: add MADV_HUGEPAGE and MAP_HUGETLB support
+pick 31c6a8fd build: update to latest Boost library (remove boost177 dependency)
+pick 688183a1 libc: upgrade musl from 1.1.24 to 1.2.1
+pick 953c4a96 tests: add shared memory consistency test
+pick f8a0f5ce pagecache: add C-linkage helpers for ZFS vop_cache and GCC 14 fix
+pick a1ca7318 zfs: add OpenZFS 2.4.1 build system and Makefile integration
+pick fb1703ea zfs: implement OSv porting layer for OpenZFS 2.4.1 kernel module
+pick 4363efda zfs: integrate OpenZFS kernel module into OSv VFS and boot layer
+pick e3a328a1 shm: fix stale PTE bug, add POSIX shm and ftruncate support
+pick 8f9c9502 mmu: add missing #include <algorithm> for GCC 14 compatibility
+pick 08ed8429 build: update Boost.Asio API for Boost 1.74+ compatibility
+pick 8b8a1490 drivers: harden Crucible block device driver
+pick 9e0f9978 tests: add ZFS Crucible concurrent I/O stress test
+pick 1de0a1af images: add zfs-test image definition
+pick a3531749 tests: add MAP_HUGETLB and MADV_HUGEPAGE functional tests to tst-huge
+pick f80260d5 build: make Crucible block device driver opt-in (not in default profile)
+pick 375598d2 pagecache: remove unreachable ARC bridge code, document design decision
+pick 4bd2b109 tests: add ZFS direct I/O validation test
+pick ea4f3d51 tests: add ZFS recordsize throughput benchmark
+pick 95acf03e tests: replace system() with libzfs API in ZFS test helpers
+pick 746d9fa1 tests: add ZFS encryption integration test (AES-256-GCM)
+pick 65e2a289 tests: add comprehensive filesystem performance benchmark
+pick 6059dce9 tests: update build manifests and add update-openzfs.sh utility
+pick 55523197 pagecache: add sequential readahead and periodic writeback
+pick e0e5f314 virtio-blk: implement per-CPU queue dispatch for multiqueue I/O
+pick 7d2dc7f1 docs: update cover letter for Waldek with full feature summary
+pick f72eff82 docs: update cover letter -- remove NILFS2, expand io_uring and pagecache sections
+pick 5270897a vfs: flush page cache before VOP_FSYNC in sys_fsync
+pick 3fc44018 docs: add sys_fsync page-cache flush fix to cover letter
+pick 4b7f8414 build: fix incremental rebuild with OpenZFS 2.4.1 objects
+pick 5720dc7c tests: fix io_uring test assertions; build: add zio_crypt to libsolaris
+pick fc08b26d zfs: fix symlink EBADF; build: fix binutils 2.46; java: NixOS compat fixes
+pick 2d2858a4 zfs: fix ARC shrinker, kthread stack, osv_free_pages, and memory pressure
+pick c275ee86 mmu: fix virt_to_phys for VMA-mapped DMA buffers
+pick 6d0d7d8c virtio-blk: fix per-queue locking race in multiqueue drain
+pick 3d16b39a build: fix Boost 1.74+/1.78+ API compatibility in httpserver-api
+pick 5fde3f3b build: fix NixOS library resolution for libz, OpenSSL, and manifest_from_host
+pick d080d717 tests: add ZFS database simulation benchmark (Postgres WAL workload)
+pick 69d1788f build: ignore .memelord/ memory database directory
+pick 36694b7f docs: update cover letter with new stability fixes and benchmark results
+pick e1b9198f docs: remove COVER_LETTER.txt (content merged into ~/email-to-waldek.txt)
+pick ab371dd0 docs: remove stale agent-generated status and example files
+pick 9d9e381c zfs: remove orphaned bsd/cddl legacy OpenSolaris userspace sources
+pick f9d097aa tests: add ZFS TRIM/DISCARD test and cross-filesystem benchmark docs
+pick 0293d6d4 tests: fix uint64_t in tst-zfs-trim.cc (add cstdint include)
+pick 8016f1e9 zfs: wire ZIO_TYPE_TRIM through vdev_disk to virtio-blk BIO_DISCARD
+pick 54796e1a zfs: document real encryption impl; strengthen encryption test
+pick 8ab7103d zfs: fix TRIM bio error mapping — ENOTSUP not EIO for unsupported discard
+pick c8c5c255 libc: fix nftw uninitialized variable in musl 1.2.1
+pick 99ebc239 tests: fix ZFS TRIM test and db-sim pool size requirements
+pick 0d41fb93 ci: add Forgejo Actions workflows for Codeberg
+
+# === NEW combined crucible commit lands here, BEFORE the apps commit ===
+# We rebuild it via cherry-pick + squash of all later crucible commits.
+# Use 'reword' on the first one so we can rewrite the message; 'fixup' on the rest.
+reword f221e924 crucible: fix HereIAm wire format — alternate_versions, not alternate_region
+fixup 732b778e crucible: align wire format with upstream Crucible protocol V13
+exec git cherry-pick -n -X theirs 7e664831 -- drivers/ ; git commit --amend --no-edit
+fixup 8e79e283 crucible: fix Result/Write/ReadResponse/Flush wire format
+fixup 2313071c tests: add tst-crucible-blk for direct Crucible block device validation
+fixup bd304b28 crucible: rewritten message layer + tst-crucible-{blk,zfs} validation
+fixup beb809c7 crucible: thread-safe send/recv with atomic header+data send
+fixup f8f7ff0e fixup! crucible: production logging cleanup
+
+pick 83d010ee build: point apps submodule at Codeberg fork with new demo apps
+
+# ZFS commit absorbs uioskip submodule bump + multirec test
+pick b08106ad zfs: upgrade OpenZFS from 2.4.1 to 2.4.2
+fixup 04ac529f tests: add tst-zfs-multirec to bracket the OSv ZFS multi-record bug
+exec git cherry-pick -n 7e664831 -- external/openzfs ; git cherry-pick -n ff140608 ; git commit --amend --no-edit
+
+pick b4a4f692 build: add external/openzfs to .gitmodules
+pick 79697a0f tests: register tst-io_uring.so in modules/tests/Makefile
+pick 043c2f54 block: remove unused next_queue_idx in blk-mq
+pick 1bcfc18a build: remove dead OpenZFS patch workflow
+pick 3157a203 apps: bump submodule pointer for cleanup commits
+pick dbc961c8 tests: make ZFS dataset tests idempotent; remove dead Rust scaffolding
+
+# Drop later commits: they've been absorbed above
+# (drop) 7e664831 — split between crucible (drivers) and zfs (submodule)
+# (drop) f221e924, 732b778e, 8e79e283, 2313071c, bd304b28, beb809c7
+# (drop) 04ac529f, ff140608, d0f9c98b, f8f7ff0e
+# d0f9c98b: cherry-pick its drivers/ portion (the Crucible-zfs comment) into the new crucible commit?
+# It was already part of the squash narrative above. Cherry-pick it now into HEAD as a fixup to last
+# crucible touch — but that crucible commit no longer exists at HEAD position. Skip.
+EOF

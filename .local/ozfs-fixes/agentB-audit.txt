@@ -1,0 +1,320 @@
+================================================================================
+Agent B -- PURE SOURCE AUDIT (floki, no build, no EC2)
+RANKED candidate-writer list for the ZFS-on-OSv SMP-race corruptor
+Target: Agent A sets hardware watchpoints on the top suspects (EC2, -smp>=2)
+================================================================================
+Date: (this session)  Repo: /home/gburd/ws/osv @ integ/pg-fork-zfs
+OpenZFS submodule: modules/open_zfs/openzfs (2.4.3)
+
+CONSTRAINTS FROM corruptor.txt + corruptor2.txt (locked in, do not re-derive):
+- On-disk corruption unit = ~128 KiB-aligned CONTIGUOUS RUN (16 x 8KiB blocks).
+  => writer copies/writes with len ~SPA_MAXBLOCKSIZE (0x20000 = 128KiB) to a
+     possibly-WRONG dest, OR a 128KiB-granular metadata object at a stale addr.
+- Scatter DATA ABD proven BYTE-CLEAN io_start->io_done (WALL3TORN 0 hits).
+  => the writer hits METADATA (indirect/blkptr/dnode/dbuf) or PAGE-TABLE pages
+     in the IDENTITY HEAP, not the in-flight data buffer.
+- SMP race (reliable -smp4, marginal -smp1). Fork-child<->AS0 interaction.
+  Single COPY backend + AS0 txg_sync is sufficient.
+- recordsize=8k sensitive (scales with count of small ZFS buffers).
+- RULED OUT: object tail/fwd overflow, per-CPU COW divergence, c6c89c59
+  large-alloc aliasing, entropy-ring, lazy-TLB, ZIL, compression, PQ/DSM,
+  scatter-data-ABD DMA window (byte-clean).
+
+(Findings appended incrementally below as the code is read.)
+================================================================================
+
+================================================================================
+KEY DIMENSIONAL FACT (nailed down from source)
+================================================================================
+SPA_OLD_MAXBLOCKSHIFT = 17 => SPA_OLD_MAXBLOCKSIZE = 131072 = EXACTLY 128 KiB.
+  (external/openzfs/include/sys/fs/zfs.h:1958)
+The on-disk ~128 KiB-aligned contiguous run (16 x 8KiB blocks) is the classic
+ZFS 128 KiB unit: the DEFAULT max metadata/indirect-block granularity and the
+zio AGGREGATION / GANG limit region. A writer that copies/zeroes/DMAs one
+128 KiB unit to a wrong destination, or a 128 KiB metadata object referenced by
+a stale pointer, is the shape we want. This makes 128 KiB-granular writers the
+#1 class to watch (matches the brief's priority 1).
+
+CODE MAP (where the real source lives):
+  OSv core + fork glue:  .local/worktrees/pg-fork-zfs/core/{mmu,mempool,fork_arena}.cc
+  ZFS + OSv glue:        external/openzfs/  (master worktree; structurally == the
+                         patched 2.4.3 submodule, OSv glue under module/os/osv/zfs/)
+
+================================================================================
+MEMPOOL / MAGAZINE STRUCTURE (core/mempool.cc) -- confirmed layout
+================================================================================
+- Small objects (< page_size/4 = 1024B): per-page pool. page_header at page
+  start holds {owner(pool*), cpu_id, nalloc, local_free}. to_header() = VA &
+  ~(page_size-1). These pages come from untracked_alloc_page() -> identity heap
+  -> SHARED verbatim across every fork AS (same VA == same phys page).
+- Cross-CPU free routes through pcpu_free_list[obj_cpu][cur_cpu] (garbage_sink
+  mpsc rings). obj_cpu is read from header->cpu_id. Signature (1) corrupt
+  cpu_id=0x36 => header was clobbered by the wild write (VICTIM, not writer).
+- There is NO per-CPU MAGAZINE of pointers that survives across the alloc/free
+  boundary holding a child-AS VA in the classic sense: the "magazine" here is
+  (a) the per-page local_free singly-linked list (links live INSIDE the pool
+  page, at a SHARED identity-heap VA -> coherent, not per-AS-divergent), and
+  (b) the pcpu_free_list mpsc rings (hold free_object* = identity-heap VAs ->
+  coherent). Both are identity-heap, so NOT the per-AS-divergence trap that the
+  fork_arena note describes. This DOWNGRADES the "magazine holds a child VA"
+  theory for the mempool small pools (they're shared, not COW).
+  ==> The COW-divergence magazine trap DOES exist, but in fork_arena, and the
+      fork_arena note says they already fixed it by keying free-lists per-AS.
+
+================================================================================
+ABD_OS (external/openzfs/module/os/osv/zfs/abd_os.c) -- observations
+================================================================================
+- abd_chunk_cache objects are PAGE_SIZE (4096) each. An 8k record => a 2-chunk
+  SCATTER ABD (two separate 4k kmem_cache_alloc chunks, NOT contiguous).
+- abd_alloc_zero_scatter(): builds abd_zero_scatter of SPA_MAXBLOCKSIZE
+  (16 MiB!) with n = abd_chunkcnt_for_bytes(SPA_MAXBLOCKSIZE) chunk slots, but
+  points EVERY slot at the SAME single osv_zero_page (4k). Benign for reads.
+- abd_get_offset_scatter: memcpy of chunk POINTERS (chunkcnt * sizeof(void*))
+  into a child ABD. If chunkcnt math is wrong this copies pointer slots, not
+  128KiB of data -- small blast radius, not the 128KiB shape. Lower priority.
+- abd_alloc_from_pages: FROM_PAGES ABD wraps caller pages (Direct I/O). PG uses
+  read()/write() not Direct I/O per corruptor2 (0019 ruled out) -> cold path.
+
+
+================================================================================
+Agent B -- SOURCE AUDIT CONTINUATION (session 2, floki, no build/EC2)
+FINISHING the zio-aggregate / gang / indirect-block / vdev_disk trace
+================================================================================
+Repo: /home/gburd/ws/osv  worktree .local/worktrees/pg-fork-zfs (integ/pg-fork-zfs)
+OpenZFS source read from: external/openzfs/  (== patched 2.4.3 submodule)
+OSv fork glue read from:  .local/worktrees/pg-fork-zfs/core/fork_arena.cc
+
+--------------------------------------------------------------------------------
+FORK<->AS0 COHERENCE RULE (the seam every candidate is measured against)
+--------------------------------------------------------------------------------
+core/fork_arena.cc: an arena chunk is COW-PRIVATE per child after fork. Any
+object whose bytes must be identical in AS0 (the block-completion / txg_sync
+thread) and in a fork child MUST be allocated inside
+fork_kernel_heap_push()/pop() so it lands on the IDENTITY HEAP (same VA == same
+phys page in every AS). Objects NOT wrapped land on the COW fork arena and are
+INCOHERENT: AS0 and the child see divergent copies at the same VA.
+
+The corruptor shape = "AS0 completion thread writes a 128KiB unit computed from
+state that is stale/divergent across the fork boundary, or from a pointer/length
+computed in the child." So for each candidate the two questions are:
+  (Q1) is the DEST address / LENGTH of the 128KiB write computed correctly, and
+       from state coherent across AS?
+  (Q2) does the buffer being copied FROM, or the chain of abd_t* / chunk[]
+       pointers walked to build it, live on the COW arena (divergent) rather
+       than the identity heap?
+
+Confirmed identity-heap (coherent, NOT the trap):
+  - zio_buf_alloc() -> kmem_cache_alloc(zio_buf_cache[c], KM_PUSHPAGE)  (zio.c:433)
+  - abd_chunk_cache chunks -> kmem_cache_alloc(abd_chunk_cache,...)     (abd_os.c:140)
+  - zio_t itself (W-arcwrite-handoff.md: zfs_kmem_alloc/kmem_cache_alloc already
+    route through fork_kernel_heap_push/pop).
+  Caveat: "routes through identity heap" was ASSERTED for kmem_cache_alloc in the
+  handoff note; it is worth Agent A confirming at runtime that zio_buf_cache and
+  abd_chunk_cache slabs are truly identity-heap-backed (see watch #0 below).
+
+================================================================================
+#1 (TOP)  zio AGGREGATION -> gang-ABD linearization copy in vdev_disk_io_start
+================================================================================
+FIT: EXACT. This is the only path that (a) is bounded to precisely 128KiB, (b)
+copies a full contiguous 128KiB run in ONE memcpy loop, (c) runs on the AS0
+async-write taskq/completion thread, and (d) gathers from a *chain of abd_t*
+whose chunk[] pointers were computed earlier, possibly in another AS.
+
+THE 128KiB BOUND (dimensional match, not a coincidence):
+  external/openzfs/module/zfs/vdev_queue.c:203
+    zfs_vdev_aggregation_limit_non_rotating = SPA_OLD_MAXBLOCKSIZE (=131072=128KiB)
+  vdev_queue.c:618  vdev_nonrot (virtio-blk IS nonrot) -> limit = 128KiB
+  vdev_queue.c:623  limit = MIN(limit, SPA_MAXBLOCKSIZE)
+  => adjacent async writes are coalesced into a gang ABD of up to EXACTLY 128KiB.
+  recordsize=8k => 16 x 8KiB adjacent metadata/indirect writes aggregate into one
+  128KiB gang. This is the "16 x 8KiB contiguous run" the corruptor reports.
+
+THE GATHER (build the 128KiB gang ABD): vdev_queue.c:596 vdev_queue_aggregate()
+  :745  size = IO_SPAN(first,last); ASSERT <= SPA_MAXBLOCKSIZE
+  :747  abd = abd_alloc_gang();
+  :759  aio = zio_vdev_delegated_io(..., abd, size, ...)   <- the aggregate zio
+  :761-798 loop over child dio's: abd_gang_add(aio->io_abd, dio->io_abd, B_FALSE)
+        The gang's abd_gang_chain is a LIST of the CHILD zios' io_abd's. Those
+        child io_abd's are the per-8KiB-block scatter ABDs whose chunk[] entries
+        point at abd_chunk_cache pages.
+
+THE WRITE / LINEARIZE (the actual 128KiB memcpy): the gang is a gather list, but
+the OSv bio layer has NO scatter/gather. So vdev_disk_io_start MUST flatten it:
+  external/openzfs/module/os/osv/zfs/vdev_disk.c:vdev_disk_io_start (WRITE branch)
+    data = abd_borrow_buf_copy(zio->io_abd, size);   // size up to 128KiB
+      -> abd_os.c:496 abd_borrow_buf_copy:
+           buf = abd_borrow_buf(abd,n)  -> abd_os.c:485 zio_buf_alloc(n)  (linear 128KiB)
+           abd_copy_to_buf(buf, abd, n)  ->  abd.c:860 abd_copy_to_buf_off
+             -> abd.c:763 abd_iterate_func(GANG abd, 0, 128KiB, copy_cb, buf)
+                walks abd_gang_chain (abd.c:729 abd_gang_get_offset / :753
+                list_next) and for each child does abd_iter_map (abd_os.c:382):
+                  paddr = ABD_SCATTER(child).abd_chunks[offset>>PAGE_SHIFT]
+                memcpy(buf+running, paddr+off, mapsize) into the 128KiB linear buf.
+  bio->bio_data = data; bio->bio_offset = zio->io_offset; bio->bio_bcount = size;
+  strategy(bio)  -> DMA the 128KiB linear buf to disk at zio->io_offset.
+
+WHY THIS CAN CORRUPT A 128KiB RUN AT A WRONG DEST / UNDER SMP / ACROSS FORK:
+  (a) DEST addr on disk = zio->io_offset of the AGGREGATE, taken from `first`
+      (vdev_queue.c:759 first->io_offset). If the per-vdev vq AVL offset trees
+      (vq_write_offset_tree) are walked while a concurrent enqueue mutates them,
+      `first`/`last` and thus io_offset+size can be miscomputed. vq_lock guards
+      this (vdev_queue.c:vdev_queue_io holds vq->vq_lock) -- so a pure -smp race
+      here needs the lock to be the divergent object; see (c).
+  (b) The 128KiB linear `buf` from zio_buf_alloc is identity-heap (coherent) and
+      is allocated and consumed on the SAME AS0 thread -> buf itself is fine.
+  (c) THE SUSPECT SEAM: the gang chain (aio->io_abd -> abd_gang_chain list nodes)
+      and every child dio->io_abd + its abd_chunks[] were built at aggregation
+      time. If ANY of {the aggregate zio_t, the gang abd_t, the child abd_t
+      structs, the abd_gang_link list linkage} was allocated OUTSIDE
+      fork_kernel_heap_push/pop while a fork child was live, then AS0's
+      abd_iterate_func walks a chain whose abd_chunks[] pointers or abd_size /
+      abd_offset fields are a DIVERGENT COW copy -> maps the WRONG source page or
+      wrong length -> the 128KiB buf is assembled from stale/foreign pages, then
+      DMA'd verbatim to a VALID metadata offset. Result: a correctly-addressed
+      128KiB metadata run filled with wrong bytes. EXACTLY the corruptor.
+      NOTE: this is consistent with "scatter DATA ABD byte-clean" -- the DATA
+      chunk pages are clean; what diverges is the ABD METADATA (chunk[] ptr /
+      size / gang linkage) that decides WHICH pages get gathered.
+  (d) vq per-vdev queue state (vq_write_offset_tree, vq_active_list, vq_lock) is
+      SHARED per top-level vdev. If the mutex/AVL nodes live on a COW arena the
+      -smp race + fork divergence compound. Check where vdev_queue_t is allocated.
+
+WATCH TARGETS for Agent A (ranked within #1):
+  #1a  BREAKPOINT external/openzfs/module/os/osv/zfs/vdev_disk.c
+       vdev_disk_io_start, WRITE branch, right after
+         data = abd_borrow_buf_copy(zio->io_abd, size);
+       Inspect: size (expect up to 0x20000), abd_is_gang(zio->io_abd),
+       zio->io_offset (the DEST), and the child count of abd_gang_chain.
+       Then set a HW WATCHPOINT on the 128KiB range [data, data+size) and let it
+       run to strategy(bio): confirm the last writer of each byte is the copy_cb,
+       and dump the source paddr each child mapped (abd_iter_map paddr) -- verify
+       every paddr is a live in-flight metadata page for THIS txg, not a stale/
+       freed/foreign page. A foreign paddr here IS the bug.
+  #1b  WATCH the aggregate zio's io_abd base and each child dio->io_abd:
+       compare abd_chunks[0] / abd_size / abd_offset as read on the AS0 thread vs
+       the values set at aggregation time (vdev_queue.c:761-798). A mismatch = COW
+       divergence of the ABD struct across the fork boundary.
+  #1c  Confirm vdev_queue_t (per top-level vdev, vq_lock + vq_write_offset_tree)
+       is on the identity heap. If it is COW-arena, the -smp reliability + fork
+       dependence of the repro is explained directly.
+
+================================================================================
+#2  GANG BLOCKS -- zio_gbh_phys_t gang header write (128KiB-boundary mechanism)
+================================================================================
+FIT: STRONG on shape (gang header IS the classic 128KiB-boundary object) but
+WEAKER on trigger: PG recordsize=8k sustained writes to a non-full pool rarely
+GANG (ganging is the "metaslab nearly full / fragmented" fallback,
+zio.c:2746). If the repro pool is not near-full/fragmented this path may be cold.
+Keep as #2 because when it DOES fire it lands a header at a freshly-allocated DVA
+and a stale/wrong DVA fits the corruptor perfectly.
+
+THE HEADER ALLOC + WRITE DEST: external/openzfs/module/zfs/zio.c
+  :2913 zio_gang_node_alloc: gn->gn_gbh = zio_buf_alloc(gangblocksize)  (identity heap OK)
+  :3153 zio_write_gang_block:
+    :3195 gangblocksize = SPA_OLD_GANGBLOCKSIZE (also a 128KiB-family unit)
+    :3197 metaslab_alloc_range(... bp ...) -> fills bp->blk_dva[] = DEST DVA(s)
+    :3216 gn = zio_gang_node_alloc(...); gbh = gn->gn_gbh
+    :3217 memset(gbh, 0, gangblocksize)
+    :3219 gbh_abd = abd_get_from_buf(gbh, gangblocksize)
+    :3224 zio = zio_rewrite(pio, spa, txg, bp, gbh_abd, gangblocksize, ...)
+       -> the header write's DEST = bp->blk_dva (translated to io_offset in
+          zio_dva_translate/vdev). io_offset therefore derives from
+          metaslab_alloc_range output.
+  member DVA fixup: :3099 zio_write_gang_member_ready copies cdva into pdva[]:
+    :3102 dva_t *cdva = zio->io_bp->blk_dva; dva_t *pdva = pio->io_bp->blk_dva;
+    :3128 DVA_SET_ASIZE(&pdva[d], asize) etc.  <- if pio->io_bp (parent blkptr)
+    is a COW-divergent copy across the fork AS, the parent DVA array patched here
+    differs between AS0 and child -> gang member ends up pointing at a wrong DVA.
+
+WHY IT CAN TARGET WRONG DEST: bp / bp->blk_dva is the DEST. If the parent zio's
+io_bp lives where a fork child mutated a COW copy, or metaslab alloc state (ms
+alloc trees) is raced under -smp, the header/member DVA can be stale -> 128KiB
+header written to a wrong-but-valid location.
+
+WATCH TARGETS:
+  #2a  BREAKPOINT zio.c zio_write_gang_block after :3197 metaslab_alloc_range
+       (and after :3219). Dump bp->blk_dva[0..2] (the DEST) and gbh addr. Then
+       watch the translated io_offset before the vdev write. Confirm DVA is a
+       fresh alloc for this txg, not a location already holding live metadata.
+  #2b  BREAKPOINT zio_write_gang_member_ready :3099; compare pio->io_bp->blk_dva
+       as seen on AS0 vs child -- divergence = the fork-COW bug.
+
+================================================================================
+#3  INDIRECT-BLOCK / dbuf sync -- space_map_write -> dmu_write -> dbuf_dirty
+================================================================================
+FIT: MODERATE. Indirect blocks and space-map blocks ARE 128KiB-family metadata,
+and dbuf sync is the normal txg_sync path on AS0 -- the RIGHT thread. But a
+single dbuf write is per-block (8KiB here), and it becomes a 128KiB run only
+AFTER it is coalesced by candidate #1 (aggregation). So #3 is largely the
+UPSTREAM PRODUCER of the buffers that #1 then mis-gathers, rather than an
+independent 128KiB writer. The stale-pointer variant (dbuf->db_blkptr /
+db.db_data pointing at a divergent COW page) is the thing to check.
+
+THE CHAIN (dbuf.c + space_map.c + dbuf sync):
+  space_map_write -> dmu_write_impl -> dbuf_dirty -> dbuf marks dr_data
+  dbuf_sync_indirect / dbuf_write (dbuf.c): the indirect block's blkptr array
+  (db.db_data holding blkptr_t[]) is handed to zio_write with db_blkptr as bp.
+  If dbuf_t / dbuf->db.db_data / dbuf->db_blkptr for the space_map dnode is a
+  COW-divergent copy across fork, AS0's sync writes an indirect block built from
+  the child's stale blkptr array -> wrong on-disk indirect metadata.
+
+WATCH TARGETS:
+  #3a  WATCH dbuf->db_blkptr and dbuf->db.db_data for the SPACE_MAP object's
+       dnode during txg_sync. Confirm both are identity-heap and identical
+       AS0-vs-child. (dbuf/dnode alloc site: check it is inside
+       fork_kernel_heap_push/pop.)
+  #3b  If #1's abd_iter_map (watch #1a) shows the mis-gathered source page is a
+       dbuf db.db_data page, escalate #3 to co-primary with #1 -- that links the
+       producer (stale dbuf) to the corruptor (gather from stale page).
+
+================================================================================
+#4  OSv vdev_disk bio/abd handoff -- the fork<->AS0 seam itself
+================================================================================
+This is not a separate writer; it is the ENDPOINT where #1/#2/#3 become bytes on
+disk, and it is the concrete fork<->AS0 boundary. Recording it because the brief
+asks explicitly.
+
+vdev_disk.c three-thread lifecycle of a WRITE:
+  (issue thread, AS0 async-write taskq) vdev_disk_io_start:
+     data = abd_borrow_buf_copy(zio->io_abd, size)  // gather 128KiB into linear
+     zio->io_bio = data;  strategy(bio)
+  (device IRQ / completion) vdev_disk_bio_done: zio_interrupt(zio)
+     -- note: does NOT clear io_bio (holds borrowed buf ptr).
+  (done thread) vdev_disk_io_done:
+     abd_return_buf(zio->io_abd, data, size)   // WRITE: no copy-back, just free
+     (for READ it is abd_return_buf_copy -> abd_copy_from_buf -> scatters back)
+  SEAM RISK: `data` (the 128KiB linear buf) is threaded through zio->io_bio
+  across THREE threads. It is identity-heap (zio_buf_alloc) so its bytes are
+  coherent, and it is freed on the done thread -- fine. The RISK is upstream:
+  the GATHER at io_start already read from a possibly-divergent chain (#1c). By
+  io_done the damage is done. So watch at io_start (#1a), not here.
+  ALSO: READ path abd_return_buf_copy at io_done SCATTERS the linear buf back
+  into the child ABD chunks (abd.c:906 abd_copy_from_buf_off). For a READ that
+  was aggregated (gang) this writes 128KiB back into a gang chain -- if that
+  chain diverged, a read-repair / scrub could scatter into wrong pages. Lower
+  priority (corruptor is a WRITE-side on-disk corruption) but note for scrub.
+
+WATCH TARGET:
+  #4a  (coherence sanity, do first) On AS0, confirm zio_buf_cache[c] and
+       abd_chunk_cache slabs return identity-heap VAs (same phys in child).
+       If a slab magazine ever hands AS0 a page that is COW-private to a child,
+       every candidate above collapses to that root cause. Quick check: allocate
+       via zio_buf_alloc on AS0 and in child, compare VA->phys.
+
+================================================================================
+RANKED SUMMARY (fit to: 128KiB-aligned metadata run, wrong dest, SMP, fork<->AS0)
+================================================================================
+  1. AGGREGATION gang-ABD linearize copy in vdev_disk_io_start  [EXACT 128KiB,
+     right thread, gathers from a cross-AS abd_t* chain]  -> watch #1a/#1b/#1c
+  2. GANG HEADER write (zio_write_gang_block)  [perfect shape, cold unless pool
+     near-full/fragmented]                                 -> watch #2a/#2b
+  3. INDIRECT/dbuf sync (space_map_write path) [producer of #1's buffers; stale
+     db_blkptr/db.db_data variant]                         -> watch #3a/#3b
+  0/4. vdev_disk bio handoff = the seam/endpoint; do the identity-heap slab
+     sanity check (#4a) FIRST, then focus on #1a.
+
+PRIORITY FOR AGENT A: do #4a (5-min slab coherence sanity), then #1a
+(breakpoint vdev_disk_io_start WRITE, watch the 128KiB borrow buf + dump each
+gathered source paddr). #1 is where the byte-clean-data / dirty-metadata /
+128KiB / fork<->AS0 / SMP constraints all intersect.
+================================================================================

@@ -1,0 +1,9 @@
+=== RO -S sweep (-smp 16 guest, host driver over tap) ===
+c=1 tps=12815.670286
+c=4 tps=41898.742368
+c=8 tps=61639.602568
+c=16 tps=26952.572053
+c=24 tps=25620.523224
+c=32 tps=17104.126479
+c=48 tps=14568.823276
+c=64 tps=

@@ -1,0 +1,51 @@
+STEP-2 VERDICT: OSv+PG SERVES on real KVM (contradiction RESOLVED) -- with two named residual walls
+=====================================================================================================
+Box: c5n.metal i-04b20fa1e15eff33f (72 vCPU, /dev/kvm present, bare metal). us-east-2/2b.
+Image: CONFIRMED-GOOD, built from the EXACT HammerDB recipe (ee4e83e4), verified BEFORE boot:
+  manifest contains /b/.local/pg18/install/bin/postgres + /tools/cpiod.so + plpgsql.so + zpool/zfs/
+  libsolaris.so ; CONF_fork=y ; fs=zfs (rootfs=zfs) ; PG18.0 musl-PIE + check_root/checkDataDir neuters.
+Commit: 6dd041b7b (integ/pg-fork-zfs tip), OSv v0.57.0-440-g6dd041b7, boots under KVM in ~440ms.
+Net: SLIRP (-netdev user hostfwd 5432) -- the SAME net the working HammerDB run used.
+
+*** DOES OSv+PG SERVE ON KVM? YES. ***
+  With shared_memory_type=sysv:
+    LOG:  database system is ready to accept connections     <- REACHED
+    DEBUG: logical replication launcher started              <- the bgworker FORKED (the prior KVM
+                                                                agent's claimed "fork wall" -- CLEARED)
+    psql -h 127.0.0.1 -p 5432 -U postgres -c "select 1"  ->  1   <- a FORKED BACKEND served a real query
+  Port 5432 opens, postmaster stays up across individual backend faults.
+
+=====================================================================================================
+THE PRIOR KVM AGENT (8b6c2d4e) WAS RIGHT THAT ITS IMAGE DID NOT SERVE, BUT ITS DIAGNOSIS WAS WRONG TWICE:
+  (1) It was NOT the "bgworker fork wall". The hang is in IpcMemoryCreate (ipci.c:211) ->
+      PGSharedMemoryCreate -> CreateAnonymousSegment -> mmap(MAP_SHARED|MAP_ANONYMOUS) (sysv_shmem.c:622),
+      which is BEFORE any fork. The "registering background worker" log line it read as the fork wall is
+      merely the last debug1 line; debug5 shows the real last line is "invoking IpcMemoryCreate(size=...)".
+  (2) The fix is a ONE-LINE CONFIG: shared_memory_type=sysv. PG's default mmap-anonymous-shared path
+      hangs OSv (99.9% CPU spin, gdbstub can't even get a safe-point) -- the roadmap-documented
+      "endless 2MB-populate loop at slot 64" (sigusr-fault.txt). SysV shm uses a different OSv path that
+      does NOT loop, so the postmaster reaches ready. Reproduced the mmap-hang across smp {1,8},
+      shared_buffers {16MB,128MB,1GB}, huge_pages=off, dsm=posix -- ALL hang on mmap; sysv SERVES.
+
+TWO RESIDUAL WALLS remain (both roadmap-known, NEITHER is "can't serve"):
+  WALL 1 (worked around here): mmap(MAP_SHARED|MAP_ANON) startup hang -> shared_memory_type=sysv.
+  WALL 2 (still open): catalog-read-zero across forked backends. Any query needing a shared-buffers
+    catalog page fails in the FORKED backend:
+      "select current_database()" -> FATAL: role "postgres" does not exist   (pg_authid page read as 0)
+      "select count(*) from pg_class" -> FATAL: index "pg_authid_rolname_index"/"pg_class_oid_index"
+                                          contains unexpected zero page at block 0
+    "select 1" works (no catalog lookup). This is the roadmap "multi-backend catalog-read coherence wall"
+    (ROADMAP line 1466) -- the SysV shm segment is not coherently visible to OSv's fork-emulated backends.
+  ALSO: under memory pressure OSv's own page allocator faulted:
+    page_fault in memory::page_range_allocator::remove <- page_pool::l2::free_batch <- l2::unfill <-
+    l2::fill_thread  (an OSv kernel MM crash, "Aborted") -- a separate kernel fault surfaced by the load.
+
+=====================================================================================================
+RECONCILING WITH HammerDB NOPM=155516 (ee4e83e4): the verbatim PUBLIC recipe image serves simple queries
+but hits the catalog-read-zero wall on real workloads and can crash OSv's page allocator. The HammerDB
+"serving to NOPM" image therefore carried an un-captured local delta beyond the public recipe (a kernel
+shared-memory/populate + catalog-coherence fix, and/or shared_memory_type=sysv baked into its serving
+config) that this reconstruction does not reproduce. The honest state at the PUBLIC 6dd041b7b tip:
+OSv+PG serves + forks backends + answers non-catalog queries on KVM, but is NOT yet workload-ready
+(catalog coherence + a kernel MM fault). => No parity-valid OSv pgbench/NOPM number is obtainable at
+this tip with the public recipe.

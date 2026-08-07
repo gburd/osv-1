@@ -1,0 +1,55 @@
+F2b ROOT-CAUSE -- unbounded allocator recursion via fork heap wait_record
+================================================================================
+Author: Greg Burd   Base: corruptor-fix @ f2857073 (F1+F2a in)   Box: osv-cor-a /b
+Classification: [fork-stack]
+
+CONFIG: CONF_lazy_stack=0, CONF_lazy_stack_invariant=0, CONF_fork=1.
+
+CRASH: Assertion failed sched::preemptable() (arch/x64/mmu.cc:38) at -smp>1 heavy
+fork+ZFS+PG load, ~1-in-4..1-in-6. (The bstree "insert_before node unique" the
+task named is the same corruption in another interleaving.)
+
+DEFINITIVE gdb BACKTRACE (kernel spun at the fault; CPU#3 live frame; 1888 frames
+of a repeating cycle):
+  page_fault  (stack overflowed into an unmapped guard page; cr2 near-null,
+               thread::current()==garbage 0x40 -- a wild fault from a blown stack)
+  ... repeating unit ...
+  std_malloc(size=64)                         core/mempool.cc:2156
+   -> memory::pool::alloc / add_page / untracked_alloc_page
+   -> memory::page_pool::l1::alloc_page       core/mempool.cc:1407
+   -> memory::page_pool::l1::refill           core/mempool.cc:1622
+   -> memory::page_pool::l2::alloc_page_batch core/mempool.cc:1493
+   -> memory::page_pool::l2::refill           core/mempool.cc:1723
+   -> WITH_LOCK(free_page_ranges_lock)  ->  lockfree::mutex::lock  (CONTENDED)
+   -> coherent_wait_record::coherent_wait_record(t)  wait_record.hh:136  [CONF_fork]
+   -> aligned_new<wait_record>  ->  aligned_alloc  ->  posix_memalign
+   -> std_malloc(size=64)   <-- RE-ENTERS THE ALLOCATOR -> recurse -> stack overflow
+
+ROOT CAUSE:
+  The fork-stack made lockfree::mutex::lock() (core/lfmutex.cc:90) allocate its
+  wait_record on the KERNEL HEAP (coherent_wait_record -> aligned_new<wait_record>
+  -> std_malloc) whenever a fork child AS is live
+  (fork_child_needs_heap_wait_record() -> mmu::live_child_address_spaces > 0),
+  to keep the wait_record VA coherent cross-AS. Stock OSv puts wait_record on the
+  STACK precisely so the mutex path NEVER calls the allocator.
+
+  free_page_ranges_lock is taken INSIDE the memory allocator (page_pool::l2::
+  refill). Under heavy load that lock is contended, so the blocking path runs
+  coherent_wait_record -> std_malloc, which needs the page pool, which re-takes
+  free_page_ranges_lock, contends again, allocates again -> UNBOUNDED RECURSION
+  -> kernel-stack overflow -> wild page fault in a non-preemptable window ->
+  assert(preemptable()) abort. (Also explains the bstree double-insert: an
+  overflowing/half-switched thread state corrupts the runqueue in other races.)
+
+  The fork heap wait_record broke the allocator's fundamental
+  no-allocation-in-the-lock-path invariant.
+
+KEY INVARIANT for the fix: a thread is BLOCKED (its wait_record on a waitqueue)
+in at most ONE lockfree::mutex::lock() at any instant -- nested locking HOLDS
+outer locks but only WAITS on the innermost. So ONE preallocated heap
+wait_record per thread suffices for the coherent (fork) case; no per-lock malloc
+is needed, killing the allocator re-entrancy.
+
+FIX (next): give each thread a single preallocated coherent wait_record (heap,
+identity arena) and have coherent_wait_record reuse it in the fork-heap case
+instead of aligned_new in the lock path. conf_fork=0 unaffected (all #if CONF_fork).

@@ -1,0 +1,60 @@
+NOTIFY / SIGCHLD-lost-wakeup FIX -- ACCEPTANCE VALIDATION (pasted evidence)
+================================================================================
+Base 401852c67 (integ/pg-fork-zfs tip, has fix#1).  Fresh-8k-pool harness.
+Two fixes, both #if CONF_fork:
+  (A) libc/signal.cc kill(): signal-selective self-signal AS routing --
+      else if (pid == getpid() && (sig == SIGURG || sig == SIGUSR1))
+          target_as = osv::fork::as_for_pid(pid);
+      (SIGURG latch + SIGUSR1 ProcSignalBarrier route to the caller's own COW
+       AS; the child-exit SIGCHLD kill(getpid(),SIGCHLD) is NOT diverted -> its
+       reaper runs in AS0, so the postmaster reaps the startup process and boots.)
+  (B) libc/pipe.cc pipe2(): pipe_buffer + pipe_file on the identity kernel heap
+      (fork_arena::kernel_heap_scope) so the latch self-pipe is coherent across
+      every fork AS (cross-backend SetLatch->SIGURG->sendSelfPipeByte writes the
+      SAME pipe the waiting backend epoll-polls).
+
+ROOT CAUSE (proven by instrumentation, see notify-root.txt): the lost
+notification is the child-exit -> parent SIGCHLD.  PostgreSQL's startup process
+(a fork child) finishes recovery and exits; OSv fork emulation
+(fork.cc child_exited -> kill(getpid(), SIGCHLD)) synthesizes the parent
+notify.  The broad K1 (else if pid==getpid() -> current AS) diverted that
+SIGCHLD reaper into the child's DYING COW AS, where it faults at the mmap slot
+(0x2000..) and nests -> the postmaster never reaps -> never reaches "ready" ->
+forked backends wait forever in epoll on their latch pipes.  Restricting the
+routing to SIGURG/SIGUSR1 keeps the SIGCHLD reaper in AS0 (correct) while still
+enabling the DROP DATABASE self-signal.
+
+--------------------------------------------------------------------------------
+BOOT (single-file 8k, smp4; the self-signal routing RE-ADDED):
+==== RESULT: ready=10 hang=0 crash=0 other=0 of 10 (smp=4) ====
+(broad-K1 blanket routing was 0/5 HANG; earlier confirmed raidz1 5/5 READY.)
+
+DROP DATABASE (external psql 127.0.0.1:15432; CREATE DATABASE x TEMPLATE
+template0; DROP DATABASE x; x5), smp4:
+  iter 1: CREATE+DROP OK (ok=1)
+  iter 2: CREATE+DROP OK (ok=2)
+  iter 3: CREATE+DROP OK (ok=3)
+  iter 4: CREATE+DROP OK (ok=4)
+  iter 5: CREATE+DROP OK (ok=5)
+  healthy
+  ==== DROP DATABASE RESULT: 5/5 completed (smp=4) ====
+(also completed 5/5 at smp8 in prior runs; was a hang "still waiting for backend
+with PID N ... ProcSignalBarrier", N=self.)
+
+PGBENCH (concurrent -c8 -j4 -T30 after -i -s100), smp4:
+  pgbench -i -s100 done in 17.10 s
+  number of failed transactions: 0 (0.000%)
+  tps = 1211.358039
+(also 0-failed at smp8 -s20 / smp4 -s100 in prior runs.  Heavy -s100 -i at smp8
+sometimes hits the PRE-EXISTING ZFS read-path corruptor "invalid page in
+block", f2b-report sec 5 -- unrelated to this signal/pipe fix.)
+
+RESIDUAL (honest): ~1-in-3 DROP DATABASE 5x runs crashes with "exception nested
+too deeply" at an mmap-slot addr -- a COW fault in the SIGUSR1 handler thread
+executing PG barrier code in the backend COW AS.  This is the deeper
+"COW-fault-in-a-signal-handler-thread-started-in-a-child-AS" facet the
+dropdb-rework-report named as a separate target; DROP DATABASE DOES complete
+5/5 on the clean runs (not a re-hang).
+
+conf_fork=0: both diffs are entirely inside #if CONF_fork -> byte-identical.
+================================================================================

@@ -1,0 +1,243 @@
+================================================================================
+PG-ON-ZFS "LOST WAKEUP" WALL: root cause, fix, and the two further walls it
+uncovered.  OSv combined fork+OpenZFS image, stock PostgreSQL 18.4, /data on a
+real ZFS pool on local NVMe.
+================================================================================
+Date:    2026-07-25   Driver: floki (local) over ssh -> EC2 m5d.metal
+EC2:     ec2-user@3.145.108.149  (osv-build + osv-net containers, NOT terminated)
+Branch:  integ/pg-fork-zfs  base 18f59ac3  + 1 new commit d4c74c94 (this work)
+Author:  Greg Burd
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* ROOT-CAUSED the "NEXT WALL" from pg-zfs-validate.txt with gdb, and it is the
+  predicted class: a LOST WAKEUP in the ZFS synchronous-I/O completion path
+  across the fork copy-on-write (COW) address-space boundary -- but bigger than
+  a single condvar.  The whole of OpenZFS runs as libsolaris.so loaded into the
+  COW-cloned APPLICATION VA slot (slot 32), so EVERY piece of ZFS state a forked
+  PostgreSQL backend touches -- statics, heap objects, large hash arrays, and
+  the block-I/O bio -- gets a private per-child COW copy, while ZFS's own kernel
+  threads run in AS0 and see a DIFFERENT copy.
+* FIXED five concrete instances of that class (commit d4c74c94, bundled).  The
+  effect is dramatic and monotonic: stock PostgreSQL went from "hangs the instant
+  it logs 'database system was shut down'" to COMPLETING FULL CRASH RECOVERY and
+  reaching:
+      LOG:  database system is ready to accept connections
+  on ZFS-on-NVMe (proven with sync=disabled; see below).  psql connects and
+  serves `select 1`, `select version()`, `create table`, etc.
+* TWO FURTHER WALLS of the same/adjacent class remain (the report predicted
+  "1-2 more sites") and BLOCK the acceptance gate (sustained correct queries):
+   (A) ZIL lwb synchronous-write completion: with the default sync=standard,
+       PG's end-of-recovery fsync -> zil_commit -> zil_commit_waiter blocks in
+       cv_wait(&zcw->zcw_cv); the log-write-block (lwb) is stuck in state ISSUED
+       and its write ZIO never drives the completion, though the virtio-blk
+       completion threads are idle (I/O drained).  Setting the pool
+       sync=disabled bypasses the ZIL lwb path and PG reaches "ready" in ~2s.
+   (B) forked-backend ZFS WRITES produce NO block I/O: even with sync=disabled
+       and PG "ready", a committed heap INSERT is not seen by a subsequent
+       SELECT (even in the same backend/session): `INSERT 0 5` then
+       `select count(*)` returns 0, with NO server error.  DECISIVE evidence:
+       kernel counters in virtio-blk make_request/drain_queue show block
+       submitted==completed at ALL times (so I/O COMPLETION is NOT lost -- the
+       wakeup fix works), but across `insert; checkpoint` the WRITE counter
+       (VIRTIO_BLK_T_OUT) does not move at all (245 -> 245) while reads climb.
+       So a forked backend's writes never reach the block device: the dirty
+       data goes into ZFS's dbuf/ARC in the backend's address-space view but the
+       AS0 txg_sync_thread issues zero write ZIOs for it -- most likely a
+       dirty-list linkage the forked backend appends to that AS0 does not
+       traverse (dnode/objset/dataset/pool dirty lists).  This is the true
+       blocker to "serves concurrent queries with 0 failed" and is a ZFS
+       write-path/fork issue distinct from the wakeup class.
+* Because of (A)+(B) I have NO honest "PG serves sustained/concurrent queries
+  with 0 failed" result to paste.  I will NOT fabricate one.  What IS proven and
+  pasted below: PG reaches "ready to accept connections" on ZFS-on-NVMe, accepts
+  connections, and answers non-storage queries; and the exact gdb evidence for
+  every wall.
+
+================================================================================
+THE FIX (commit d4c74c94) -- gdb-proven, #if CONF_fork, non-fork byte-identical
+================================================================================
+gdb walk of the hang (all vCPUs idle => lost wakeup) resolved the forked startup
+process, via a corrected per-child page-table stack unwind, to:
+    #3 condvar::wait
+    #4 condvar_wait
+    #5 zil_commit_impl (== inlined zil_commit_waiter -> cv_wait(&zcw->zcw_cv))
+    #6 zil_commit_flags
+    #7 zfs_fsync
+    #8 sys_fsync / fsync
+En route to reaching that point, gdb found (and each fix cleared) these
+cross-AS-COW walls, in order:
+
+1. block-I/O bio (fs/vfs/kern_physio.cc, alloc_bio):
+   A forked backend submits a synchronous ZFS read/write; the SINGLE virtio-blk
+   completion thread (req_done/drain_queue, AS0) reads the bio back
+   (bio->bio_caller1 = the zio, bio_done, bio_flags) to complete it.  In the COW
+   arena the AS0 thread read a divergent copy -> drove completion against a stale
+   zio.  FIX: alloc_bio() allocates on the identity kernel heap.  (Symptom before
+   the fix: SIGSEGV in virtio::blk::drain_queue.)
+
+2. zio_t and the entire SPL/ZFS heap (opensolaris_kmem.c):
+   zio_t.io_cv (zio_wait vs the AS0 block-completion cv_broadcast in zio_done),
+   zil_commit_waiter_t.zcw_cv, dmu_tx/dbuf/dnode/arc_buf_hdr and their embedded
+   locks/condvars all come from SPL kmem.  FIX: route zfs_kmem_alloc +
+   kmem_cache_alloc onto the identity kernel heap (ZFS objects are shared kernel
+   state, not per-process app state; free() dispatches by address so it is
+   free-safe).  Requires a C-linkage accessor into the kernel arena:
+   core/fork_arena.cc exports fork_kernel_heap_push/pop, whitelisted in
+   exported_symbols/osv_libsolaris.so.symbols so libsolaris.so can call them.
+
+3. libsolaris.so writable statics (core/elf.cc + core/mmu.cc + include/osv/mmu.hh):
+   ZFS globals live in libsolaris.so .data/.bss in the COW app slot:
+   buf_hash_table (ARC hash), arc_anon/mru/mfu, the dbuf hash, arc_stats, ....
+   A forked backend inserting an arc_buf_hdr into buf_hash_table.ht_table[]
+   wrote its private COW copy; the AS0 txg-sync / dp_sync_taskq thread then read
+   an empty table and NULL-dereferenced in buf_hash_remove (gdb: fault addr 0,
+   arc.c:1137, dp_sync_taskq).  FIX: the ELF loader registers libsolaris.so's
+   writable PT_LOAD segments; clone_address_space shares them verbatim (never
+   COW) across every fork child.
+
+4. large ZFS hash arrays (core/mempool.cc, mapped_malloc_large):
+   buf_hash_table.ht_table and the dbuf hash are 8 MB vmem_zalloc arrays; >2 MB
+   non-contiguous allocations bypass the arena AND the identity pool and land in
+   the COW app mmap slot (verified: ht_table at 0x200000200040).  FIX: large
+   allocations made under force_kernel_heap are registered fork-shared too.
+
+Files (all gated #if CONF_fork):
+  fs/vfs/kern_physio.cc                     +22   bio -> identity heap
+  bsd/.../opensolaris_kmem.c                +52   SPL/ZFS heap -> identity heap
+  core/fork_arena.cc                        +13   fork_kernel_heap_push/pop (C API)
+  exported_symbols/osv_libsolaris.so.symbols +2   export those two symbols
+  core/mmu.cc                               +40   fork_shared_module_ranges + share
+  include/osv/mmu.hh                         +7   add_fork_shared_module_range decl
+  core/elf.cc                               +18   register libsolaris.so wr segments
+  core/mempool.cc                           +17   share large force-kernel-heap allocs
+
+================================================================================
+EXACT gdb EVIDENCE (all captured on EC2 at the hang / crash)
+================================================================================
+* Hang, all vCPUs idle; forked startup process (corrected page-table unwind):
+    tid=471  condvar::wait <- condvar_wait <- zil_commit_impl+589 <- zfs_fsync
+             <- sys_fsync <- fsync
+    zcw (identity 0x600...) done=0, its lwb (identity 0x600...) state=ISSUED,
+    lwb_write_zio non-NULL -> the lwb write never completed.
+    virtio-blk completion threads tid=26/27: idle in req_done -> wait() (no
+    pending I/O) -> the write ZIO completed at the block layer but did not drive
+    the lwb/zcw wakeup, OR was never issued to the device.
+* buf_hash_remove crash (before fix #3/#4), fully symbolized:
+    buf_hash_remove (arc.c:1137, fault addr 0) <- arc_change_state <- arc_release
+    <- dbuf_release_bp <- dbuf_write <- dbuf_sync_indirect <- dbuf_sync_list
+    <- dnode_sync <- dmu_objset_sync_dnodes <- sync_dnodes_task <- taskq_run
+    (thread: dp_sync_taskq, AS0).  hdr identity; buf_hash_table.ht_table pointer
+    then found at 0x200000200040 (COW app-mmap) -> the array itself was COW.
+* Coherence census at the hang (all correctly IDENTITY after the fix):
+    spa 'pgdata' dsl_pool @ 0x500104961000 (IDENTITY); tx_sync_done_cv,
+    tx_sync_more_cv, tx_quiesce_* all IDENTITY; synced_txg(36) >= waiting(33)
+    so txg sync COMPLETED and NObody waits on tx_sync_done_cv -> the remaining
+    block is the ZIL lwb path, not txg_wait_synced.
+
+================================================================================
+REPRODUCE (on EC2, in the osv-build container)
+================================================================================
+Build (rebuilt with the fix; -j48 NOT -j96):
+  docker exec osv-build bash -c 'cd /b && export OSV_NO_JAVA_TESTS=1 && \
+    ./scripts/build -j48 image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 fs_size_mb=1024'
+Seed a clean pool + boot (default sync -> reaches recovery-complete then hangs
+in ZIL fsync):        docker exec osv-build bash /tmp/dbg-boot.sh
+Boot with sync=disabled (reaches "ready to accept connections" in ~2s):
+                      docker exec osv-build bash /tmp/syncoff-boot.sh
+Serve + query (host psql via qemu hostfwd 127.0.0.1:5432):
+                      docker exec -d osv-build bash /tmp/serve.sh   # leaves PG up
+  LD_LIBRARY_PATH=/b/.local/pg18/install/lib PGHOST=127.0.0.1 PGUSER=postgres \
+    /b/.local/pg18/install/bin/psql -c 'select 1'
+
+Diagnostic gdb scripts left in /tmp (and in the container): g-ptwalk3.py
+(corrected per-child page-table stack unwind -- the key that finally read the
+forked child's real stack), g-zcw.py, g-txwait.py, g-vnodes.py, loader_patched.py
+(hardcoded build_dir so scripts/loader.py sources cleanly under batch gdb).
+
+================================================================================
+PASTED EVIDENCE
+================================================================================
+--- boot with sync=disabled: PG reaches ready on ZFS-on-NVMe ---
+[ZFS] Pool 'pgdata' is up-to-date at version 5000
+LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+LOG:  listening on IPv4 address "0.0.0.0", port 5432
+LOG:  database system was shut down at 2026-07-25 14:21:18 UTC
+LOG:  database system is ready to accept connections        <=== THE MILESTONE
+
+--- host psql over the hostfwd, /data on ZFS-on-NVMe ---
+$ psql -c 'select 1 as one;'
+ one
+-----
+   1
+$ psql -c 'select version();'
+ PostgreSQL 18.4 on x86_64-pc-linux-musl, compiled by gcc (GCC) 13.3.1 ...
+$ psql -c 'show data_directory;'
+ /data
+$ psql -c 'create table t(x int);'
+CREATE TABLE
+$ psql -c 'insert into t select generate_series(1,5);'
+INSERT 0 5
+$ psql -c 'select count(*) from t;'
+ count
+-------
+     0        <=== WALL (B): committed heap rows not visible; no server error
+
+(DDL persists + is visible; heap INSERTs report success but are invisible on
+re-read -- a ZFS read/write data-coherence bug in the fork context, NOT the
+wakeup class.  This is why there is no pgbench run: writes do not round-trip.)
+
+================================================================================
+NEXT STEPS (the two remaining walls, precisely characterized)
+================================================================================
+(A) ZIL lwb sync-write completion.  The lwb write ZIO is issued
+    (zil_lwb_write_issue -> zio_nowait) but never advances to WRITE_DONE while
+    the block completion threads are idle.  Candidates: the lwb's root/write ZIO
+    live in the page area (0x500..., identity/shared) yet the completion
+    callback chain (zil_lwb_write_done -> zil_lwb_flush_vdevs_done ->
+    zil_commit_waiter_done -> cv_broadcast(zcw_cv)) does not run -- suspect a
+    lost taskq wakeup on the z_wr_int/z_wr_iss ZIO taskqs, or a bio completion
+    whose zio_interrupt re-dispatch is dropped.  Next: instrument at the KERNEL
+    biodone/req_done boundary (note: kprintf from a forked-child context does
+    NOT reach the serial console once PG owns it -- verified; kernel-thread
+    kprintf or a gdb-read counter is required), and inspect the z_wr_int
+    taskqueue tq_queue depth vs the thread's sleep state to confirm/deny a lost
+    taskqueue_enqueue wakeup.
+(B) forked-backend writes generate no block I/O (DECISIVE new finding).  The
+    virtio-blk write counter does not advance across `insert; checkpoint`, so
+    the AS0 txg_sync_thread finds nothing to write for a forked backend's dirty
+    data.  Next: trace the dirty-list linkage a forked backend appends to on
+    dmu_write -- dnode_t.dn_dirty_link into objset os_dirty_dnodes (a multilist),
+    objset into dsl_dataset ds_dirty_txg / dp_dirty_datasets (txg_list_t in
+    dsl_pool) -- and confirm whether the LIST-HEAD writes are landing where the
+    AS0 txg_sync walk reads.  All these container structs are now on the
+    identity heap (fix #2), so the suspect is a multilist sublist head, a
+    per-CPU/per-allocator index the child computes differently, or the txg the
+    child's dmu_tx_assign lands in vs the txg AS0 syncs.  First isolate against
+    RAMFS with THIS kernel to rule my changes in/out.
+
+================================================================================
+NO-REGRESSION / SCOPE
+================================================================================
+* All eight changed files are gated #if CONF_fork; a conf_fork=0 build is
+  byte-identical (the exported_symbols additions name symbols a conf_fork=0
+  kernel does not define, which the version script simply omits -- harmless).
+* free()/realloc() decide purely by address, so routing ZFS allocations to the
+  identity heap is safe to free from any address space (the same rule the prior
+  shipped fixes rely on).
+* The RAMFS PostgreSQL path is unaffected by construction: the bio fix touches
+  only block I/O (RAMFS uses none); the ZFS-heap / libsolaris-static / large-
+  alloc-share fixes only trigger for ZFS allocations / the libsolaris.so module.
+  (Wall (B) should be checked against RAMFS as the first next step.)
+
+================================================================================
+ARTIFACTS LEFT ON EC2 (instance NOT terminated)
+================================================================================
+  $HOME/osv                              branch @ d4c74c94 (fix committed)
+  $HOME/osv/build/last/{loader.elf,usr.img}   rebuilt combined image (has the fix)
+  /mnt/nvme/pgdata.raw                    100G NVMe ZFS 'pgdata' pool (re-seedable)
+  docker: osv-build (build+KVM+gdb), osv-net (tap/qemu)
+  /tmp/{phase-a-seed,dbg-boot,syncoff-boot,serve,ptwalk*-boot,...}.sh + g-*.py
+  bundle: git bundle 18f59ac3..d4c74c94  (this commit) -> for floki re-sign+push
+================================================================================

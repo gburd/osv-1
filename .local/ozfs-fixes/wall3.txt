@@ -1,0 +1,300 @@
+================================================================================
+OSv + PostgreSQL 18 -- ZFS-on-OSv WALL 3 (sustained-write corruption)
+Root-cause investigation + fixes + honest qualification status
+================================================================================
+Date:   2026-07-27   Box: osv-qual (ec2-user@3.142.230.27, m5d.metal 96c/377GB,
+        4x local NVMe, KVM).  Build tree: /build/osv @ integ/pg-fork-zfs.
+        conf_fork=1 conf_zfs=openzfs fs=zfs image=pg18-fork.  Author: Greg Burd.
+Base:   7f37e0c6 (the taskq_wait fix; == floki 51c147066) + 53579137 (W-read).
+Tip:    dfed474b (this work).  Bundle: /tmp/wall3.bundle (2 commits) -> floki.
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* ROOT-CAUSED and FIXED a real, verified cross-address-space coherence bug that
+  caused a whole class of the WALL-3 sustained-write crashes: ZFS LARGE kmem
+  allocations made by a forked PostgreSQL backend landed in that child's private
+  (COW) app mmap slot (VA 0x2000..) instead of the shared identity heap, so the
+  AS0 txg_sync / zio-completion threads (and sibling backends) faulted "outside
+  application" when they touched the buffer.  Fixed by routing force_kernel_heap
+  large allocations onto the linear map (a shared kernel PML4 slot coherent in
+  every address space).  VERIFIED engaged: ZFS large buffers now allocate at
+  0x4000.. (coherent) instead of 0x2000...  This eliminated the deterministic
+  "memcpy into db_data at 0x2000" fault in dmu_write_uio_dnode.
+
+* Fixed two companion fork/taskq hazards uncovered along the way (reclaimer
+  waiter node cross-AS GPF; parallel ARC-eviction taskq cross-AS fault).
+
+* HONEST VERDICT: NOT YET FULLY QUALIFIED.  A SECOND, DEEPER corruptor remains.
+  After the coherence fix, OSv+PG no longer crashes on the 0x2000 fault, but
+  under SUSTAINED / CONCURRENT write with the DEFAULT recordsize=8k it still
+  intermittently corrupts on-disk ZFS state (torn data blocks -> checksum EIO /
+  "invalid page"; metaslab range-tree corruption -> SPL PANIC on a later txg or
+  on re-import).  The residual bug behaves like an ~8-byte heap overflow / UAF
+  in the identity heap: it clobbers whichever neighbour happens to be adjacent
+  (a space_map dbuf -> db_buf==NULL; a data block -> torn write; the per-CPU
+  page-pool -> a mis-aligned page pointer 0x...fffffff8; a sched::thread runqueue
+  node -> NULL deref in lockless_queue::pop_front; even the per-thread
+  force_kernel_heap TLS -> a nonsense value 0x460).  It is RACY (some -i -s 1000
+  runs complete clean and full-scan clean; others corrupt) and scales with the
+  number of small (8k) ZFS buffers + write concurrency, exactly matching the
+  prior "recordsize=32k or >=96G RAM survives" data points.  DO NOT relaunch the
+  heavy-write benchmark fleet on default recordsize yet.
+
+================================================================================
+METHOD
+================================================================================
+Reproduce at FULL SPEED (gdb hides the race) by re-seeding a clean single-file
+ZFS pool on local NVMe and driving pgbench in-container over hostfwd:5432:
+  seed:  /zpool.so create -f -o ashift=12 -O compression=lz4 -O atime=off \
+         -O recordsize=8k -m /data pgdata /dev/vblk1   (DEFAULT sync=standard)
+  serve: import + mount + postgres -D /data   (qemu -enable-kvm -cpu host)
+  load:  pgbench -i -s 1000 (15GB) ; pgbench -c 16 -j 4 -T 120 (sustained RW)
+Instrumentation added at full speed (all reverted from the shipped tree):
+  (1) arch/x64/mmu.cc page_fault(): on a NON-preemptable fault, dump CR2, RIP,
+      err, the current vs kernel address_space, tid, force_kernel_heap, and a
+      raw CR3 page-table decode (present / COW / linear / arena) for CR2.
+  (2) core/mempool.cc malloc_large(): log the returned address of every
+      force_kernel_heap large allocation (confirm identity-heap routing).
+  (3) module/zfs/dbuf.c dbuf_dirty(): dump the dbuf state when db_buf==NULL.
+  (4) module/os/osv/zfs/abd_os.c abd_return_buf(): unconditionally compare the
+      write bounce buffer to the ABD at WRITE completion (torn-in-flight check).
+
+================================================================================
+SIGNATURE (e) ROOT CAUSE -- the cross-AS coherence bug (FIXED)
+================================================================================
+Full-speed reproduction (compression=off surfaced it first) caught, at full
+speed, the ORIGINAL "memcpy into a ZFS buffer" fault:
+
+  page fault outside application, addr: 0x0000200000bcc000
+  RIP: memcpy_repmov_ssse3+74     RDI(dest)=0x200000bcc000  RSI(src)=0x30000884f000
+  [backtrace]  page_fault -> handle_mmap_fault
+    -> dmu_write_uio_dnode  (module/zfs/dmu.c:1600: zfs_uio_fault_move(
+                              (char*)db->db_data + bufoff, tocpy, UIO_WRITE, uio))
+    -> dmu_write_uio_dbuf (dmu.c:1649)
+    -> zfs_write (zfs_vnops.c:906)
+    -> zfs_vop_write (module/os/osv/zfs/zfs_vnops_os.c:844)
+    -> vfs_file::write -> sys_write -> pwrite64
+
+  Decode:
+    * DEST = db->db_data + bufoff = 0x200000bcc000  -> an APP mmap slot VA
+      (0x2000..), NOT the identity heap.  It is the dbuf's data buffer.
+    * SRC  = 0x30000884f000       -> the FORK ARENA (the forked backend's uio
+      write buffer, COW-private to the child).
+    * "outside application" on the DEST = that VA is not mapped in the executing
+      thread's address space.
+
+Why db_data lived at 0x2000 (the bug):
+    * ZFS zio_buf / dbuf data buffers of size >= page_size (e.g. an 8k record
+      buffer, align=4096) route through std_malloc -> memory::malloc_large(size,
+      align, block=true, contiguous=false).
+    * malloc_large's map_anon() paths (the huge-and-non-contiguous shortcut, and
+      the non-contiguous fallback) allocate with mmu::map_anon(nullptr, ...),
+      which resolves against mmu::current_address_space() -- i.e. it carves a VA
+      out of the CURRENT thread's app mmap slot.
+    * When the current thread is a FORKED PostgreSQL backend, that VA exists only
+      in the child's private (COW) page tables.  The buffer is then handed to a
+      dbuf / zio whose data is read+written by the AS0 txg_sync / zio-completion
+      threads (and by sibling backends) -- none of which have that child VA
+      mapped -> "outside application" fault, NULL/garbage read, torn write.
+    * The existing add_fork_shared_module_range() registration in
+      mapped_malloc_large() only helps AS0-at-init allocations (it is consulted
+      by clone_address_space at fork time); it CANNOT retroactively map a
+      child-private runtime allocation into AS0 or sibling children.
+
+Every other ZFS allocation route (zfs_kmem_alloc, kmem_cache_alloc for
+zio/zio_link/zio_buf/dbuf/btree-leaf/abd_chunk/metaslab-trace, vmem_alloc) IS
+bracketed with fork_kernel_heap_push/pop and correctly lands on the identity
+heap -- but force_kernel_heap only diverts the SMALL-object fork_arena path in
+std_malloc; it did NOT affect the LARGE (map_anon) path.  That was the gap.
+
+THE FIX  [fork-stack / CONF_fork]  (commit c6c89c59, core/mempool.cc):
+  In malloc_large(), when force_kernel_heap is set (a ZFS/kernel allocation that
+  must be AS-coherent), force the allocation onto the free_page_ranges (linear
+  map, phys_mem 0x4000.., a shared kernel PML4 slot mapped verbatim in every
+  address space) and NEVER fall back to map_anon: skip the
+  size>=huge_page-&&-!contiguous mmap shortcut, and suppress the non-contiguous
+  map_anon fallback (block on the linear map instead; the returned VA is coherent
+  regardless of physical contiguity).  Non-fork behaviour byte-identical.
+  VERIFIED: with the fix, every force_kernel_heap large ZFS buffer now logs at
+  0x00004000.. / 0x00004001.. (linear map), and the 0x2000 memcpy fault no
+  longer reproduces.
+
+COMPANION FIX 1  [fork-stack / CONF_fork]  (same commit, core/mempool.cc):
+  Once large ZFS allocations route through free_page_ranges they can block in
+  reclaimer_waiters::wait().  That function put its wait_node (an intrusive list
+  node) on the CALLER'S STACK, pushed it into _waiters, and let the AS0 reclaimer
+  thread walk _waiters and clear wr.owner.  For a forked-backend caller the stack
+  VA is COW-private, so the AS0 reclaimer GPF'd in wake_waiters()
+  (reschedule_from_interrupt path).  Fix: for a fork-child waiter
+  (fork_child_needs_heap_wait_record()) allocate the wait_node on the identity
+  kernel heap (AS-coherent), free it after the wait; same pattern as
+  coherent_wait_record.  AS0 / non-fork keep the zero-overhead stack fast path.
+
+COMPANION FIX 2  [#1423 / OpenZFS]  (commit dfed474b, patch 0030):
+  Parallel ARC eviction (zfs_arc_evict_threads > 1; = 9 on a 96-core box)
+  dispatches arc_evict_task() to an AS0 taskq.  A forked backend triggering
+  eviction under memory pressure kmem_allocs the evict_arg_t array and dispatches
+  &eva[i] to those AS0 workers, then taskq_waits; the worker faulted on
+  eva->eva_ml (arc.c:4088, via handle_mmap_fault in taskqueue_thread_loop).
+  Fix: force zfs_arc_evict_threads = 1 on OSv so eviction runs inline in the
+  caller's context (arc_evict_state_impl), removing the taskq hand-off and the
+  race -- the same OSv serialization already applied to libtpool dispatch
+  (patch 0021) and dataset mounting (patch 0022).  Parallel eviction is a
+  throughput optimization OSv does not need.
+
+================================================================================
+RESIDUAL WALL -- the SECOND corruptor (OPEN, NOT fixed)
+================================================================================
+After the three fixes above, the deterministic 0x2000 fault and the arc_evict
+fault are gone, but a distinct corruptor remains and is the current blocker.
+
+Behaviour (all with the fixes in the image, DEFAULT recordsize=8k):
+  * pgbench -i -s 1000, 32G RAM: SOMETIMES completes clean AND full-table-scans
+    clean (100,000,000 rows, sum(abalance)=0, no EIO) -- e.g. one run at 18:07.
+    OTHER runs corrupt during COPY or PK-build: "7 invalid pages among blocks
+    666272..666287 of base/5/16399" / "could not read blocks .. EIO".  RACY.
+  * pgbench -c 16 -j 4 -T 120 sustained RW, 32G RAM: does real work (333033 tx,
+    0 FAILED on a clean-loaded pool) but then reads come back EIO ("could not
+    read blocks 41136.. EIO") and a later txg SPL-PANICs:
+      range_tree.c:873 VERIFY3U(start,<,end) failed (5890602336256 < 5989470208)
+        <- zfs_range_tree_remove_xor_add_segment <- zfs_range_tree_remove_xor_add
+        <- metaslab_sync (metaslab.c:4393, the log-spacemap unflushed-changes
+           reconcile) <- vdev_sync <- spa_sync_iterate_to_convergence
+        <- txg_sync_thread                                (AS0)
+  * The corruption PERSISTS to disk: a poisoned pool re-crashes on import via
+    ZIL/space-map replay with the same range_tree VERIFY.
+  * The block layer is healthy (no BLKERR; virtio-blk fine) and the write bounce
+    buffer is stable in-flight (the abd_return_buf torn-in-flight check NEVER
+    fired) -- so the wrong data is present BEFORE the write is checksummed, i.e.
+    the data / metadata buffer content is corrupted in memory, not in transit.
+
+Distinct in-memory manifestations captured at full speed (all "downstream" of
+one corruptor -- different victims, same cause):
+  (a) txg_sync, metaslab space_map flush: dbuf_dirty (dbuf.c:2437
+      arc_release(db->db_buf,db)) with db->db_buf==NULL -- a DB_CACHED space_map
+      dbuf whose data buffer was cleared.  <- dmu_write <- space_map_write
+      <- metaslab_flush <- spa_flush_metaslabs <- txg_sync_thread (AS0).
+  (b) txg_sync, metaslab_sync: range_tree.c:873 corrupt segment bounds (above).
+  (c) arc_evict path (before fix 0030): eva->eva_ml deref fault.
+  (d) memory::pool::add_page (mempool.cc): "new (page) page_header" WROTE to a
+      corrupt page pointer cr2=0x00004000fffffff8 (a valid linear page mis-set
+      by -8) -- the per-CPU page pool _pages[] / l1 struct was clobbered by a
+      neighbour.  err=2 (write, not-present).  Also a second fault at
+      cr2=0xfffffffffffff71c (a small negative pointer).
+  (e) sched::cpu::schedule -> reschedule_from_interrupt -> enqueue_first_equal
+      -> lockless_queue<sched::thread>::pop_front (lockless-queue.hh:104) NULL
+      deref cr2=0x4898 (elem==NULL on the per-CPU incoming-wakeups runqueue) --
+      a corrupted/freed sched::thread on the wakeup queue.
+  (f) a WALL3 fault showed force_kernel_heap==0x460 (1120) -- a corrupted TLS
+      value, not a real push/pop depth (push/pop are balanced in kmem.c,
+      uma_stub.cc, subr_taskqueue.c -- audited).
+
+Interpretation: a single corruptor (overflow or, more likely, a use-after-free
+/ dbuf-ARC lifetime bug) in the identity kernel heap, exercised by ZFS write
+with many small (8k) buffers, silently clobbers whatever object is adjacent /
+reused.  Which victim is hit is luck of the allocator, hence the many faces
+(a)-(f) and the raciness.  It scales with the count of 8k ZFS buffers
+(recordsize=32k gives 4x fewer -> survives) and with write concurrency
+(single-writer -i sometimes clean; -c16 RW reliably corrupts), and is masked by
+large RAM (>=96G -> little eviction/allocation churn -> the window rarely hits).
+
+NARROWED THIS SESSION:
+  * NOT a zio_buf tail overflow -- ZFS_ZIO_BUF_CANARY (guard pattern in the
+    unused tail of every zio_buf/zio_data_buf slot, checked on free; force-
+    enabled via -DZFS_ZIO_BUF_CANARY) did NOT trip before the db_buf==NULL fault
+    reproduced.
+  * NOT a dbuf state-machine logic bug -- audited every site that clears
+    db->db_buf in dbuf.c (dbuf_read_impl:1747, direct-IO clear:2957,
+    fill-failed:3117, dbuf_destroy:3263/3295, ...): each is immediately followed
+    by dbuf_clear_data(), which sets db_state=DB_UNCACHED, preserving the
+    invariant DB_CACHED => db_buf!=NULL.  So a DB_CACHED dbuf with db_buf==NULL
+    is NOT produced by ZFS's own code -- it is an EXTERNAL write clobbering the
+    dbuf's db_buf field.
+  * Therefore the corruptor is an identity-heap OVERFLOW or USE-AFTER-FREE that
+    writes into a neighbouring live object.  Which victim it hits (a space_map
+    dbuf's db_buf, a data block, the per-CPU page pool, a sched::thread, the
+    force_kernel_heap TLS) is luck of the allocator -- explaining the many faces
+    (a)-(f) and the raciness.  It is NOT a zio_buf, so the overflow source is
+    some OTHER identity-heap allocation on the 8k-record ZFS write path
+    (a dbuf, arc_buf_hdr, dirty record, abd, or a kmem_alloc buffer).
+
+Scales with the count of 8k ZFS buffers (recordsize=32k gives 4x fewer ->
+survives) and with write concurrency (single-writer -i sometimes clean; -c16 RW
+reliably corrupts), and is masked by large RAM (>=96G -> little churn -> the
+window rarely hits) -- exactly the prior report's envelope.
+
+NOT the cause (ruled out this session):
+  * cross-AS coherence of ZFS buffers -- FIXED and VERIFIED (buffers now 0x4000,
+    coherent; every ZFS alloc route audited to the identity heap).
+  * the write DMA path -- vdev_disk_io_start/done + abd_borrow_buf_copy/
+    abd_return_buf are correct; the bounce buffer is stable in-flight (checked).
+  * taskq_wait -- the openzfs build uses lib/libzpool/taskq.c whose taskq_wait
+    already waits for tq_active==0 (correct illumos semantics); the WALL-2
+    opensolaris_taskq.c fix is orthogonal here.
+  * compression -- corruption reproduces with compression=off.
+  * arc_memory_throttle stub -- matches FreeBSD (which is fine); the dirty-data
+    throttle is platform-independent and present.
+  * push/pop imbalance of force_kernel_heap -- audited balanced; the 0x460 value
+    is a corruption symptom, not a leak.
+
+================================================================================
+NEXT STEP to close the residual wall (recommended)
+================================================================================
+The zio_buf canary and the dbuf-invariant audit (both done this session) ruled
+out a zio_buf overflow and a dbuf state-machine bug, leaving an identity-heap
+overflow/UAF of some OTHER allocation.  Remaining tractable approaches, in
+priority order:
+  1. TARGETED redzones on the remaining hot ZFS write-path kmem caches -- the
+     dbuf kmem cache, arc_buf_hdr caches, dbuf_dirty_record cache, and the
+     abd_chunk cache -- a guard word appended to each object and checked on
+     free, so an ~8-byte overflow is caught at the moment of free with the
+     freeing backtrace.  Do them one cache at a time (start with abd_chunk and
+     the dbuf cache, the highest-churn on 8k records).  This is the direct way
+     to name the overflowing allocation.
+  2. If it is a UAF rather than an overflow: poison freed objects of those
+     caches (fill with 0xdead on free, check-on-alloc) to catch a write to a
+     freed-but-still-referenced buffer.
+  3. Reproduce at -smp 1 under gdb with a watchpoint on a victim dbuf's db_buf
+     field once a repeating victim address is known, to catch the offending
+     write red-handed.
+Classification of the residual fix will depend on where the overflow/UAF lives:
+if in the OSv platform layer (arc_os/abd_os/dbuf handling) -> [#1423/OpenZFS];
+if in an OSv-fork interaction -> [fork-stack/CONF_fork].  The report saw
+signature (a) even at -smp 1, which argues against a pure SMP race.
+
+================================================================================
+QUALIFICATION STATUS
+================================================================================
+PASS  : cross-AS coherence of ZFS large buffers -- ROOT-CAUSED + FIXED + VERIFIED
+        (buffers moved 0x2000 -> 0x4000; the 0x2000 memcpy fault is gone).
+PASS  : reclaimer waiter cross-AS GPF -- fixed (companion).
+PASS  : parallel ARC-eviction cross-AS fault -- fixed (patch 0030).
+PASS  : PG boots, accepts connections, single small queries + tellers/branches
+        read clean; a clean -i -s 1000 run at 32G full-scanned 100M rows clean.
+OPEN  : sustained / concurrent write at DEFAULT recordsize=8k still
+        intermittently corrupts on-disk ZFS state (torn blocks / metaslab
+        range-tree) via the residual heap-overflow/UAF corruptor.  OSv+PG is
+        NOT yet safe to benchmark a default-recordsize sustained-write workload.
+        Reboot-clean re-import FAILS on a poisoned pool (range_tree VERIFY).
+
+VERDICT: NOT YET QUALIFIED for the default-recordsize heavy-write matrix.
+         Do NOT relaunch that fleet yet.  (recordsize=32k + moderate RAM remains
+         a durable-looking envelope but was NOT re-certified this session and is
+         a tuning mitigation, not a correctness fix.)
+
+================================================================================
+ARTIFACTS
+================================================================================
+Box left UP (ec2-user@3.142.230.27), osv-build container running, image built.
+Bundle:  /tmp/wall3.bundle  (scp'd to floki:/tmp/) -- 2 commits on 7f37e0c6:
+  c6c89c59  [fork-stack / CONF_fork]  large-alloc identity routing + reclaimer
+                                       waiter heap node  (core/mempool.cc)
+  dfed474b  [#1423 / OpenZFS]          patch 0030: inline ARC eviction on OSv
+                                       (modules/open_zfs/patches/0030-*.patch)
+Classification recap:
+  [fork-stack / CONF_fork] -> integ/pg-fork-zfs      : c6c89c59
+  [#1423 / OpenZFS]        -> amend pr/openzfs-draft  : dfed474b (patch 0030)
+All full-speed diagnostics were reverted from the shipped tree; the vop_cache
+fast-path-disable experiment (speculative, unverified) was also reverted.
+================================================================================

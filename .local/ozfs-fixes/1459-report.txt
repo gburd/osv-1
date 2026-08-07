@@ -1,0 +1,126 @@
+PR #1459 aarch64 OpenZFS validation report
+============================================
+Branch: pr/openzfs-aarch64 (fork github.com/gburd/osv-1)
+Goal: BUILD + BOOT aarch64 OSv with OpenZFS, basic ZFS I/O.
+Started: (see timestamps below)
+
+AWS: profile ouch, account 266294231451, region us-east-2
+AMI: ami-0b39dbf6c9e223e2d (al2023 arm64 kernel-6.18)
+SG: sg-0f71bed6221459cc0 (SSH from 73.4.58.126/32 - already authorized)
+VPC: vpc-009acbfae7e48930a
+
+STATUS: launching instance...
+
+[SETUP] instance i-042ae16b42bbf1b18 (c7g.metal, 64 vCPU aarch64, us-east-2c) IP 3.23.130.62
+  docker 25.0.14 installed, osv/builder image built (fedora 39, native aarch64 toolchain).
+  Repo: gh-fork osv-1, branch pr/openzfs-aarch64.
+  HEAD 73f1e533 (2 aarch64 commits: 73f1e533 ICP asm arch-conditional, 97ffa21e patch0031 SPL sha512).
+  Base for bundle = 81d736f0 (tip of #1423).
+  Submodules incl openzfs @ 83020cf8 (pinned) init OK.
+
+STATUS: building aarch64 fs=zfs conf_zfs=openzfs...
+
+[BUILD ITERATION - aarch64 fixes needed]
+Fix 1 (aarch64 code, committed): libc/arch/aarch64/atomic.h
+  A userspace `#include <atomic.h>` (from OpenZFS zfs_context.h:101) resolves to
+  libc/arch/aarch64/atomic.h (the OSv-internal libc header), NOT libspl's atomic.h,
+  because the global `CFLAGS += -I libc/arch/$(arch)` and gcc's -I/-isystem dedup
+  (libspl/include appears as both -I and -isystem -> demoted to system position).
+  The aarch64 libc header (unlike x64's self-contained one) pulls in <machine/atomic.h>
+  and the old bsd opensolaris sys/types.h, both kernel-only -> userspace ZFS TUs break
+  (machine/atomic.h not found + conflicting typedefs zoneid_t/o_mode_t/minor_t/... ).
+  FIX: gate those two includes under #if defined(_KERNEL)||defined(__OSV_CORE__) and
+  give a_fetch_add a __atomic_fetch_add() fallback for userspace. aarch64-only; x64
+  file untouched (byte-identical). Cleared ALL libzfs userspace compile errors.
+
+Fix 2 (builder ENV, not code): Fedora-39 osv/builder image was missing zlib-devel
+  (setup.py did not install it). libzfs_sendrecv.c #include <zlib.h> failed. Installed
+  zlib-devel in the builder image. NOT a source change - environment gap only.
+
+[BLOCKER - pre-existing #1423 patch-series defect, arch-INDEPENDENT]
+  Fresh-clone `git apply modules/open_zfs/patches/*.patch` FAILS at patch 0030:
+    error: patch failed: module/zfs/arc.c:7980 / patch does not apply
+  Root cause: patch 0030's arc.c hunks at lines 4756 (arc_reduce_target_size_noshrink)
+  and 7980 (arc_set_limits arc_c_min cap) are BYTE-IDENTICAL DUPLICATES of patch 0009's
+  hunks (verified: diff shows IDENTICAL). After 0009 applies those lines, 0030 tries to
+  add them AGAIN -> conflict. 0030's ONLY unique content is the arc_evict_thread_init
+  hunk at line 4096.
+  This is arch-INDEPENDENT: git apply of the same patches against the same pinned
+  submodule (zfs-2.4.3, 83020cf8) fails the same way for x86_64 and aarch64. It is
+  masked on previously-built trees by the .osv-patches-applied stamp (apply is skipped
+  when the stamp exists), which is why x86_64 "verified byte-identical" (that tree had
+  the stamp; the apply step never re-ran).
+  => This is a #1423 bug (0030 must drop its duplicate 4756+7980 hunks, keeping only
+     the 4096 arc_evict_thread_init hunk). NOT part of #1459's aarch64 diff.
+  To proceed with aarch64 validation I will apply a LOCAL-ONLY dedup of 0030 (strip its
+  duplicate hunks) so the series applies, and validate aarch64 build+boot on top. I will
+  NOT include that #1423 fix in the #1459 bundle (out of scope), but will flag it.
+
+STATUS: applying local-only 0030 dedup to unblock, then continuing aarch64 build...
+
+[BUILD RESULT] aarch64 fs=zfs conf_zfs=openzfs BUILDS CLEAN (build-6 EXIT=0).
+  All ZFS libs linked: libsolaris.so libzfs.so zpool.so zfs.so; loader.elf + zfs_builder.elf built.
+  (with local-only 0030 dedup + atomic.h fix + zlib-devel in builder.)
+
+[BOOT ATTEMPT 1 - aarch64 clock ceiling blocker]
+  zfs_builder VM booted (OSv v0.57.0-399-g73f1e533) then ABORTED:
+    "arm_clock(): read invalid frequency 000000003e95ba80" -> Halting.
+  0x3e95ba80 = 1,050,000,000 Hz = 1.05 GHz. arch/aarch64/arm-clock.cc capped the ARM
+  generic-timer freq at 1000*MHZ (1GHz); AWS Graviton3 (Neoverse-V1) passes 1.05GHz
+  through to the guest under KVM, so the sanity check aborted boot. Pre-existing OSv
+  aarch64 limitation (not ZFS), but blocks booting ANY aarch64 image on Graviton.
+  FIX (aarch64-only, x64 untouched): raise ceiling 1000->2000 MHZ. Rebuilding...
+
+========================================================================
+VALIDATION RESULT: PASS - aarch64 OpenZFS BUILDS + BOOTS + does ZFS I/O
+========================================================================
+
+[BUILD]  aarch64 fs=zfs conf_zfs=openzfs -j64 : EXIT=0 (clean from-scratch build).
+         Full kernel + OpenZFS userspace (libsolaris/libzfs/zpool/zfs .so) + loader.elf
+         + zfs_builder.elf built. zfs_builder VM ran and populated the ZFS image.
+
+[BOOT]   Fresh boot under qemu-system-aarch64 8.1.3 + KVM (c7g.metal /dev/kvm, -cpu host):
+           OSv v0.57.0-399-g73f1e533
+           ZFS: OpenZFS 5000 initialized
+           [ZFS] Pool 'osv' is up-to-date at version 5000
+           ZFS: root mounted ok, z_root=34
+           Booted up in ~165 ms
+
+[ZFS-I/O] Bundled a tiny aarch64 test app (write file to ZFS root, fsync, read back,
+          strcmp verify). Boot output:
+           ZFS-IOTEST PASS: 40 bytes round-tripped on aarch64
+          => OpenZFS create/mount + write + fsync + read all work on aarch64.
+
+[FIXES COMMITTED to branch (unsigned here - re-sign+push from bundle)]
+  bundle: /tmp/1459-aarch64.bundle (on floki:/tmp), base 73f1e533..HEAD (ce55f805)
+  Commit 8aa85136  [#1423/OpenZFS] libc: gate aarch64 atomic.h kernel-only includes
+                   libc/arch/aarch64/atomic.h - the deferred "part-3" include-order fix.
+  Commit ce55f805  [#1423/OpenZFS] aarch64: raise ARM generic-timer freq ceiling to 2GHz
+                   arch/aarch64/arm-clock.cc - Graviton3 passes 1.05GHz, old 1GHz cap
+                   aborted boot. Needed to boot ANY aarch64 image on Graviton.
+  Both aarch64-only. No em-dashes. Author Greg Burd <greg@burd.me>.
+
+[x86_64 BYTE-IDENTICAL]  Confirmed by construction:
+  - Only files changed: arch/aarch64/arm-clock.cc + libc/arch/aarch64/atomic.h.
+  - x64 build compiles arch/x64/* (not arch/aarch64/*) and uses -I libc/arch/x64
+    (so <atomic.h> resolves to libc/arch/x64/atomic.h, never the aarch64 file).
+  - libc/arch/x64/atomic.h blob SHA identical at HEAD and 73f1e533 (0d3da6f8...).
+  - Zero x64/x86 files touched.
+  (Native x64 build not run: this validation host is aarch64; the two changed files
+   are architecturally excluded from the x64 build graph, so x86_64 is unaffected.)
+
+[SEPARATE BLOCKER - NOT #1459, belongs to #1423]  Patch 0030's arc.c hunks at lines
+  4756 + 7980 are BYTE-IDENTICAL DUPLICATES of patch 0009, so a clean-tree
+  `git apply modules/open_zfs/patches/*.patch` FAILS ("patch failed: arc.c:7980").
+  Masked on rebuilt trees by the .osv-patches-applied stamp. Fix: 0030 should drop
+  those two duplicate hunks, keep only its unique arc_evict_thread_init hunk (4096).
+  I applied this dedup LOCALLY to unblock validation; it is NOT in the #1459 bundle.
+  ==> #1423 needs this before ANY clean-tree openzfs build (x86_64 or aarch64) works.
+
+[BUILDER ENV NOTE - not code]  The Fedora-39 osv/builder image (scripts/setup.py) was
+  missing zlib-devel; libzfs_sendrecv.c #include <zlib.h> failed. Installed zlib-devel
+  in the builder. Consider adding zlib-devel to setup.py's Fedora package list.
+
+CONCLUSION: #1459 is VALIDATED (builds + boots + ZFS I/O on aarch64) with the two
+small aarch64-gated fixes in the bundle. Ready to un-draft once #1423 lands (and once
+#1423's patch-0030 duplicate-hunk defect is fixed). Do NOT un-draft yet (depends on #1423).

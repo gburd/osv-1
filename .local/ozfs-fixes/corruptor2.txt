@@ -1,0 +1,232 @@
+================================================================================
+OSv + PostgreSQL 18 -- ZFS-on-OSv WALL 3 (sustained-write corruptor)
+Session 3 investigation: HARDWARE-WATCHPOINT hunt + deep narrowing + HONEST status
+================================================================================
+Date:   2026-07-28   Box: osv-qual (ec2-user@3.142.230.27, m5d.metal 96c/377GB,
+        4x local NVMe, KVM).  Build tree: /b @ branch wall3c-watchpoint (based
+        on dfed474b -- the wall3.txt / corruptor.txt tip, all 5 prior fixes in).
+        conf_fork=1 conf_zfs=openzfs fs=zfs.  Author: Greg Burd.
+        Bundle: /tmp/corruptor2.bundle on floki (dfed474b..12f5bedf).
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* I did NOT land a fix and did NOT name the writer's PC this session.  OSv+PG
+  is STILL NOT QUALIFIED at default recordsize=8k + 32G under KVM.  Do NOT
+  relaunch the default-recordsize fleet.
+
+* I DID reproduce reliably, RULE OUT several more hypotheses (including one my
+  own first fix attempt appeared to confirm -- it was SPURIOUS, see below), and
+  NARROW the corruptor substantially with new, decisive evidence.  The
+  remaining unknown is the exact writer PC; the recommended next step is a
+  targeted metadata canary (below), NOT more victim-chasing.
+
+* WARNING to the next agent (I wasted ~1h on this): the entropy-harvest ring
+  (`ring` global, bsd/sys/dev/random/random_harvestq.cc) at VA 0x6001... is NOT
+  corrupted and is NOT in the fork arena.  0x6001... decodes to PML4 slot 192
+  (a SHARED kernel slot) backed by a 2 MB linear-map large page -- coherent in
+  every fork AS.  Wrapping `new ring_t()` in fork_kernel_heap_scope is a
+  NO-OP/SPURIOUS fix: it does not move the ring and does NOT stop the corruptor
+  (verified: rebuilt with the wrap, -smp4 -i still EIO'd 3/3).  Reverted.
+
+================================================================================
+FAITHFUL REPRODUCTION (unchanged from session 2, re-confirmed)
+================================================================================
+Reseed a clean single-file recordsize=8k lz4 pool on local NVMe:
+    bash /b/.local/ozfs-fixes/seed.sh          (creates pgdata.raw, ~1 min)
+Boot -smp 4 -m 32G under KVM with a gdb stub:
+    bash /b/serve-g.sh 4 32G /tmp/x.log        (serve-g.sh = serve + -gdb :1234)
+Drive:
+    createdb not needed -- use the `postgres` db (C locale; template0-derived
+    `bench` inherits C.UTF-8 which OSv cannot provide -> pgbench connect fails).
+    pgbench -h 127.0.0.1 -p 5432 -U postgres -i -s 1000 postgres
+
+RESULT at -smp 4 + 32G + recordsize=8k: CORRUPTS RELIABLY (5/5 runs) somewhere
+in load%..PK-build (observed 37%, 52%, 61%, 80%, and PK/vacuum phases).  The
+signature varies (below) but always lands during sustained 8k write.
+
+NEW: at -smp 1 the corruptor is MARGINAL: pgbench -i -s300 faulted once (app
+NULL-deref), but -c16 -j4 -T300 sustained RW completed 495972 tx / 0 failed /
+0 corruption.  => This is substantially an SMP RACE (needs true parallelism);
+-smp 1 is NOT a reliable capture regime (revising session-2's "-smp 1
+deterministic capture" plan -- it barely reproduces there).
+
+CAUTION (operational): under a KVM hardware watchpoint at -smp 4 the guest runs
+~30x slower (2% of -i in 40s wall), so "watch a victim, continue" is not
+tractable to the corruption point in a single sitting.  A leftover -smp1 guest
+also holds a write-lock on usr.img and breaks scripts/build's final
+imgedit step ("Failed to get write lock") -- always pkill -9 qemu before build.
+
+================================================================================
+SIGNATURES captured this session (all downstream of ONE corruptor)
+================================================================================
+(A) TORN ZFS DATA BLOCK -> checksum EIO (compression=lz4):
+      ERROR: could not read blocks N..N in file "base/5/16399": EIO
+    PERSISTS across re-reads (SELECT the same rows twice -> EIO both times) =>
+    the corruption is ON DISK, not a transient in-memory read buffer.
+
+(B) INVALID PG PAGE (compression=off):
+      ERROR: 7 invalid pages among blocks 594496..594511 of "base/5/16399"
+    Same underlying corruption; with compression OFF, ZFS checksums the
+    (already-bad) data, stores + returns it faithfully, and PG's own page-header
+    check rejects it.  KEY: the bad blocks form a CONTIGUOUS ~128 KiB-aligned
+    run (16 x 8 KiB blocks) -- a large/aligned corruption UNIT, not a single
+    stray byte.
+
+(C) WAL WRITE EIO (PANIC):
+      PANIC: could not write to log file "..." at offset 0, length 11321344: EIO
+      CONTEXT: writing block 1318169 of "base/5/16399" ... COPY ... line 80532000
+    A large (~10.8 MB) WAL write returned EIO mid-COPY.
+
+(D) assert(sched::preemptable()) in page_fault (arch/x64/mmu.cc:38), signature
+    (4) from corruptor.txt, reproduced with a LIVE gdb backtrace:
+      #4 std::vector<ring_spsc<harvest,...>>::size  (this=0x6001005854c0)
+      #5 unordered_ring_mpsc<harvest,1024>::emplace (this=0x6001005854c0)
+      #6 random_harvestq_internal  (bsd/.../random_harvestq.cc:164)
+      #7 harvest_interrupt_randomness  <- interrupt()  <- do_idle()
+    cr2 = 0x6001005854c0 == the ring's own address, faulting while an interrupt
+    on an idle (AS0) CPU harvested entropy.  I initially mis-read this as "ring
+    in arena" -> spurious fix.  The ring VA IS mapped in AS0 (PML4[192]=present,
+    2 MB large page).  This fault is a VICTIM: the child (or the CPU's) page
+    table for that shared kernel VA was corrupted by the wild write (a PTE /
+    indirect PT page clobbered), so a shared, boot-created kernel mapping
+    faulted in that context.
+
+(E) app NULL-deref (WALL3_APP_FAULT addr=0x0, pc in a PG backend) during
+    checkpoint -- a PG pointer clobbered to 0.
+
+(F) LOST-WAKEUP HANG on the COPY backend (recordsize=4k, -s1000): pgbench
+    stalls at ~35%, NO console output, but the postmaster + fresh connections
+    still answer (SELECT 1 works).  One backend's wakeup was lost.
+
+================================================================================
+DECISIVE NEW EVIDENCE (what it rules the writer IN / OUT of)
+================================================================================
+1. NOT an in-flight DMA modification of the ZFS data buffer.
+   Ran the prior agent's WALL3TORN probe (patch_torn.py): in vdev_disk_io_done
+   -> abd_return_buf, unconditionally abd_cmp_buf(abd, buf, n) for scatter ABDs
+   (the 8k write buffer).  It NEVER fired (0 hits) across a full corrupting -i.
+   => the scatter data ABD is byte-identical from io_start (borrow+copy) to
+   io_done (DMA complete).  The data buffer is NOT scribbled during its write.
+
+2. Corruption is ON DISK (persists across re-read) yet the DMA'd buffer was
+   clean (from #1) => the on-disk block does not match what a clean data ABD
+   would have produced.  Combined with the ~128 KiB-aligned corruption unit
+   (signature B) and the "reads the wrong data" nature, this points the writer
+   at ZFS METADATA in the identity heap -- an indirect block / blkptr / dnode
+   dbuf -- clobbered by a wild pointer write, so ZFS later reads the wrong
+   physical location (or a stale/short block) and fails checksum / returns
+   garbage.  The victim breadth (data blocks, PT pages, entropy ring, wait
+   records, scheduler state) is exactly a wild pointer scribbling semi-random
+   valid-but-wrong addresses.
+
+3. Independent of: ZIL (sync=disabled still corrupts), compression (off ->
+   invalid-page instead of EIO, same corruption), and parallel query / DSM
+   (max_parallel_workers=0 and max_parallel_maintenance_workers=0 still corrupt
+   -- the "parallel worker" in some errors is incidental).  A SINGLE COPY
+   backend + AS0 txg_sync is sufficient.
+
+4. Substantially an SMP race (reliable at -smp4, marginal at -smp1; see above).
+
+5. The lazy-TLB-flush optimization is NOT the bug.  A/B: forced flush_tlb_all()
+   to IPI ALL CPUs (removed the app_thread/lazy_flush_tlb skip in
+   arch/x64/mmu.cc); rebuilt; -smp4 -i still EIO'd.  Reverted.
+
+================================================================================
+RULED OUT this session (do not redo)
+================================================================================
+- entropy-harvest ring in the arena / needing kernel_heap_scope (SPURIOUS; the
+  ring is a coherent 2 MB linear-map large page in shared PML4 slot 192).
+- lazy_flush_tlb / flush_tlb_all app_thread-skip (forced full flush, still bug).
+- in-flight DMA modification of the scatter data ABD (WALL3TORN never fired).
+- ZIL / sync path (sync=disabled still corrupts).
+- compression / lz4 (off still corrupts, as invalid-page).
+- parallel query + posix-shm DSM (workers disabled, still corrupts).
+- patch 0019 borrowed-ARC-page (zfs_vop_cache is the mmap-fault path; PG uses
+  read()/write() -> zfs_vop_read/zfs_vop_write -> zfs_read/zfs_write directly,
+  never touching the page-cache ARC-share path for data files).
+- cross-AS arena FREE as a bug (WALL3_ARENA_XAS fires on BENIGN
+  parent-alloc/child-free of COW-inherited palloc memory; not corruption).
+Prior sessions ruled out (still valid): ZFS-object tail overflow (redzone),
+per-CPU COW divergence, c6c89c59 large-alloc aliasing, DMA/bounce, taskq_wait,
+zio_buf tail overflow, arc_memory_throttle, parallel ARC eviction (0030),
+cross-AS data-buffer coherence, force_kernel_heap push/pop balance.
+
+Also verified the whole coherence spine is INTACT: every ZFS heap allocator
+(zfs_kmem_alloc / kmem_cache_alloc / kmem_alloc / vmem_alloc, and UMA + taskq)
+routes through fork_kernel_heap_push/pop -> identity heap; large kmem allocs
+route to the linear map (c6c89c59); libsolaris .data/.bss, stacks, and
+MAP_SHARED vmas are shared verbatim at clone; the anon-MAP_SHARED registry and
+shm_file (DSM) keep _pages on the identity heap and tag pte_shared.  The
+residual is NOT a plain heap-object arena leak.
+
+================================================================================
+recordsize sweep (partial) + the "4k ZIL-replay-at-mount" bug
+================================================================================
+- recordsize=4k: the corruptor.txt "faults at MOUNT during ZIL replay" bug did
+  NOT reproduce.  A CLEANLY seeded + exported 4k pool imports and mounts fine
+  and PG starts.  => that 4k mount fault was DOWNSTREAM of an unclean export
+  (the corruptor's own damage), not an independent bug.  4k -i -s300 completed
+  CLEAN; 4k -i -s1000 hit a LOST-WAKEUP HANG on the COPY backend (signature F),
+  not data corruption.
+- recordsize=8k (default): corrupts reliably (signatures A/B/C).
+- 16k/32k/64k/128k: NOT run (blocked on the 8k fix; per corruptor.txt, >=32k
+  masks the corruptor by having 4x fewer 8k buffers).
+Net: the sweep is still BLOCKED on the primary 8k corruptor fix.
+
+================================================================================
+RECOMMENDED NEXT STEP (the definitive one, revised)
+================================================================================
+The writer is a WILD POINTER WRITE that (per evidence #1/#2) lands on ZFS
+METADATA (indirect block / blkptr / dnode dbuf) or page-table pages in the
+identity heap, NOT on the in-flight data ABD.  Victim-chasing and single-8-byte
+watchpoints have failed twice.  Two layout-neutral options that NAME it:
+
+  (a) METADATA CANARY (preferred, cheap, deterministic-ish):
+      In the zio WRITE pipeline, right after zio_checksum_generate() computes a
+      block's checksum, stash (blkptr DVA -> 64-bit fletcher of the ABD) in a
+      fixed identity-heap side table.  Right before vdev_disk_io_start() DMAs
+      that block, recompute and compare.  A mismatch proves the buffer changed
+      between checksum and DMA and dumps the DVA + a backtrace.  ALSO stash the
+      dbuf/dnode/indirect addresses and background-checksum them; on mismatch
+      dump the victim ADDRESS (stable in the identity heap) -> then re-run with
+      a KVM hardware write-watchpoint on THAT address (DR0-3, honored under KVM)
+      to catch the writer's PC.  Layout-neutral (side table, no object resize --
+      byte-adding instrumentation MASKS this bug, confirmed again this session).
+
+  (b) PAGE-TABLE-PAGE canary: signature (D) shows a shared kernel PTE/PT page
+      got clobbered.  Checksum AS0's kernel PT pages (or watch a specific
+      long-lived kernel PDPT/PD page) in a background sweep; first mismatch =>
+      victim address => hardware watchpoint => writer PC.
+
+Then classify the named writer:
+  OSv ZFS platform layer (arc_os/abd_os/dbuf/zio glue) -> [#1423/OpenZFS];
+  OSv-fork interaction (clone/teardown/COW/PT)         -> [fork-stack/CONF_fork].
+
+================================================================================
+ARTIFACTS (box left UP, ec2-user@3.142.230.27, container osv-build running)
+================================================================================
+Branch wall3c-watchpoint @ 12f5bedf (one commit on dfed474b): three
+layout-neutral diagnostics, ALL FLAGS OFF (=0), non-fork byte-identical:
+  core/mempool.cc      WALL3_FREE_GUARD  -- page_header owner/cpu_id validate at
+                                            pool::free (caught session-2 sig 1).
+  core/fork_arena.cc   WALL3_ARENA_XAS   -- cross-AS arena-free detector (fires
+                                            on BENIGN inheritance; see above).
+  core/mmu.cc          WALL3_FAULT_TRACE -- print addr+pc for app-PC faults.
+Tree otherwise pristine at dfed474b; openzfs submodule has the applied 0001-0030
+patches (working-tree, uncommitted, as delivered).  Pristine image rebuilt &
+boots.  Prior branch wall3b-diagnostics also present.
+Helper scripts in /b: serve-g.sh (serve+gdb), serve-smp1.sh, .local/ozfs-fixes/
+seed.sh (8k), seed-rs4k.sh, seed-nocomp.sh, seed-nosync.sh, cpio_push.py.
+No source FIX committed (none verified; the entropy-ring attempt was reverted).
+Bundle to floki: /tmp/corruptor2.bundle (diagnostics only, clearly not a fix).
+
+================================================================================
+QUALIFICATION STATUS
+================================================================================
+NOT QUALIFIED at default recordsize=8k + 32G.  On the faithful build, sustained
+write corrupts 5/5 (signatures A/B/C) under KVM -smp 4.  recordsize sweep NOT
+completed (4k = lost-wakeup hang; 8k = corrupt; 16k+/32k+ not run).  Do NOT
+relaunch the fleet.  The 4k-import bug from corruptor.txt is resolved (it was an
+unclean-export artifact of the corruptor, not independent).
+================================================================================

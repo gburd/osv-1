@@ -1,0 +1,71 @@
+================================================================================
+CONCURRENCY FIX A/B -- RO pgbench -S, -smp16, ramfs (ZERO ZFS), host->guest tap
+================================================================================
+Fix: core/sched.cc cpu::load_balance() -- interval 100ms->10ms + drain the whole
+imbalance per pass (loop migrating the most-migratable queued thread to the
+least-loaded CPU until balanced), bounded by cpus.size() migrations/pass.
+Reuses the EXISTING, proven migration path (export_runtime, unlink_parked,
+per-cpu var setup) -- no new hot-path surgery.  (Two earlier attempts at wake-
+time/start-time steering crashed: export_runtime on a just-woken thread trips
+ran_for's _renormalize_count assert; remote_thread_local_var can page-fault
+under preempt-off; and steering kernel threads breaks virtio per-cpu affinity.
+The load_balance path already handles all of that correctly.)
+
+  c     baseline    LB-fix     delta
+  1     12816       12344      -4%   (noise)
+  4     41899       36822      -12%
+  8     70008(PK)   63750      -9%   (migration overhead at peak)
+  16    26953       29807      +11%
+  24    25621       25660      ~0
+  32    17104       25865      +51%   <-- tail lifted
+  48    14569       23768      +63%   <-- tail lifted
+  64    collapse    22271      no longer collapses
+
+VERDICT: the fix FLATTENS the post-c16 regression (c32 +51%, c48 +63%, c64 saved
+from collapse) by dispersing the forked backends across CPUs, confirming the
+root cause is scheduler thread-placement.  It costs ~9% at the c8 peak (the
+migration traffic) and does NOT restore linear scaling (curve plateaus ~22-26k
+past c16, not climbing to the core count).  RESIDUAL below.
+
+--- MECHANISTIC PROOF (OSv sampler, c32) ---
+  idle CPU time:   baseline 93.5%  ->  LB-fix 89.7%   (85.98+3.73)
+  backend spread:  baseline 4 cpus ->  LB-fix 6 cpus (cpu0-5)
+  => the fix demonstrably disperses backends and cuts idle, exactly as claimed;
+     throughput tracks it (c32 17k->26k).
+
+--- RESIDUAL (honest) ---
+Even WITH the fix the guest is ~90% IDLE at c32 while tps is only ~26k.  So the
+remaining ceiling is NOT thread placement -- it is PER-REQUEST LATENCY.  With N
+in-flight requests, tps = N / round-trip-latency; the CPUs idle waiting for each
+client<->guest network round trip (driver -> tap/vhost -> virtio-net RX -> wake
+backend via IPI -> query -> TX -> driver).  Adding concurrency past ~c16 does not
+raise tps (c48/c64 ~22k, at/below c32) -> a SERIALIZATION in that round-trip
+path, plausibly the single virtio-net RX receiver thread + the per-wakeup IPI
+latency (sampler: virtio::net::receiver ~0.12%, txq::kick ~0.4%).  This is the
+same "single RX receiver" structural limit the MQ patch tried and FAILED to fix
+via more queues -- because the limit is the wake/round-trip LATENCY through that
+one receiver, not the queue's throughput.  A latency fix (batch wakeups from the
+receiver, or an RX path that wakes backends without a full IPI+reschedule per
+packet) is the next lever, and is a larger architectural change.
+
+SUMMARY: named + fixed the DOMINANT bottleneck (scheduler thread-placement:
+c32 +51%, c48 +63%, c64 saved from collapse, -9% at peak).  Named the RESIDUAL
+with evidence (per-request round-trip latency through the single virtio-net RX
+receiver; ~90% idle proves it is latency- not CPU- or placement-bound).
+
+--- LATENCY CONFIRMS LATENCY-BOUND RESIDUAL (WITH FIX) ---
+  c16: lat 0.573ms -> tps 27908   (16/0.000573 = 27923)  EXACT
+  c32: lat 1.200ms -> tps 26669   (32/0.0012   = 26667)  EXACT
+  c64: lat 3.036ms -> tps 21079   (64/0.003036 = 21080)  EXACT
+  tps = concurrency / latency holds to 3 digits; latency GROWS with concurrency
+  (0.57->1.2->3.0ms) => a SERIALIZED resource in the round trip, not CPU
+  (host qemu 641% of 9600% = 6.4 cores busy, 92% host idle; guest ~90% idle).
+
+--- HONEST CAVEAT ON THE PEAK ---
+c8 is NOISY run-to-run with the fix (63750 in a warm c1->c64 sweep; 27-30k when
+run cold right after a c64 load).  The aggressive 10ms balancer can migrate the
+handful of c8 backends more than helps them (cache/TLB cost).  The DURABLE,
+reproducible win is the TAIL (c32/c48/c64), which the fix reliably holds at
+~24-26k where baseline collapsed to 14-17k or failed.  A load-difference
+threshold before draining (only rebalance when imbalance > K) would remove the
+low-concurrency churn; left as a tuning knob.

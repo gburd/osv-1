@@ -1,0 +1,55 @@
+NOTIFY-FIX STEP 1 -- ROOT CAUSE PINNED (decisive, instrumented)
+================================================================================
+Box i-03b16f4819228b9d1 18.119.28.142; base 401852c67; K1 = else-if(pid==getpid())
+route self-signal handler -> current AS.  K1 boot 0/5 HANG (K0 3/3 READY).
+
+METHOD: instrumented (debug_ll to console) epoll_file::wait ENTER/BLOCK, epoll
+wake, poll_wake (core/poll.cc), pipe_buffer::write (libc/pipe_buffer.cc), and
+kill() entry (libc/signal.cc), each tagged with the acting thread's tid +
+current_address_space.  Booted K1, watched the wedge live.
+
+WEDGE TRACE (the whole story in 7 lines):
+  epoll_wait BLOCK epfd=.. tid=591 as=0x6000..(child) tmo_ms=300000 nfds=2  <- backend, 300s latch wait
+  epoll_wait BLOCK epfd=.. tid=592 as=0x6000..(child) tmo_ms=200    nfds=2  <- backend, 200ms re-loop
+  epoll_wait BLOCK epfd=.. tid=589 as=0x40b35ba0(AS0) tmo_ms=60000  nfds=2  <- postmaster ServerLoop
+  [NFY-kill] pid=593 sig=17 by-tid=593 by-as=0x6000..(child) getpid=593       <- startup proc self-SIGCHLD
+  page fault outside application, addr: 0x0000000200000000                    <- handler faults in child COW AS
+  page fault outside application, addr: 0x0000000200000000
+  exception nested too deeply -> reaper thread dies -> wedge
+
+Across the ENTIRE wedge: ZERO poll_wake, ZERO epoll-wake, ZERO pipe writes.  So
+the backends' latch pipes are never poked -- because the process that should
+advance startup (the postmaster's SIGCHLD reaper) never runs.
+
+EXACT LOST NOTIFICATION (the structure that is not coherent across fork):
+  It is NOT the latch self-pipe and NOT the WaitEventSet epoll.  It is the
+  child-exit -> parent SIGCHLD.  When PostgreSQL's startup process (pid 593, a
+  fork child) finishes crash recovery and EXITS, OSv fork emulation
+  (libc/process/fork.cc child_exited(), line 461) synthesizes the parent
+  notification with kill(getpid(), SIGCHLD).  The postmaster's process-level
+  SIGCHLD reaper MUST run in AS0 (the top-level app globals), which is exactly
+  what the base kill() does for a self-signal (target_as stays nullptr -> AS0).
+  K1's `else if (pid == getpid()) target_as = current_address_space()` routes
+  that reaper into 593's DYING COW child address space instead.  Running the
+  postmaster reaper against the child's half-torn-down COW mapping faults at the
+  mmap slot base 0x200000000000 and nests -> the reaper never reaps -> the
+  postmaster never observes the startup process finished -> it never launches
+  checkpointer/bgwriter, never reaches "ready to accept connections", and the
+  two already-forked backends (591 latch-wait 300s, 592 re-loop) wait forever
+  for a startup handshake that is stuck.  => a LOST child->parent SIGCHLD.
+
+WHY IT IS LAYOUT-FRAGILE (matches reports): the base K0 already routes the
+child-exit SIGCHLD to AS0 (correct).  Any kill() perturbation that also diverts
+the getpid()==pid SIGCHLD into the child AS re-breaks it.  The reports saw the
+pure lost-wakeup face (the reaper simply never woken); here it faults first --
+same root: the child->parent SIGCHLD reaper is not coherent when run in the
+child COW AS.
+
+FIX DIRECTION (STEP 2): the self-signal AS routing that DROP DATABASE needs
+(kill(MyProcPid, SIGURG) latch / kill(MyProcPid, SIGUSR1) ProcSignalBarrier)
+must be SIGNAL-SELECTIVE: route SIGURG/SIGUSR1 self-signals to the caller's own
+COW AS (so HandleProcSignalBarrierInterrupt / latch_sigurg_handler set the flag
+/ poke the pipe in the copy the backend reads), but KEEP the child-exit SIGCHLD
+(and any other process-level self-signal) in AS0.  i.e. do NOT blanket-route
+pid==getpid() to current AS; only the app's latch/barrier signals.
+================================================================================

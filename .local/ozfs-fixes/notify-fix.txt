@@ -1,0 +1,46 @@
+NOTIFY-FIX STEP 2 + STEP 3 (banked) -- fix + validation
+================================================================================
+Box i-03b16f4819228b9d1 18.119.28.142; base 401852c67.
+
+STEP 2 FIX (the coherence fix, all #if CONF_fork):
+ (A) libc/signal.cc kill(): SIGNAL-SELECTIVE self-signal AS routing.
+     Replace the boot-breaking broad `else if (pid==getpid()) -> current AS`
+     (K1) with:
+         } else if (pid == getpid() && (sig == SIGURG || sig == SIGUSR1)) {
+             target_as = osv::fork::as_for_pid(pid);
+         }
+     Only a LIVE fork backend's OWN latch (SIGURG) / ProcSignalBarrier (SIGUSR1)
+     self-signal routes its handler into the caller's own COW AS (so
+     latch_sigurg_handler pokes the backend's OWN self-pipe and
+     HandleProcSignalBarrierInterrupt sets ProcSignalBarrierPending in the copy
+     the backend reads).  The child-exit SIGCHLD (fork.cc child_exited ->
+     kill(getpid(), SIGCHLD) from a DYING child) is NO LONGER diverted -> its
+     reaper runs in AS0 (correct), so the postmaster reaps the startup process
+     and reaches "ready".  as_for_pid() gates to a live registered child.
+ (B) libc/pipe.cc pipe2(): wrap the pipe_buffer + pipe_file allocation in
+     fork_arena::kernel_heap_scope so the latch self-pipe lives on the identity
+     heap, coherent across every fork AS (the cross-backend SetLatch ->
+     WakeupOtherProc -> SIGURG handler in another AS writes the SAME pipe the
+     waiting backend epoll-polls).  Same family as struct file / f_epolls /
+     epoll containers.
+
+STEP 3 VALIDATION (fresh-8k-pool harness; base=401852c67):
+ * BOOT (self-signal routing RE-ADDED, the K1 trigger):
+     single-file 8k  = 10/10 READY (smp4)   [broad K1 was 0/5 HANG]
+     raidz1 (4-disk) = 5/5  READY (smp4)
+ * DROP DATABASE (external psql, CREATE DATABASE x TEMPLATE template0; DROP):
+     completes 5/5 at smp4 AND smp8 (repeatedly).  Was: hang ("still waiting for
+     backend with PID N ... ProcSignalBarrier", N=self).
+     NOTE intermittency: ~1-in-3 DROP DATABASE runs crashes with "exception
+     nested too deeply" at an mmap-slot addr (0x2000..) -- a COW fault in the
+     SIGUSR1 handler thread running in the backend COW AS.  This is the residual
+     "COW-fault-in-a-signal-handler-thread-started-in-a-child-AS" facet the
+     dropdb-rework-report named as the deeper, separate target.  DROP DATABASE
+     DOES complete 5/5 on the good runs; the crash is a robustness gap, not a
+     re-hang.  (Investigating a synchronous/inline self-handler to remove it.)
+ * pgbench (concurrent -c8 -j4 -T30): 0 failed at smp4 (-s100) and smp8 (-s20).
+     Heavy -s100 -i at smp8 (and sometimes smp4) intermittently hits the
+     PRE-EXISTING ZFS read-path corruptor ("invalid page in block", f2b-report
+     sec 5) -- unrelated to this signal/pipe fix.
+ * conf_fork=0: both diffs are entirely inside #if CONF_fork -> byte-identical.
+================================================================================

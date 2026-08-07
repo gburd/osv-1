@@ -1,0 +1,186 @@
+================================================================================
+OpenZFS submodule bump 2.4.2 -> 2.4.3 for OSv PR #1423 (branch pr/openzfs-draft)
+================================================================================
+Author:   Greg Burd <greg@burd.me>
+Where:    All build/validation on EC2 osv-zfsbump (ec2-user@18.225.182.126,
+          c5.4xlarge, 16 vCPU, us-east-2). No /dev/kvm on this box, so builds
+          were validated to clean loader.elf + loader.img + libsolaris.so
+          (the agreed "no-KVM = clean build is sufficient proof" path). OSv
+          nonetheless boots under QEMU TCG far enough to print the ZFS-init
+          markers (captured below).
+Base tip: 520a29ca6 (pr/openzfs-draft, unchanged)
+New commit: 31d78374 "zfs(openzfs): bump OpenZFS submodule 2.4.2 -> 2.4.3"
+
+--------------------------------------------------------------------------------
+1. SUBMODULE PIN BUMP
+--------------------------------------------------------------------------------
+modules/open_zfs/openzfs gitlink:
+    OLD  6330a45b06d20125de679aae5f63ba14082671ef   (= zfs-2.4.2^{commit})
+    NEW  83020cf8259d057d4cc9102010c05f07ffdfc136   (= zfs-2.4.3^{commit})
+
+NOTE on the SHA in the task text (d88276e57da6e80d02a09ddb4c3aa5838be28443):
+    d88276e5 is the ANNOTATED TAG OBJECT for zfs-2.4.3; it points to commit
+    83020cf8 ("Tag zfs-2.4.3"). Git submodule gitlinks record COMMITS, not tag
+    objects. The prior 2.4.2 pin followed the same convention: it recorded the
+    COMMIT 6330a45b (not the 2.4.2 tag object 59f46c50). `git checkout d88276e5`
+    (checking out the annotated tag) resolves to and checks out commit 83020cf8,
+    which is exactly what the new gitlink records. This matches the 2.4.2
+    convention precisely.
+
+Also updated (same commit):
+    .gitmodules                          branch = zfs-2.4.2 -> zfs-2.4.3
+    Makefile                             pin comment zfs-2.4.2 -> zfs-2.4.3
+    modules/open_zfs/PERF-osv-openzfs.md doc version 2.4.2 -> 2.4.3
+
+--------------------------------------------------------------------------------
+2. PATCH SERIES vs 2.4.3  ->  ALL 29 APPLY CLEAN, ZERO REROLLS NEEDED
+--------------------------------------------------------------------------------
+The build applies the series with ONE invocation (top-level Makefile, ~line 59):
+    git -C modules/open_zfs/openzfs apply --whitespace=nowarn <all 0001..0029>
+    && touch modules/open_zfs/openzfs/.osv-patches-applied
+(idempotent stamp; git apply is exact -- no fuzz -- so any offset shift = fail.)
+
+Sequential diagnostic apply against pristine 2.4.3 source (each patch applied on
+top of the prior, exactly as the build does), result:
+
+    CLEAN  0001-OSv-Add-complete-platform-layer-with-SPL-for-OpenZFS.patch
+    CLEAN  0002-feat-zfs-Add-OSv-OS-layer-implementation-with-auto-u.patch
+    CLEAN  0003-OSv-Update-platform-layer-for-OpenZFS-2.4.1-compatib.patch
+    CLEAN  0004-zfs-implement-complete-OSv-platform-layer-for-OpenZF.patch
+    CLEAN  0005-zfs-add-vop_cache-zfs_freesp-and-pagecache-bridge-fo.patch
+    CLEAN  0006-zfs-add-comment-explaining-fvisibility-hidden-and-de.patch
+    CLEAN  0007-zfs-fix-symlink-vnode-type-by-storing-file-type-bits.patch
+    CLEAN  0008-zfs-implement-ZFS-encryption-AES-256-GCM-key-managem.patch
+    CLEAN  0009-zfs-fix-ARC-sizing-memory-pressure-and-OSv-platform-.patch
+    CLEAN  0010-zfs-clarify-that-zio_crypt_os.c-is-superseded-by-zio.patch
+    CLEAN  0011-zfs-implement-ZIO_TYPE_TRIM-in-vdev_disk_io_start-fo.patch
+    CLEAN  0012-zfs-fix-vdev_disk_bio_done-to-map-BIO_DISCARD-errors.patch
+    CLEAN  0013-zfs-add-zfs_mount_setattr-stub-for-OSv-required-by-2.patch
+    CLEAN  0014-zfs-skip-.1-partition-append-for-OSv-Crucible-volume.patch
+    CLEAN  0015-zfs-fix-zfs_uioskip-to-advance-the-iov-pointer.patch
+    CLEAN  0016-zfs-derive-vdev-ashift-from-device-block-size-fix-mu.patch
+    CLEAN  0017-zfs-flush-root-znode-in-zfs_osv_unmount-before-disow.patch
+    CLEAN  0018-zfs-embed-caller-owned-ostask-in-taskq_ent_t-to-fix-.patch
+    CLEAN  0019-zfs-share-decompressed-ARC-pages-into-mmap-page-cach.patch
+    CLEAN  0020-zfs-back-getmntent-getmntany-with-live-OSv-VFS-mount-table.patch
+    CLEAN  0021-zfs-run-libtpool-jobs-inline-on-OSv.patch
+    CLEAN  0022-zfs-force-serial-dataset-mounting-on-OSv.patch
+    CLEAN  0023-zfs-use-whole-raw-disk-on-OSv-when-no-.1-partition.patch
+    CLEAN  0024-zfs-drain-all-live-znodes-in-zfs_osv_unmount.patch
+    CLEAN  0025-zfs-guard-NULL-column-header-in-zpool-list.patch
+    CLEAN  0026-zfs-enforce-the-readonly-property-on-OSv.patch
+    CLEAN  0027-zfs-advertise-TRIM-support-on-OSv-vdev_disk.patch
+    CLEAN  0028-zfs-refresh-osv-vnode-v_size-after-write.patch
+    CLEAN  0029-zfs-implement-zfs_write_simple-and-zfs_space-for-ZIL-replay.patch
+
+    -> 29/29 CLEAN. 0 fuzzed. 0 failed. NO patch was rerolled; the series is
+       byte-for-byte unchanged. This is expected for an upstream PATCH release:
+       the bulk of the series lives under module/os/osv/ (files the series
+       itself creates), and the few shared files it touches were not disturbed
+       on the same lines by 2.4.3.
+
+Build-time confirmation (not just the dry run): the real build created the
+stamp modules/open_zfs/openzfs/.osv-patches-applied and materialized the full
+OSv platform layer (26 changed files, 0 *.rej), incl. patch-0008 encryption
+(module/os/osv/zfs/zio_crypt_os.c) and patch-0029 zfs_write_simple
+(module/os/osv/zfs/zfs_vnops_os.c).
+
+--------------------------------------------------------------------------------
+3. BUILD RESULTS
+--------------------------------------------------------------------------------
+Container: docker fedora:39 + the required deps, repo mounted -v $HOME/osv:/b.
+git safe.directory set for /b and /b/modules/open_zfs/openzfs.
+
+(a) conf_zfs=openzfs  --  ./scripts/build image=empty fs=zfs conf_zfs=openzfs -j16
+    Full build from a pristine 2.4.3 checkout. 1516 objects compiled (310 of
+    them OpenZFS objects), all 6 ZFS libs linked, kernel linked, OSv booted:
+
+        LINK libsolaris.so
+        LINK libzfs.so
+        LINK mkfs.so
+        LINK cpiod.so
+        LINK zpool.so
+        LINK zfs.so
+        ...
+        OSv v0.57.0-394-g520a29ca
+        ZFS: OpenZFS 5000 initialized
+        [ZFS] Pool 'osv' is up-to-date at version 5000
+        ZFS: root mounted ok, z_root=34
+
+    The build then errored ONLY in the final image-population step
+    (scripts/upload_manifest.py -> BrokenPipe / ConnectionReset): that step
+    boots the zfs_builder VM and streams files in over guest<->host networking,
+    which is flaky under pure QEMU TCG (no /dev/kvm). This is a KVM-absence
+    artifact, NOT a ZFS/patch/compile failure -- the kernel and all ZFS
+    libraries were already fully built and OSv booted with OpenZFS initialized
+    and root mounted before that step ran.
+
+(b) conf_zfs=openzfs  --  authoritative CLEAN from-scratch recompile
+    To remove all doubt about the image-upload artifact, all OpenZFS build
+    objects + libsolaris.so + loader.elf/loader.img were deleted and rebuilt:
+        make conf_zfs=openzfs build/release.x64/libsolaris.so \
+                               build/release.x64/loader.img
+    Result: EXIT=0, ZERO errors. 264 CC/CXX lines (267 OpenZFS objects freshly
+    recompiled from the patched-2.4.3 sources), then:
+        CC modules/open_zfs/openzfs/module/os/osv/zfs/abd_os.c
+        CC modules/open_zfs/openzfs/module/os/osv/zfs/arc_os.c
+        ... (267 openzfs objects) ...
+        LINK libsolaris.so
+    Artifacts:
+        build/release.x64/libsolaris.so   16,242,704 bytes
+        build/release.x64/loader.elf      71,190,760 bytes
+        build/release.x64/loader.img       5,734,400 bytes
+
+(c) conf_zfs=bsd (default)  --  ./scripts/build image=empty fs=zfs -j16
+    Built in a SEPARATE clean clone (osv-bsd) so it could not reuse openzfs
+    artifacts. Result: EXIT=0, ZERO errors. 1329 objects compiled, 0 OpenZFS
+    objects (bsd mode does not touch the submodule -- it uses OSv's in-tree
+    BSD/Illumos ZFS, 100 fs/zfs + cddl objects). loader.elf 69,179,624 bytes,
+    loader.img 4,521,984 bytes. => BSD mode UNAFFECTED by the bump, as expected.
+
+--------------------------------------------------------------------------------
+4. IS ANYTHING IN 2.4.3 OSv-RELEVANT?  (skim of zfs-2.4.2..zfs-2.4.3)
+--------------------------------------------------------------------------------
+2.4.3 is a small patch release; the large majority of commits are CI, FreeBSD,
+and Linux-kernel-compat changes that OSv does not compile (OSv has its own
+platform layer). None conflicted with our series (all 29 applied clean). The
+commits that DO touch shared module/zfs core sources OSv compiles, worth noting:
+
+  8dd2e0096  enforce exact decompressed length for lz4/gzip/zstd
+             -> data-integrity hardening on the decompression path OSv uses
+                (gzip.c, lz4_zfs.c, zstd/zfs_zstd.c). Good to inherit.
+  137626695  arc: export additional required symbols (arc.c)
+             -> symbol export; OSv links these into libsolaris.so. Built clean.
+  8e964b36b  key lookup failure should always return EACCES (dsl_crypt.c, arc.c)
+             -> encryption path; relevant to OSv patch 0008 (AES-256-GCM). Our
+                patch touches different lines; applied + compiled clean.
+  06d8cfedb  additional verification of size fields and strings (dmu_recv.c,
+             vdev_label.c, zfs_ioctl.c, zfs_quota.c)  -> send/recv + ioctl
+                robustness.
+  63a0ff6cd  nvpair: check for un-terminated strings in packed nvlist
+             (nvpair.c, zfs_ioctl.c)  -> ioctl input hardening.
+  6d336fa86  abd: fix stats asymmetry in case of Direct I/O (abd.c)
+             -> ARC/ABD stats; near OSv patches 0009/0019 territory but
+                different lines; clean.
+  Others (dbuf prefetch/l2cache simplify, zil.c uninit-var + log-vdev-removal
+  fix, dsl_scan errorscrub cursor, sa lock-ordering, dsl_dir dd_lock annotate,
+  dmu_send off-by-one redaction fix, zvol block-clone key check) also compiled
+  into OSv's libsolaris.so cleanly.
+
+  Bottom line: no OSv-specific behavior change is required by 2.4.3; OSv simply
+  inherits upstream's decompression-length, nvlist/size-field, and encryption
+  error-code hardening for free. Nothing regressed our patch series.
+
+--------------------------------------------------------------------------------
+5. DELIVERABLE
+--------------------------------------------------------------------------------
+  Commit 31d78374 on pr/openzfs-draft (author Greg Burd), single commit:
+    - submodule pin 6330a45b -> 83020cf8 (zfs-2.4.3)
+    - .gitmodules branch, Makefile pin comment, PERF doc version -> 2.4.3
+    - NO patch rerolls (series 0001..0029 unchanged; all apply clean vs 2.4.3)
+
+  Bundle: /tmp/zfs-243-bump.bundle  (range 520a29ca6..HEAD, i.e. the one commit)
+  -> re-sign + push on floki. No push creds were used here.
+
+  When you've pushed: terminate osv-zfsbump.
+================================================================================

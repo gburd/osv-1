@@ -1,0 +1,99 @@
+LEAK-SCRUB #2 — OSv published git content (git + gh CLI only, no build/EC2)
+Authorship kept: Greg Burd <greg@burd.me>. commit.gpgsign=true per-worktree.
+Pushes: --force-with-lease (no delete+recreate). Stale-base guard verified 0 each.
+
+================================================================================
+JOB A — scrub "AWS VPC" from IPv6 code comments (Category B), TWO stacked branches
+================================================================================
+
+Root cause: all AWS-comment leaks were introduced in ONE evil-merge commit
+(5368b2e85, the FreeBSD-IPv6 forward-port merge). Fixed at the source by
+amending that merge via interactive rebase (--rebase-merges, edit stop at the
+merge), so history stays clean — no scrub-commit-on-top. The 4 later commits
+replayed; the final master merge re-conflicted only on linux.cc + modules/tests/
+Makefile (epoll_pwait2 / tst-pthread-timedlock / tst-epoll-pwait2 additions),
+resolved to be byte-identical to the original merge result (git show ad0615ebf).
+
+Leaks found were MORE than the 7 listed — full AWS/VPC scan caught two extras
+(both scrubbed):
+  - dhcp6.cc  "cloud providers like AWS)"        -> "cloud DHCPv6 servers)"
+  - dhcp6.cc  "typical VPC setups"               -> "typical setups"
+  - nd6_rtr.cc had a 2nd "so on AWS this" beyond the counted "AWS VPC" line.
+
+-------- BRANCH 1: pr/ipv6-forward-port (PR #1442) --------
+Worktree: .local/worktrees/ipv6-port
+Files scrubbed (comment-only, no functional change):
+  bsd/porting/dhcp6.cc         (3 AWS/VPC refs: lines 169, ~360, ~393, ~491)
+  bsd/porting/networking.cc    (2: "AWS VPC (which sends RAs)", "AWS VPC sets this")
+  bsd/sys/netinet6/nd6_nbr.cc  (1: "AWS VPC router" -> "a cloud VPC router")
+  bsd/sys/netinet6/nd6_rtr.cc  (2 AWS refs in one comment block)
+  loader.cc                    (1: "Managed/M-flag, e.g. AWS VPC")
+Old remote tip : ad0615ebf
+Final head SHA : b06d3df948191f82716766df0132bef89e5f4bca
+Diff old..new  : EXACTLY the 9 comment-line edits, nothing else (verified).
+Signature state: our 5 commits sig=G (b06d3df94, e617daeb3, eaa48fb1e,
+                 ec2832443, 1916ab52f), author Greg Burd <greg@burd.me>.
+                 The 33 ancestor commits are the ORIGINAL upstream IPv6 authors
+                 (Kozaczuk/Myers) — never signed by us, SHAs unchanged, kept as-is
+                 (re-signing would falsify their authorship — hygiene KEEP rule).
+Stale-base guard: git diff upstream/master..HEAD -- linux.cc libc/signal.cc
+                 libc/pthread.cc | grep -c '^-.*osv_sigtimedwait'  ==> 0
+AWS VPC count now: 0   (full AWS/EC2/nitro/graviton scan of added diff: CLEAN)
+Pushed: gh-fork ad0615ebf...b06d3df94 (forced, --force-with-lease). OK.
+
+-------- BRANCH 2: pr/virtio-net-ipv6-offload (PR #1444) --------
+Worktree: .local/worktrees/vnet6
+Stacked on branch 1 = old base ad0615ebf + exactly ONE own commit (defa463d3
+"virtio-net: enable IPv6 checksum and TSO offload"). That commit has NO AWS and
+touches NONE of the 5 leak files, so no independent scrub needed — just rebased
+the single commit onto the scrubbed base:
+  git rebase --onto b06d3df94 ad0615ebf pr/virtio-net-ipv6-offload   (clean, no conflicts)
+Old remote tip : defa463d3
+Final head SHA : eea48c6ccad55f9227829bacbb0774b2838aaef5
+Signature state: eea48c6cc sig=G, author Greg Burd <greg@burd.me>; base is the
+                 scrubbed b06d3df94 (ancestor confirmed).
+Stale-base guard: ... | grep -c '^-.*osv_sigtimedwait'  ==> 0
+AWS VPC count now: 0   (full leak scan of added diff: CLEAN)
+Pushed: gh-fork defa463d3...eea48c6cc (forced, --force-with-lease). OK.
+
+Both branches consistent (branch 2 shares the scrubbed base commits, no dup).
+
+================================================================================
+JOB B — scrub 5 PR bodies on cloudius-systems/osv (gh pr edit --body-file)
+================================================================================
+Only offending lines reworded; rest of each body preserved verbatim. Re-fetched
+each body afterward and confirmed no AWS/EC2/GCP/m5d/m5.metal/c6g/Graviton/
+Nitro/Postgres-over-ZFS remains (benchmark NUMBERS kept intact).
+
+#1447 (ext4-perf):
+  "an AWS m5d.metal instance ... local NVMe instance storage (no EBS ... cap)"
+    -> "a 2-socket x86-64 bare-metal host booting OSv under KVM against local
+        NVMe (no throughput cap)"
+  "## Results (m5d.metal, local NVMe, ...)"
+    -> "## Results (bare-metal host, local NVMe, ...)"
+  VERIFY: CLEAN.
+
+#1459 (aarch64 openzfs):
+  "needs a Graviton (c6g.metal) build+boot" -> "needs an aarch64 metal build+boot"
+  "exercised on a Graviton instance"        -> "exercised on aarch64 hardware"
+  (no "AWS Graviton3" text present in body.)  VERIFY: CLEAN.
+
+#1445 (numa per-node pools):
+  "Real 2-socket NUMA metal (AWS m5.metal, node0 193 GB / node1 193 GB, 96 cores)"
+    -> "A real 2-socket NUMA bare-metal host (node0 ~193 GB / node1 ~193 GB, 96 cores)"
+  VERIFY: CLEAN (a residual grep hit was the word "draws", not "aws").
+
+#1437 (numa discovery):
+  "the large EC2/GCP metal instances that are a target for Postgres-over-ZFS workloads"
+    -> "large multi-socket bare-metal hosts"
+  VERIFY: CLEAN.
+
+#1442 (ipv6 forward-port):
+  "Validated ... on an EC2 bare-metal instance:" -> "Validated ... on a bare-metal host:"
+  VERIFY: CLEAN.
+
+================================================================================
+Untouched (as instructed): all other branches/PRs; upstream aws_nitro / AWS ENA
+/ conf/profiles/*/aws.mk (legit upstream platform names); EC2 boxes; .local/*.md.
+No messy history forced — the one merge re-conflict was resolved to match the
+original merge tree byte-for-byte.

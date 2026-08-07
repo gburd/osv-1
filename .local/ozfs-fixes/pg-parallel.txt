@@ -1,0 +1,182 @@
+================================================================================
+PG PARALLEL QUERY (WALL 1) + ZIL-REPLAY sync=standard DURABILITY (WALL 2) on OSv
+  stock PostgreSQL 18 on the OpenZFS RAID-Z (4xEBS raidz1 + NVMe SLOG + L2ARC)
+================================================================================
+Date:   2026-07-26   Driver: floki (local) over ssh -> EC2 m5d.metal
+EC2:    ec2-user@3.145.108.149  (osv-build + osv-net, NOT terminated)
+Branch: integ/pg-fork-zfs   base dad7e075 (RAID-Z work, re-signed 46f91443c)
+        HEAD 009234b4
+Author: Greg Burd
+Bundle: /tmp/pg-parallel.bundle  (dad7e075..009234b4)  -- on EC2 + floki
+        (RAID-Z bundle earlier: /tmp/pg-raidz.bundle 08dccbbb..dad7e075)
+
+New commits this session:
+  ea7caf7b [fork-stack / CONF_fork] kill(OSV_PID) from a forked backend -> AS0
+  009234b4 [#1423 / OpenZFS]        patch 0029: zfs_write_simple + zfs_space (ZIL replay)
+
+================================================================================
+WALL 1 (PRIMARY) -- PG PARALLEL QUERY HANGS   [fork-stack / CONF_fork]  ea7caf7b
+================================================================================
+
+SYMPTOM
+  With max_parallel_workers_per_gather>0, a parallel Gather (e.g. a forced
+  Parallel Seq Scan aggregate over pgbench_accounts) hangs forever; block I/O
+  fully drained; worked around before with max_parallel_workers_per_gather=0.
+
+gdb ISOLATION (OSv's own gdb helpers: `osv info threads`, `osv thread apply all
+bt`, symbols via `osv syms`)
+  * The postmaster thread parks in the normal idle wait:
+      ServerLoop -> WaitEventSetWait -> epoll_wait (waiteventset.c:1191)
+  * The parallel LEADER + would-be workers are parked; block I/O is drained
+    (the virtio::blk::req_done() waiters are idle -- nothing in flight).
+  * DECISIVE: with log_min_messages=debug1, running the parallel query emits
+    ZERO "starting background worker" lines -- the parallel workers are NEVER
+    forked.  The leader waits in WaitForParallelWorkersToAttach for workers
+    that do not exist.
+
+ROOT CAUSE (which primitive diverged cross-AS, and why)
+  PostgreSQL launches parallel workers by calling RegisterDynamicBackgroundWorker
+  in the leader, which fills a shared request slot and then signals the
+  postmaster to fork them:  kill(PostmasterPid, SIGUSR1).
+  The postmaster is the top-level app / AS0, whose getpid() is OSV_PID (== 2).
+  The CONF_fork kill() path (libc/signal.cc) resolved a cross-"process" target
+  with osv::fork::as_for_pid(pid) and returned ESRCH when that was null:
+      if (pid != getpid() && pid != 0 && pid != -1) {
+          target_as = as_for_pid(pid);
+          if (!target_as) { errno = ESRCH; return -1; }   // <-- fires for OSV_PID
+      }
+  AS0 is NEVER entered into g_pid_as (only fork children are register_pid()'d),
+  so as_for_pid(OSV_PID) == nullptr, and kill(OSV_PID, SIGUSR1) issued by a
+  forked backend (the leader) returned ESRCH -- the signal was DROPPED.  The
+  postmaster, parked in its epoll_wait ServerLoop, never saw the bgworker
+  request, never forked a worker, and the leader hung.  Pure coordination
+  lost-wakeup with I/O drained -- the SAME per-fork-child-pid signal-routing
+  class as the shipped SIGCHLD / SIGURG-latch fixes, on the postmaster-bound
+  (OSV_PID/AS0) side rather than the child-to-child side.
+  (This also explains the previously-noted SIGHUP-to-postmaster ESRCH from
+  pg_reload_conf(): same kill(OSV_PID) drop.)
+
+FIX  (libc/signal.cc, #if CONF_fork)
+  Exclude OSV_PID from the cross-process target resolution -- treat it like the
+  self/broadcast case so target_as stays nullptr and the handler runs in AS0
+  (mmu::kernel_address_space()), exactly where the postmaster's handler must run
+  to poke its own latch/self-pipe and wake ServerLoop:
+      if (pid != getpid() && pid != 0 && pid != -1 && pid != OSV_PID) { ... }
+  Never returns ESRCH for the top-level app.  conf_fork=0 does not compile this
+  block (byte-identical).
+
+VALIDATION (pasted)
+  --- correct reference (non-parallel) ---
+    set max_parallel_workers_per_gather=0; select count(*) from pgbench_accounts;
+      10000000
+  --- FORCED PARALLEL SEQ SCAN Gather (max_parallel_workers_per_gather=2) ---
+    EXPLAIN (costs off):
+      Finalize Aggregate
+        ->  Gather
+              Workers Planned: 2
+              ->  Partial Aggregate
+                    ->  Parallel Seq Scan on pgbench_accounts
+    select count(*) from pgbench_accounts;
+      10000000              <=== COMPLETES, correct (== reference); was: HANG
+  --- PARALLEL aggregate, EXPLAIN ANALYZE (workers actually launched now) ---
+      Finalize Aggregate (actual time=1088.610..1091.838 rows=1.00 loops=1)
+        ->  Gather (actual time=... rows=3.00 loops=1)
+              Workers Planned: 2
+              Workers Launched: 2          <=== was 0 launched (the hang)
+              ->  Partial Aggregate ... Parallel Seq Scan on pgbench_accounts
+                    Worker 0: rows=3031258 ; Worker 1: rows=3362047
+      Execution Time: 1091.988 ms
+  --- and on the FINAL rebuilt image (fresh pool, pgbench -s 20) ---
+      Gather / Workers Planned: 2 / Parallel Seq Scan -> count = 2000000  (correct)
+  --- BONUS same-root fix: pg_reload_conf() (SIGHUP to postmaster) ---
+      select pg_reload_conf();  ->  t
+      LOG: received SIGHUP, reloading configuration files      (was: ESRCH)
+
+================================================================================
+WALL 2 -- ZIL REPLAY WITH sync=standard   [#1423 / OpenZFS]  patch 0029 (009234b4)
+================================================================================
+
+SYMPTOM
+  A kill -9 mid-txg with sync=standard (ZIL active on the SLOG vblk5), then a
+  re-import, either:
+    - SPL PANIC in abd_alloc_linear (VERIFY3U(size <= SPA_MAXBLOCKSIZE), wild
+      ~18 EiB size), or
+    - "Solaris: WARNING: ZFS replay transaction error 95, dataset pgdata,
+      txtype 9" (then txtype 10) -- error 95 == EOPNOTSUPP.
+  The pool itself is clean (scrub 0 errors); the failure is in ZIL REPLAY.
+
+ROOT CAUSE
+  The OSv OpenZFS platform layer left two vnops as ENOTSUP stubs, both on the
+  ZIL replay path that runs on import after a crash:
+    zfs_replay_write()    (TX_WRITE,   txtype 9)  -> zfs_write_simple()  = ENOTSUP
+    zfs_replay_truncate() (TX_TRUNCATE, txtype 10) -> zfs_space(F_FREESP) = ENOTSUP
+  So every logged intent-log record was dropped (error 95) -- the ZIL gave no
+  durability -- or an incomplete replay read a garbage record size and paniced.
+  sync=standard was therefore unusable through the ZIL on OSv.
+
+FIX (modules/open_zfs/patches/0029-*.patch -- an upstream-source change, so a
+patches/ entry git-apply'd to the pinned submodule at build time, NOT a
+submodule edit; NOT CONF_fork-gated -- single-process correctness)
+  * zfs_write_simple(zp, data, len, pos, resid): build a one-iovec struct uio
+    over the kernel buffer (UIO_WRITE, offset=pos, resid=len), wrap in zfs_uio_t,
+    call the platform-independent zfs_write(zp,&zuio,O_SYNC,NULL) -- the
+    zfs_vop_write() shape / FreeBSD's vn_rdwr(UIO_SYSSPACE, IO_SYNC); refresh
+    vp->v_size from zp->z_size on success (read-after-write coherence).
+  * zfs_space(zp,cmd,bfp,flag,offset,cr): validate F_FREESP, refuse read-only /
+    negative len, check ACE_WRITE_DATA, delegate to the already-present
+    zfs_freesp(zp,off,len,flag,TRUE) -- identical to FreeBSD's zfs_space.
+
+VALIDATION (pasted)
+  --- re-import after sync=standard kill -9: no error, no panic ---
+    (before) Solaris: WARNING: ZFS replay transaction error 95 ... txtype 9/10
+    (after)  -- replay-error check --  (no ZIL replay error, no panic)
+             LOG: database system is ready to accept connections
+  --- sync=standard durable marker survives crash + reboot on the RAID-Z ---
+    PHASE 1: insert (1,'RAIDZ-DURABLE-MARKER'); checkpoint;  -> row present
+             kill -9 (crash), sync=standard
+    PHASE 2: re-import -> PG crash recovery -> ready
+             select * from durx;
+               1 | RAIDZ-DURABLE-MARKER      <=== DURABLE with sync=standard
+
+SCOPE / HONEST NOTE
+  The two replay ops (TX_WRITE, TX_TRUNCATE) are the ones PG's fsync-heavy
+  workload logs to the ZIL; both now replay and a sync=standard pool re-imports
+  cleanly and serves correct data after a crash.  Remaining ZIL replay ops that
+  build directory/namespace state (TX_CREATE/MKDIR/REMOVE/LINK/RENAME/SETATTR,
+  and the ACL/attr variants) are still stubbed: a crash in the MIDDLE of a DDL
+  statement whose namespace op is only in the ZIL (not yet in a txg) can leave a
+  catalog inconsistency (observed once as "pg_attribute catalog is missing ...").
+  This does NOT affect the durability of committed DATA (heap/index writes =
+  TX_WRITE, now replayed) or a crash after a checkpoint; HammerDB TPROC-C is a
+  fixed-schema OLTP workload (no concurrent DDL under load), so sync=standard is
+  sound for the benchmark.  Implementing the full namespace replay vector is the
+  bounded follow-on if concurrent-DDL crash consistency is ever required.
+
+================================================================================
+NO-REGRESSION
+================================================================================
+* conf_fork=0 CLEAN build PASSES (BUILD_EXIT=0): a from-scratch
+  `./scripts/build clean && ./scripts/build conf_fork=0 conf_zfs=openzfs fs=zfs
+  image=empty` compiled libc/signal.cc AND fs/vfs/vfs_dentry.cc cleanly and
+  linked loader.elf.  Both fork-stack fixes (ea7caf7b signal.cc, and dad7e075
+  vfs_dentry.cc from the RAID-Z work) are #if CONF_fork and compile to the plain
+  paths under conf_fork=0 (byte-identical).
+* patch 0029 (zfs_write_simple/zfs_space) is NOT fork-gated -- it is
+  single-process OpenZFS correctness (ZIL replay), correct for every config; it
+  git-applies cleanly to the pinned submodule (git apply --check = APPLY_OK) and
+  the conf_fork=1 image rebuilt with it.
+* The working conf_fork=1 pg18-fork RAID-Z image was rebuilt AFTER the
+  conf_fork=0 clean build and re-validated (parallel Gather -> correct count).
+
+================================================================================
+ARTIFACTS LEFT ON EC2 (NOT terminated -- benchmark reuses)
+================================================================================
+  $HOME/osv                                   branch @ 009234b4
+  $HOME/osv/build/last/{loader.elf,usr.img}   conf_fork=1 pg18-fork RAID-Z image
+                                              (parallel query works; ZIL replay
+                                               works; dentry-rename fix)
+  RAID-Z pool 'pgdata' on /dev/nvme5-8n1 (raidz1) + nvme0n1 (SLOG) + nvme3n1 (L2ARC)
+  modules/open_zfs/patches/0029-*.patch       the ZIL-replay patch
+  /tmp/{par*.sh,w2*.sh,finalval.sh,raidz-*.sh} repro/serve/validate scripts
+  bundles: /tmp/pg-parallel.bundle, /tmp/pg-raidz.bundle (also on floki)
+================================================================================

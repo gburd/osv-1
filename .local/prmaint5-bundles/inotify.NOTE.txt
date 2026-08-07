@@ -1,0 +1,14 @@
+PR #1440 - fs: implement inotify(2) (rebased + 7 copilot fixes)
+branch: pr/inotify
+bundle head: aef81d4b076f6ca9078f2b43adfa9010ee624808
+base (in master): 95f478cb708aa32928119cc27f57bebbbb8d5763 (REBASED onto current master)
+OLD remote head (for --force-with-lease): cdd466c62a7d606b25455d37437f3770ffd82509
+
+PUSH (re-sign the single commit, then force-with-lease):
+  git push --force-with-lease=pr/inotify:cdd466c62a7d606b25455d37437f3770ffd82509       gh-fork pr/inotify
+Notes:
+- REBASED onto current master (was stale on 1603209d; would silently revert merged work).
+- SQUASHED to ONE coherent commit (impl + copyright + 7 copilot fixes). Re-sign it.
+- 7 copilot fixes: comment, ENOENT/ENOTDIR, includes, poll_wake-only-when-queued,
+  shared move cookie, ENAMETOOLONG, per-run-unique test dir. Copyright -> Greg Burd.
+- Feature-only diff: inotify.cc, vfs_syscalls.cc, vfs.h, tests Makefile, tst-inotify.cc.

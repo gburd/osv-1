@@ -1,0 +1,45 @@
+sched: disperse threads faster in the load balancer
+
+The per-CPU load balancer was the only mechanism that spreads runnable
+threads across CPUs: thread::start() places a new thread on its creator's
+CPU and thread::wake() re-wakes a blocked thread on the CPU it last ran on,
+so neither disperses work on its own. Running load_balance() once every
+100ms and migrating a single thread per wakeup is far too slow for a
+workload that fans many threads out from one parent -- for example a server
+that forks or spawns a worker per connection. The workers pile onto the few
+CPUs they were started or woken on while the rest of the machine sits idle,
+and a one-thread-per-100ms drip cannot catch up under a high request rate.
+
+Measured on a 16-vCPU guest running a thread-per-connection server driven
+over the network: as client concurrency rose past the point where workers
+should have spread out, CPU utilization stayed low (the machine was ~90%
+idle) yet throughput regressed, because requests queued behind workers stuck
+on a handful of CPUs. A sampling profile confirmed the CPUs were idle, not
+contended, and a thread dump showed dozens of workers concentrated on a few
+CPUs with the majority idle.
+
+Run the balancer more often and, on each pass, keep migrating the
+most-migratable queued thread to the least-loaded CPU until this CPU is no
+longer meaningfully more loaded than that CPU. The load difference itself is
+the loop terminator, so a pass drains the whole imbalance -- which can be
+larger than the CPU count -- rather than a single thread of it. A generous
+per-pass bound (a multiple of the CPU count) remains only as a backstop
+against a pathological case where loads never converge; it is not the normal
+stopping condition. Because a thread we migrate is queued on its destination
+but not yet dequeued there, cpu::load() does not yet reflect it, so the pass
+tracks the migrations it has queued per CPU and selects the least-loaded CPU
+by effective load (current load plus pending arrivals); otherwise one CPU
+would keep looking least-loaded and absorb the whole imbalance. The
+migration mechanics are unchanged.
+
+The balancer interval is now configurable via CONF_sched_load_balance_ms
+(default 10ms) so it can be tuned per workload without recompiling the
+scheduler by hand.
+
+On the workload above this flattened the throughput regression: at high
+concurrency throughput improved by 50-70% and no longer collapsed, at a
+small (single-digit percent) cost at low concurrency from the extra
+migration traffic. Only the thread placement path is affected; the runqueue
+and runtime-accounting logic are untouched.
+
+Signed-off-by: Greg Burd <greg@burd.me>

@@ -1,0 +1,12 @@
+{
+  "block_size": 4096,
+  "extent_size": {
+    "value": 16384,
+    "shift": 12
+  },
+  "extent_count": 64,
+  "uuid": "7d4ba86e-4153-45ad-a2d5-d3b9719efe58",
+  "encrypted": false,
+  "database_read_version": 1,
+  "database_write_version": 1
+}

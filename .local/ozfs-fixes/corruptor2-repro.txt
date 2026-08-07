@@ -1,0 +1,154 @@
+CORRUPTOR #2 REPRO LOG (session start)
+Author: Greg Burd
+Box: osv-cor-a ec2-user@3.16.46.123, container osv-build, /b
+Branch: corruptor-fix @ 41c360da (base RELIABLE: #1 fix 14667a8d + mount patch 0031)
+Build: pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 -j96 (image dated Jul29 03:36)
+Pool: fresh single-file 8k lz4 pool restored from pgdata.clean.raw, -smp4 -m32G KVM
+
+=== RUN A: heavy repro (pgbench -i -s1000 then -c16 -j4 -T120) ===
+- Fresh pool restored, PG came up, "database system is ready to accept connections".
+- pgbench -i -s1000 STARTED. Checkpoint frenzy immediately (4-5s apart), data written OK
+  through ~03:48:42.
+- HANG: guest console FROZE at "checkpoint starting: wal" (03:48:42) with NO further
+  console output for >2 min wall clock. qemu still alive (etime 10min+).
+- PG: pg_isready -> "accepting connections" BUT `select count(*) from pgbench_accounts`
+  HANGS (>12s no reply). pgbench -i client still running, produced ZERO progress
+  (no "generating"/"vacuum" line) -> hung very early in the load.
+- No fault signature in console (no PANIC/Assert/VERIFY/page-fault/range_tree).
+- CLASSIFICATION of this face: LOST-WAKEUP HANG (prior-session signature F): postmaster
+  answers TCP accept but backends/checkpointer wedge; a wait/wake coherence stall under
+  sustained RW + checkpoint frenzy. This is ONE of corruptor #2's two faces; the other
+  is the range_tree VERIFY3U(start<end) wild-write (const end=0x804000000).
+
+NEXT: re-run with -gdb stub to capture the stuck-thread backtrace (who is waiting on
+what), and to arm the metadata canary + HW write-watchpoint for the wild-write face.
+
+=== RUN B (gdb stub): WILD-WRITE FACE CAPTURED ===
+On a 2nd fresh-pool run WITH -gdb, pgbench -i -s1000 reached 30% then the guest hit:
+  Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault: 38)  [CPU#2]
+This is a nested page fault. Faulting-thread (CPU#2) backtrace (loader.elf symbols):
+
+  #11 migrate_disable() include/osv/sched.hh:1647   <-- ROOT FAULT
+  #12 migration_lock_t::lock()
+  #13..14 WITH_LOCK(migration_lock)
+  #15 memory::page_pool::l2::alloc_page_batch() core/mempool.cc:1488
+  #16 memory::page_pool::l1::refill()           core/mempool.cc:1622
+  #17 memory::page_pool::l1::alloc_page()       core/mempool.cc:1407
+  #18 memory::untracked_alloc_page()            core/mempool.cc:1957
+  #19 memory::pool::add_page(malloc_pools+240)  core/mempool.cc:305   (64-byte pool)
+  #20 memory::pool::alloc()                     core/mempool.cc:264
+  #21 std_malloc(size=64, alignment=64)         core/mempool.cc:2096
+
+FAULTING INSTRUCTION (l1::refill()+231):
+  mov  %fs:0x0(%r13),%rax        ; rax = thread::current()  (s_current from %fs TLS)
+  addl $0x1,0xe8(%rax)           ; rax->_migration_lock_counter++   <-- WRITE FAULT
+  -> rax = 0x40 (GARBAGE thread pointer). fault addr = 0x40+0xe8 = 0x128, ec=2 (write).
+
+VICTIM ADDRESS localized: the per-CPU TLS/TCB slot holding s_current.
+  fs_base (CPU#2 current thread) = 0x60010036d980   <-- SUSPICIOUS: top nibble 0x6,
+     not the usual 0x4 identity range. Real OSv per-CPU/thread TCBs live at 0x4001....
+  s_current TLS offset = 0xfffffffffffff708
+  *(fs_base + s_current_off) = 0x60010036d088 -> holds 0x40 (should be a thread*).
+  preempt_counter (offset 0xfffffffffffff6c0) reads 7.
+  TLS block dump around 0x60010036d048 is full of STACK-LOOKING data: return
+  addresses (0x4036ed4d=std_malloc, 0x4036f4a9, 0x4036f568), saved rbps
+  (0x40010036d0b2, 0x40010036d118), and small ints (0x40,0x40,0x3f,0x44).
+  => The thread's TCB region (which holds s_current) has been OVERWRITTEN WITH STACK
+     DATA, or %fs_base itself was relocated by 0x20000000000 (0x4->0x6 top nibble).
+
+INTERPRETATION: a wild write clobbered the running thread's TCB/TLS (the s_current
+slot) so thread::current() returned 0x40. Same corruptor #2 wild-write class; here the
+victim is the per-CPU TLS/TCB rather than a range_tree btree node. The 0x40 poison ==
+the std_malloc size arg (64) recurring in the TLS dump suggests a stack/TCB overlap or
+a freed-then-reused page that backed both a stack and the TCB.
+NEXT: determine whether fs_base is corrupt vs TCB overwritten; find the true CPU#2
+thread + its stack/TCB page addresses; watchpoint the TCB page.
+
+=== ROOT CAUSE (RUN B continued): KERNEL STACK / TCB-TLS OVERLAP ===
+Decisive evidence (CPU#2 faulting thread, its OWN tcb = cpu2->arch._current_thread_kernel_tcb = 0x60010036d980 == 0x40010036d980 dual-map):
+- Faulting call stack rsp = 0x40010036cfa0, frames unwind through return addrs at
+  0x40010036cfd8 (alloc_page), 0x40010036d008 (pool::alloc), up past 0x40010036d250.
+  => the thread's KERNEL STACK occupies ~0x40010036cfa0 .. 0x40010036d250+ (grows down).
+- TLS block (kernel_tls_size=2368B) lives at 0x40010036d040 .. 0x40010036d980, with the
+  TCB immediately above at 0x40010036d980 (setup_tcb: p=aligned_alloc(64, tls+tcb),
+  _tcb=p+total_tls_size).
+- s_current TLS slot = _tcb + (-2296) = 0x40010036d088. The running stack wrote frame
+  data OVER 0x40010036d088 -> s_current became 0x40 -> thread::current()=0x40 ->
+  migrate_disable() faulted writing 0x40+0xe8=0x128.
+
+=> The thread's 64KB kernel stack (malloc(65536), CONF_threads_default_kernel_stack_size)
+   and its TCB/TLS block (aligned_alloc(64, ~2408)) were allocated OVERLAPPING: the TCB
+   block sits inside the TOP page of the stack region. The allocator handed the same
+   identity-heap memory to BOTH the stack malloc and the TCB aligned_alloc. Classic
+   page-level double-hand-out / UAF (the page-sized reclaim sibling of corruptor #1).
+   Both allocs route through fork_arena::kernel_heap_scope -> identity kernel heap under
+   CONF_fork. CLASSIFICATION: [fork-stack].
+
+CONFIRMED corruptor #2 root: identity-heap allocator returns overlapping regions for a
+thread's kernel stack and its TCB/TLS under sustained concurrent RW (heavy thread churn:
+PG backend fork/exit storm + ZFS taskq threads + checkpoint). Need to find WHICH alloc
+path double-hands (aligned_alloc vs malloc_large vs page pool) and fix the reclaim/reuse.
+
+=== RUN C (canary build): thread-creation alloc-overlap RULED OUT ===
+Added CONF_fork canary in thread::init() after init_stack(): asserts the new thread's
+kernel stack range does NOT overlap its TCB/TLS block. Rebuilt clean (BUILDRC=0).
+Heavy repro: pgbench -i -s1000 ran to ~93%+ (FASTER than RUN B's 30% crash -> timing
+shifted by recompile), then hit on PK build:
+  ERROR: could not read blocks 98304..98319 in file base/5/16399: EIO  (parallel worker)
+- CANARY DID NOT FIRE at any thread creation. => the stack/TCB overlap seen in RUN B is
+  NOT an allocation-time double-hand-out. It is a LATER wild write (a UAF during the
+  thread's life, or a wild pointer from another writer) that happened to land on that
+  thread's TLS s_current slot in RUN B.
+- This run the same wild-write class landed on a ZFS DATA block's ARC buffer instead
+  (EIO on blocks 98304..98319, reproducible: count(*) also EIOs there).
+CONCLUSION: corruptor #2 is a genuine WILD WRITE from some writer; the victim varies per
+run (RUN B: TLS s_current; RUN C: ARC data buffer; prior: range_tree btree node w/ const
+end=0x804000000; condvar wait-records; PTEs). Must catch the WRITER, not guard victims.
+PIVOT to the plan's stable lever: the range_tree btree-node victim with CONSTANT
+end=0x804000000 -> canary in the log-spacemap range_tree path to catch corruption early +
+name the stable victim address -> HW write-watchpoint -> writer PC.
+
+=== RUN D (pgcanary: page double-hand-out): NEGATIVE, but EIO reproduces reliably ===
+Added atomic per-frame page-ownership canary to alloc_page/free_page/malloc_large/
+free_large (CONF_fork). Rebuilt clean (BUILDRC=0). Heavy repro:
+- pgbench -i -s1000 loaded 100% of tuples (83s) then vacuum analyze FAILED:
+    ERROR: could not read blocks 1269087..1269087 in file base/5/16399: EIO
+  console flooded with "could not read blocks 75296..75309 ... EIO" (varying ranges).
+- pgcanary DID NOT FIRE (no double-alloc, no double-free). => the page LIFECYCLE is
+  correct; pages are not handed out twice nor freed twice.
+- No ZFS checksum error logged; no kernel assert; guest went idle (0% CPU) after EIO
+  storm (a hang/stall follows the EIO).
+CONCLUSION: corruptor #2 is a stale-pointer WILD WRITE into a page that was correctly
+freed+reallocated -- a use-after-free the ownership-canary cannot see (the offending
+write is not an alloc/free call). Matches the report's prime hypothesis: an in-flight
+zio/abd (or cross-AS reference) keeps a pointer into a page that free_page recycles,
+then writes through it = page-level UAF, sibling of corruptor #1 on the page path.
+NEXT: poison-on-free / verify-on-alloc canary to catch writes to freed pages -> the page
+frame + the alloc backtrace that discovers the poison damage names the victim; a HW
+watchpoint on that freed page then names the writer.
+
+=== RUN E (poison canary): FALSE POSITIVE, reverted ===
+poison-on-free/verify-on-alloc canary aborted during the IMAGE BUILD itself
+(loader boot, alloc_page from mmu::uninitialized_anonymous_page_provider::map <-
+map_file <- dlopen). ROOT: alloc_page() pages are consumed by BOTH malloc AND the
+mmu page-mapping path; mmu maps/unmaps pages via alloc_page/free_page but ALSO via
+free_page_range and other paths the canary didn't fully cover -> stale poison bits ->
+false UAF. Reverted. Rebuilt clean image (BUILDRC=0, 66MB, boots).
+LESSON: any page-ownership canary must cover EVERY page consumer (mmu incl.), not just
+malloc. The mmu page path is itself a heavy consumer under CONF_fork (COW/map_anon).
+
+=== VICTIM CLASS fully established ===
+All corruptor-#2 victims are 4096B page-pool pages (alloc_page/free_page):
+  - ABD scatter chunks: abd_chunk_cache = kmem_cache_create("abd_chunk", PAGE_SIZE, 0)
+    -> malloc(4096) -> alloc_page.  EIO = zio_checksum catching a clobbered read ABD.
+  - range_tree btree leaves: BTREE_LEAF_SIZE=4096, kmem_cache_alloc -> malloc(4096).
+  - thread TCB/TLS block (aligned_alloc, single page) and 64KB kernel stacks
+    (malloc_large).
+Writer = a STALE pointer into a page that free_page correctly recycled (an in-flight
+zio/abd, or a cross-AS/COW reference under fork). The #1 fix hardened the SMALL-OBJECT
+pool -> page_pool boundary (MPSC garbage links). #2 is the DIRECT page path
+(objects >1024B: abd chunk / btree leaf / TCB / stack) which bypasses that boundary.
+NEXT (RUN F): test the report's prime hypothesis cheaply -- bounded per-CPU page
+QUARANTINE in free_page (CONF_fork): hold freed pages briefly before recycling so an
+in-flight stale write lands on a not-yet-reused page. If the corruptor vanishes ->
+confirms page-level UAF + gives a deferred-reclaim fix (the page-path analog of #1).

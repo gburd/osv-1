@@ -1,0 +1,11 @@
+config	hugepages	workload	concurrency	metric	value	unit	status	notes
+OSv-KVM	off	HammerDB-TPROC-C-schema-build	32loaders	NOPM	NA	nopm	CRASH	guest crash sbcompress page_fault IF-disabled ~2min
+OSv-KVM	off	HammerDB-TPROC-C-schema-build	8loaders	NOPM	NA	nopm	CRASH	guest crash taskqueue memory::pool::free preemptable
+OSv-KVM	off	HammerDB-TPROC-C-schema-build	1loader	NOPM	NA	nopm	CRASH	SPL PANIC arc.c:7068 arc_write_done refcount 0>0
+OSv-KVM	off	pgbench-TPCB	1	tps	353.49	tps	OK	0 failed, 10546 tx, guest alive, cross-instance
+OSv-KVM	off	pgbench-TPCB	4	tps	1058.74	tps	OK	0 failed, 31067 tx, guest alive
+OSv-KVM	off	pgbench-TPCB	8	tps	1598.87	tps	OK	0 failed, 45880 tx, guest alive
+OSv-KVM	off	pgbench-TPCB	16	tps	2179.69	tps	OK	0 failed, 59513 tx, guest alive
+OSv-KVM	off	pgbench-TPCB	32	tps	2579.01	tps	OK	0 failed, 63479 tx, guest alive
+OSv-KVM	off	multi-backend-catalog-read	20concurrent	success	20	backends	OK	pg_authid+pg_statistic+pg_class concurrent, 0 zero-page fail
+OSv-KVM	off	multi-backend-catalog-read	32concurrent-tpcc	success	32	backends	OK	FC catalog-zero-page bug NOT reproduced under KVM

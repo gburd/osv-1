@@ -1,0 +1,155 @@
+PR SWEEP REPORT - gburd open PRs on cloudius-systems/osv
+Sweep type: read reviewer threads (issue comments + inline + reviews + GraphQL
+unresolved-thread state) -> reply + small fix. NO builds (EC2 agent owns that).
+All PR branches push from gh-fork (github.com/gburd/osv-1). Rebased-and-pushed
+branches were verified feature-only vs upstream/master (stale-base guard, rule 1b).
+
+Legend: FIXED+REPLIED = code changed, pushed, reply posted, needs EC2 build.
+        REPLIED = reply is last word, no code change needed.
+        CLEAN = no unaddressed reviewer comment; last word mine; awaiting reviewer.
+        APPROVED = awaiting maintainer merge.
+        SKIPPED = out of scope per instructions.
+
+=================================================================================
+PRs WITH UNADDRESSED REVIEWER ITEMS -> FIXED + REPLIED THIS SWEEP
+(All had Copilot bot review comments dated 2026-07-25 that postdated the branch
+tip and had never been replied to. Copilot counts as a reviewer.)
+=================================================================================
+
+PR#1432 mremap(2)                    FIXED+REPLIED  new head 3f8152e
+  8 Copilot comments, all addressed:
+   - removed "ponytail" word -> TODO
+   - <errno.h> added to test
+   - old_size==0 now EINVAL
+   - shrink-path munmap() return now checked
+   - file offset corrected when old_addr starts mid-VMA (real correctness bug)
+   - MAP_PRIVATE writable file move now EINVAL instead of silent COW data loss
+   - __mremap exported in both symbol files
+  Rebased onto master, squashed to one commit, signed (G), pushed force-with-lease.
+  Reply: issuecomment-5116413512.
+
+PR#1433 libaio                       FIXED+REPLIED  new head 41d79a2
+  8 Copilot comments, addressed:
+   - <unistd.h> added
+   - io_setup rejects nr_events<=0 (EINVAL) and null ctxp (EFAULT)
+   - io_submit validates ios array + entries (EFAULT); handles thread-make failure
+   - io_getevents validates events (EFAULT) + timespec (EINVAL)
+   - io_destroy UAF vs concurrent io_getevents FIXED via a waiters counter
+     (the serious one: parked getevents thread no longer racing a freed ctx->cv)
+   - test-coverage note (RESFD/FSYNC) acknowledged, deferred to when buildable
+  Rebased, squashed to one commit, signed, pushed. Reply: issuecomment-5116413718.
+
+PR#1435 setrlimit/getrlimit          FIXED+REPLIED  new head 83bd225
+  2 Copilot comments, both addressed:
+   - test now defines _GNU_SOURCE before <sys/resource.h> (real build blocker:
+     prlimit is only declared under _GNU_SOURCE)
+   - null rlim pointer now EFAULT (was EINVAL), matching Linux/shmctl; test asserts
+  Rebased, squashed, signed, pushed. Reply: issuecomment-5116413944.
+
+PR#1436 close_range(2)               FIXED+REPLIED  new head 7c95715
+  2 Copilot comments:
+   - test false-positive fixed (capture fcntl return, assert !=-1, then check bit)
+   - flags-in-public-header: replied explaining the local-define rationale (no
+     external consumer; UNSHARE is a no-op on a unikernel), offered to move to
+     include/api if maintainer prefers. No code change on that point.
+  Rebased, squashed, signed, pushed. Reply: issuecomment-5116414150.
+
+PR#1450 validate device completion ids  FIXED+REPLIED  new head 68078e5
+  3 Copilot comments (security-relevant), all addressed:
+   - get_buf_gc() now bounds-checks elem._id AND the _desc[]._next chain (the OOB
+     the original guard missed in the GC path)
+   - get_buf_elem() now advances past a bogus id instead of returning nullptr,
+     which had left the used-ring head unadvanced -> permanent queue stall DoS
+   - NVMe completion path now null-checks the lazily-allocated _pending_bios[row]
+     (in-range-but-unallocated row would deref null)
+  Rebased, squashed, signed, pushed. Reply: issuecomment-5116414397.
+
+PR#1451 validate ROFS on-disk metadata  FIXED+REPLIED  new head 737322e
+  4 Copilot comments (security-relevant), all addressed:
+   - in_bounds() upper-bound guard (q past data_end wrapped to huge size_t)
+   - loops use uint64_t counters matching on-disk uint64_t counts (no index wrap)
+   - single fail() cleanup + calloc arrays: mount-failure no longer leaks
+     sb/rofs/dir_entries/symlinks/filenames
+   - readdir/lookup detect uint64_t wrap on data_offset+index before indexing
+  Rebased, squashed, signed, pushed. Reply: issuecomment-5116414556.
+
+PR#1431 libext fsync + page-cache bridge  FIXED+REPLIED  new head a17fcf7
+  Round of 2026-07-25 comments (wkozaczuk + Copilot). Prior-tip already had the
+  page-leak fix (void->bool forward decl + free-on-race) and the "ponytail"
+  removal. Remaining unaddressed item this sweep:
+   - Copilot: tst-ext4-rw hard-asserts /data/readme.dat and is in the default
+     tests:= list -> would abort a default run with no ext4 disk. FIXED: the test
+     now SKIPs (returns 0) when the prerequisite file is absent.
+   - The map_read_cached_page ownership comment already reflects the caller-keeps-
+     ownership-on-race contract (verified), so no change; noted in reply.
+  Rebased onto master, folded test fix into the bridge commit via autosquash
+  (2 clean signed commits), pushed force-with-lease. Reply: issuecomment-5116414713.
+
+=================================================================================
+PRs WITH REVIEWER HISTORY BUT LAST WORD ALREADY MINE -> CLEAN / REPLIED
+=================================================================================
+
+PR#1425 splice/vmsplice/tee   CHANGES_REQUESTED   REPLIED (clean)
+  nyh's last review 2026-07-15; my detailed point-by-point reply 2026-07-24T10:16.
+  Verified: the promised comment tightenings (fd-type/offset Limitation paragraph,
+  vmsplice direction/GIFT comment) ARE present in the pushed tip (a7fa5d4). All
+  unresolved threads are either outdated or answered. No newer reviewer comment.
+  ACTION: none. Awaiting nyh re-review.
+
+PR#1429 preadv2/pwritev2/renameat2  CHANGES_REQUESTED  REPLIED (clean)
+  nyh's last review 2026-07-14T18:16 (the pthread.cc merge-accident); my
+  point-by-point reply 2026-07-24T10:18 confirms it's removed and covers every
+  other thread (RWF_NOWAIT EOPNOTSUPP, RWF_APPEND EOPNOTSUPP, renameat2 flag
+  simplification, fs_flags.h header, copyright). Only non-outdated unresolved
+  thread is nyh's api/osv-vs-api/uio.h placement musing, which my reply answers
+  (offered to move). No newer reviewer comment. ACTION: none. Awaiting re-review.
+
+PR#1439 signalfd(2)           CHANGES_REQUESTED   REPLIED (clean)
+  nyh's last review 2026-07-15T12:54; my reply 2026-07-24T10:15 covers the
+  extern "C" removal and the single-consumer (return-true-on-first-match) delivery
+  question, plus all Copilot items (includes, SIGKILL/SIGSTOP EINVAL, read()
+  peek-then-pop). The one non-outdated Copilot thread (broadcast delivery) is
+  exactly what the current code avoids. No newer reviewer comment.
+  ACTION: none. Awaiting re-review.
+
+PR#1434 membarrier(2)         APPROVED
+  nyh APPROVED 2026-07-15; my 2026-07-21 reply did the requested squash + conflict
+  rebase. No newer reviewer comment. ACTION: none. Awaiting maintainer merge.
+
+=================================================================================
+PRs WITH NO REVIEWER ACTIVITY -> CLEAN, last word mine, awaiting reviewer
+=================================================================================
+PR#1437 numa discover SRAT/SLIT       CLEAN - no non-gburd comments
+PR#1438 numa getcpu/get_mempolicy     CLEAN - no non-gburd comments
+PR#1440 inotify(2)                    CLEAN - no non-gburd comments
+PR#1441 numa alloc_page_on_node       CLEAN - no non-gburd comments
+PR#1442 IPv6 forward-port             CLEAN - no non-gburd comments
+PR#1448 vfs reject oversized iovcnt   CLEAN - no non-gburd comments
+PR#1449 ext4 readlink/readdir overflow CLEAN - no non-gburd comments
+PR#1444 virtio-net IPv6 offload (stacked draft) CLEAN - no non-gburd comments
+PR#1445 numa per-node L2 pools (stacked draft)  CLEAN - no non-gburd comments
+PR#1447 ext4 read-ahead (stacked draft)         CLEAN - no non-gburd comments
+
+=================================================================================
+NOT TOUCHED (per instructions)
+=================================================================================
+PR#1423 OpenZFS               SKIPPED (actively managed; build agent validating)
+PR#1455/1456/1457 fork trilogy SKIPPED (active)
+PR#1458 pg-fork-zfs tracking   SKIPPED (tracking draft)
+PR#1459 openzfs aarch64        SKIPPED (follow-on draft, not in scope list)
+PR#1424 Crucible              SKIPPED (blocked draft)
+
+=================================================================================
+STALE-BASE GUARD (rule 1b) - all 7 pushed branches verified
+=================================================================================
+For each of pr/mremap, pr/libaio, pr/setrlimit, pr/close-range,
+pr/sec-driver-backend, pr/sec-rofs, pr/ext4-fsync-cache:
+  git diff upstream/master..<branch> -- linux.cc libc/signal.cc libc/pthread.cc
+     | grep -c '^-.*osv_sigtimedwait'   == 0   (verified for all 7)
+  two-dot diff is feature-only after rebase onto upstream/master (cb8c720).
+Each pushed with --force-with-lease from gh-fork. No bare --force. No
+delete+recreate of any remote branch. All commits signed (verify shows G).
+
+QUEUED FOR EC2: see /tmp/pr-sweep-todo.txt (7 branches need a build; the
+libaio io_destroy/io_getevents concurrency and the virtio get_buf_elem
+drain-loop restructure are the two highest-risk items to exercise under load).

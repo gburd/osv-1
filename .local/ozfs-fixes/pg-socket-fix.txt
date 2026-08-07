@@ -1,0 +1,266 @@
+================================================================================
+[W-socket] PostgreSQL-on-OSv fork socket/inpcb-lifetime wall -- FIXED
+================================================================================
+Date: 2026-07-24  Host: floki (local, KVM)  Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena
+Branch:   integ/pg-fork-arena   Base HEAD: d8f76829a (W-branch file_vma fix in)
+Commit:   0a874234f  "fork: give the child its own reference on inherited fds"
+Author:   Greg Burd
+Method:   reproduce with a new regression test on HEAD -> gdb-isolate the fd
+          refcount behavior -> minimal correct fork fd-inheritance fix ->
+          re-run the full fork + non-fork socket suites -> boot stock PG18.4
+          and measure how far past the socket wall it now advances.
+
+================================================================================
+THE WALL (as handed off, now reproduced deterministically)
+================================================================================
+  Assertion failed: inp->inp_socket == 0L
+    (bsd/sys/netinet/in_pcb.cc: in_pcbrele_locked:1197)
+  bt: in_pcbrele_locked <- (netstack) <- async::async_worker::run()
+
+Reproduced on HEAD d8f76829a with the new tests/tst-fork-socket.so:
+
+  === tst-fork-socket ===
+  parent listening on 127.0.0.1:10470 (fd=3)
+  Assertion failed: inp->inp_socket == 0L (... in_pcbrele_locked: 1197)
+  [backtrace]  __assert_fail <- in_pcbrele_locked+474 <- (netstack)
+               <- async::async_worker::run()+485 <- thread_main_c
+
+Fires the instant the fork child close()s the inherited listen fd.
+
+================================================================================
+THE gdb / source FINDING (why inp_socket != NULL at rele; child vs parent)
+================================================================================
+Root cause is NOT in the BSD stack -- it is fork's fd inheritance over OSv's
+single global fd table.  Traced end-to-end in the code:
+
+  * OSv has ONE GLOBAL fd table: fs/vfs/kern_descrip.cc `rcu_ptr<file> gfdt[]`.
+    fork() (libc/process/fork.cc) clones the address space but does NOT dup the
+    fd table -- parent and child genuinely SHARE the gfdt slots.
+
+  * A listen socket is created once (bsd/sys/kern/uipc_syscalls.cc sys_socket):
+    make_file<socket_file>() -> ONE `file` with f_count==1, wrapping ONE
+    `socket` with so_count==1.  fdalloc installs it in gfdt[fd].
+
+  * close(fd) funnels through fs/vfs/main.cc close() -> fdclose(fd)
+    (fs/vfs/kern_descrip.cc):
+        gfdt[fd].assign(nullptr);   // clears the slot for EVERYONE (1 table)
+        fdrop(fp);                  // f_count 1->0 -> fp->close()
+    socket_file::close() -> soclose(so) (bsd/sys/kern/uipc_socket.cc:605):
+        so->so_state |= SS_NOFDREF; so->fp = NULL; sorele(so);
+    -> the socket is torn down and its inpcb detached/freed.
+
+  * So when the CHILD close()s the listen fd it inherited, that single close
+    (a) nulls the shared gfdt slot the PARENT is still accept()ing on, and
+    (b) drops the only file reference to zero, running the FULL socket/inpcb
+    teardown.  The parent's still-open socket is destroyed out from under it;
+    the inpcb reaches refcount 0 with inp_socket still set (the detach ordering
+    that soclose/sofree/in_pcbdetach normally enforces is violated because the
+    socket is being torn down while the parent still logically holds it), and
+    in_pcbrele_locked's KASSERT(inp->inp_socket == NULL) fires.
+
+  It is the CHILD's close() that triggers it (the child running
+  ClosePostmasterPorts in PG).  The assert lands on the async_worker thread
+  because the final TCP inpcb free is deferred to the net async worker, but the
+  premature teardown was initiated by the child's close.
+
+Confirmed the fd model in source: fork.cc takes NO reference on inherited fds
+(fhold), so the child's inherited fd shares the parent's single f_count==1.
+That missing fork fd-reference is the bug.
+
+================================================================================
+THE FIX (direction (a): fork fd-inheritance; non-fork path unchanged; CONF_fork)
+================================================================================
+A POSIX child gets its OWN fd table, so its close() drops only that process's
+reference and never touches the parent's fds.  We approximate that over OSv's
+single shared table by giving the child its own reference on every inherited
+open file and tracking which fds it inherited, keyed by the child's
+address_space (which uniquely identifies a fork child):
+
+  (1) fs/vfs/kern_descrip.cc  [all #if CONF_fork]
+      - fork_snapshot_open_fds(emit, ctx): under gfdt_lock, walk gfdt[], fhold()
+        each open file, emit (fd, file*).  Gives fork() a consistent snapshot +
+        one reference per open fd.
+      - fdclose(fd): consult the fork hook FIRST --
+            if (fork_child_close_inherited_fd(fd)) return 0;
+        so a fork child closing an inherited fd never reaches the gfdt-clear +
+        teardown path.  Byte-identical otherwise.
+
+  (2) libc/process/fork.cc  [all in the existing CONF_fork TU; process/fork.o is
+      only built when conf_fork=1]
+      - inherit_open_fds(child_as): called right after clone_address_space();
+        snapshots + fholds the open fds and stores {fd -> file*} in
+        g_inherited_fds[child_as], on the identity kernel heap.
+      - fork_child_close_inherited_fd(fd): if current_address_space() is a fork
+        child AS and fd is in its inherited set, erase it and fdrop() ONLY the
+        child's inherited reference; leave gfdt[fd] and the parent's reference
+        intact; return true (handled).  Returns false (normal close) for the
+        top-level app/kernel and for fds the child opened itself after fork.
+      - release_inherited_fds(child_as): in the child cleanup closure (run by
+        the reaper), fdrop() any inherited refs the child never explicitly
+        closed, returning the parent's fd refcounts to just the parent's own.
+
+  Discriminator: current_address_space() != kernel_address_space().  The
+  top-level (non-fork) application and the kernel are entirely unaffected -- the
+  hook returns false and the original fdclose() runs verbatim.  All new code is
+  #if CONF_fork.  Bookkeeping lives on the identity kernel heap
+  (fork_arena::kernel_heap_scope), like the other fork-inherited kernel
+  infrastructure, so it is never COW-arena memory (freeing an identity-heap
+  unordered_map node from child context is safe -- free dispatches by address).
+
+  NOT changed: soclose / in_pcbdetach / in_pcbfree / the socket_file lifetime,
+  and the non-fork close/socket path.
+
+================================================================================
+THE REGRESSION TEST
+================================================================================
+tests/tst-fork-socket.cc (registered in modules/tests/Makefile).  Author Greg Burd.
+  - parent opens a listening TCP socket on 127.0.0.1 (ephemeral port),
+  - fork()s; the CHILD close()s its inherited listen fd and _exit(0)s
+    (mimicking PostgreSQL's ClosePostmasterPorts),
+  - parent waitpid()s the child (so its fd-ref teardown definitely ran),
+  - parent then accept()s a REAL loopback connection (driven by a connector
+    thread) on the SAME listen fd and reads a byte.
+  On HEAD d8f76829a: reproduces `Assertion failed: inp->inp_socket == 0L
+  (in_pcbrele_locked:1197)` the instant the child closes.  With the fix: the
+  parent's socket survives, accept() succeeds, reads 0x5a -> PASS.
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+Build: CONF_fork=y, fs=rofs, image=tests, -j$(nproc).
+
+  tst-fork-socket        PASS x3 (was reproducing the inp_socket assert on HEAD)
+  tst-fork               done: 0 failures  (run 5x, "0 failures" every run; 10/10)
+  tst-fork-cow           done: 0 failures  (6/6)
+  tst-fork-deep          done: 0 failures  (3/3)
+  tst-execve             done: 0 failures  (3/3)
+  tst-pgfork             done: 0 failures  (9/9)
+  tst-fork-child-mmap    PASS
+  tst-fork-file-mmap     PASS
+  tst-fork-preempt (-c 2) done: 0 failures
+
+Non-fork network/socket tests (conf_fork=y image):
+  tst-af-local           all PASS
+  tst-tcp-listen         *** No errors detected
+  tst-tcp-cork           SUMMARY: 3 tests, 0 failures
+  tst-tcp-siocoutq       SUMMARY: 1 tests, 0 failures
+  misc-tcp-close-without-reading / misc-sockets: no assert/abort (servers idle)
+
+conf_fork=0 sanity:
+  ./scripts/build -j conf_fork=0 fs=rofs image=tests -> rc=0 (clean; every new
+  code path is #if CONF_fork).
+  conf_fork=0 socket tests: tst-tcp-listen *** No errors detected;
+  tst-af-local SUMMARY: 30 tests, 0 failures  -> non-fork socket path unchanged.
+
+PG image rebuilt:
+  ./scripts/build -j conf_fork=1 fs=ramfs image=pg18-fork -> rc=0
+
+================================================================================
+THE PAYOFF -- PostgreSQL status (HONEST)
+================================================================================
+Build: CONF_fork=y, fs=ramfs, image=pg18-fork.
+Boot:  qemu -enable-kvm -cpu host -m 4G -smp 1 -nographic \
+         -kernel build/last/loader.elf \
+         -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+         -drive .../usr.img,if=virtio,cache=none \
+         -netdev user,hostfwd=tcp::5432-:5432 -device virtio-net-pci
+
+THE SOCKET-CLOSE WALL IS GONE.  Before the fix the forked child's
+ClosePostmasterPorts close() hit `in_pcbrele_locked: inp_socket != NULL` within
+a second of "listening".  After the fix the child close()s its inherited listen
+socket with NO assert, the shared socket survives, and PG advances through:
+
+  LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+  LOG:  listening on IPv4 address "0.0.0.0", port 5432
+  LOG:  database system was shut down at 2026-07-23 20:18:17 UTC
+  (with log_min_messages=debug1, the STARTUP process -- a fork child that closed
+   its inherited socket -- runs REAL recovery:)
+  DEBUG: checkpoint record is at 0/1AF0F38
+  DEBUG: redo record is at 0/1AF0F38; shutdown true
+  DEBUG: next transaction ID: 754; next OID: 16388
+  DEBUG: next MultiXactId: 1; next MultiXactOffset: 0
+  DEBUG: starting up replication slots
+  DEBUG: MultiXactId wrap limit is 2147483648, limited by database with OID 1
+  DEBUG: MultiXact member stop limit is now 4294914944 based on MultiXact 1
+
+The listen socket stays open and accepting: a raw TCP connect to 127.0.0.1:5432
+from inside the container SUCCEEDS ("port open") -- proving the socket the child
+closed was NOT torn down.
+
+psql rows: NOT YET.  PG does NOT reach "database system is ready to accept
+connections"; NO psql query was served; NO real rows produced.  I do NOT claim
+PG works.  (No psql client is installed in arena-dev; the milestone is not
+blocked on that -- PG is not yet ready.)  The socket wall is unambiguously
+eliminated and PG advances materially further (past listen + past the child's
+socket close + through startup-process crash recovery).
+
+THE NEXT WALL (precisely symbolized, DISTINCT from W-socket):
+  A fork/signal-reaper hang, NOT a crash.  After the startup process finishes
+  recovery, the POSTMASTER never transitions to PM_RUN.  gdb on the hung image
+  (single CPU idle -> all threads waiting) shows:
+    - postmaster (thread id=26, AS0):
+        epoll_file::wait <- epoll_wait(timeout_ms=60000) <- [PG ServerLoop
+        WaitEventSetWait]  -- parked in the postmaster server loop.
+    - two fork children (id=27, id=28), each on its own private address space
+      (pt_root_phys 0x939c000 / 0x1002f0000), both status=waiting, parked in
+      sched::thread::switch_to (blocked in the scheduler).
+  The postmaster is waiting to be woken (SIGCHLD from the exiting startup
+  process + latch) so its reaper can launch checkpointer/bgwriter/walwriter and
+  set PM_RUN.  It never wakes -- even after the 60 s epoll timeout elapses PG
+  does not advance.  The startup child does not appear to exit/reap across
+  OSv's fork; the cross-"process" latch/SIGCHLD wakeup that PG's postmaster
+  relies on to sequence the auxiliary processes is not being delivered/handled.
+  This is a fork signal/waitpid-reaper + latch subsystem, entirely separate from
+  the socket/inpcb fd-lifetime bug fixed here.
+
+  (Note: log_min_messages=debug5 additionally trips the KNOWN
+   console-write-in-child artifact -- `Assertion failed: exception_depth <= 1
+   (reschedule_from_interrupt:288)` via console::LineDiscipline::write in a
+   forked child, exactly as the W-branch report warned.  That is an
+   instrumentation artifact of verbose child logging, not the hang; with default
+   log level there is no such assert, just the postmaster epoll_wait hang.)
+
+================================================================================
+RELEVANCE TO SHIPPING PRs
+================================================================================
+The fix is ARENA-INDEPENDENT.  It uses only fhold/fdrop over the existing
+single global gfdt and the fork address_space as the process discriminator --
+no COW-arena assumptions (the identity-heap placement of the bookkeeping is the
+same "inherited kernel infrastructure off the COW arena" discipline the arena
+work already uses, but the CORRECTNESS of the fd-reference model does not depend
+on the arena).  It belongs in the fork fd-inheritance PR:
+
+  * PR #1455 (fork fd inheritance) -- YES, this is exactly that: fork must give
+    the child an independent reference on each inherited open file so the
+    child's close()/exit drops only the child's ref.  Over OSv's single global
+    fd table this is the correct minimal shape (per-child inherited-fd set keyed
+    by address space).  Shippable as-is; #if CONF_fork; non-fork path unchanged.
+  * PR #1456 (per-child COW address space) -- orthogonal; this fix does not
+    depend on #1456 and #1456 does not depend on this, but they compose: a
+    per-child AS already provides the address_space identity this fix uses as
+    the fork-child discriminator.
+
+A truly POSIX-clean version would give each fork child its OWN fd table
+(making close() naturally process-local); that is a larger change to OSv's
+single-gfdt model and is NOT required to clear this wall.  The per-inherited-fd
+approach here is the minimal correct fix.  (ponytail: per-inherited-fd set over
+the single global gfdt; upgrade to a real per-process fd table if/when OSv wants
+full POSIX fd-table semantics under fork.)
+
+================================================================================
+FILES CHANGED (committed on integ/pg-fork-arena, author Greg Burd, 0a874234f)
+================================================================================
+  fs/vfs/kern_descrip.cc   fork_snapshot_open_fds(); fdclose() fork-child hook
+                           (both #if CONF_fork)
+  libc/process/fork.cc     inherit_open_fds()/release_inherited_fds()/
+                           fork_child_close_inherited_fd(); g_inherited_fds
+                           registry keyed by child address_space; snapshot call
+                           after clone_address_space; release in child cleanup
+  modules/tests/Makefile   register tst-fork-socket.so
+  tests/tst-fork-socket.cc new regression test (author Greg Burd)
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+        (tip 0a874234f, verified via `git bundle list-heads`)
+arena-dev: left UP.  On floki (no EC2).
+================================================================================

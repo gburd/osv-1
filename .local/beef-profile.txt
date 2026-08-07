@@ -1,0 +1,10 @@
+BEEF account (current, expires Sun Aug 09 20:35 UTC 2026 = 7 days):
+  AWS_PROFILE=beef  account 840154381708  region us-east-2
+  keypair: osv-ec2 (~/.ssh/osv-ec2.pem, imported)
+  SG: sg-0b8d1d93e61ddd4f5 (osv-bench: SSH from egress /32 ONLY + intra-SG only; NO 0.0.0.0/0)
+  VPC: vpc-0ce4dc0c0985896f7 (default)
+  subnets: 2b subnet-0b076883cbad2cccf / 2a subnet-0dbc3dc75358df5d2 / 2c subnet-027f827271dd16ed9
+  AMI: ami-028ba4d4ccb4b7b72 (AL2023 x86_64 k6.18)
+  vCPU quota: requested 192 (PENDING, req d9271d30...); default was 5. Spot vCPU=5, gp3=50TiB.
+  SECURITY: org enforces S3 block-public-access account-wide (my put was SCP-denied but already ON).
+    NEVER 0.0.0.0/0 SG rules; no public S3/AMI/snapshot (cracker was CLOSED for public access).

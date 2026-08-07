@@ -1,0 +1,111 @@
+MAINTENANCE SWEEP 2 - floki /home/gburd/ws/osv
+Date: 2026-07-30   PR #1423 tip: ef3ecc34 (branch pr/openzfs-draft, OPEN)
+
+========================================================================
+JOB A: wkozaczuk inline review threads on PR #1423
+========================================================================
+GraphQL check showed 6 of 11 threads were ALREADY resolved (taskq x3,
+panic, kstat, pagecache). Only 5 were still UNRESOLVED and had zero inline
+replies. Posted one concise inline reply on each of the 5, verified against
+the tip first. Then posted one top-level summary comment.
+
+Replied inline (comment id -> reply id):
+  1. tst-zfs-encryption.cc  3648796654 -> reply 3683215090
+     Answer: openzfs-only. modules/tests/Makefile gates them in
+     $(zfs-openzfs-only-tests) + $(zfs-user-libs) under
+     ifeq($(conf_zfs),openzfs) for both build and manifest. On bsd they are
+     not built/run, so the reviewer's "SKIP: cannot load libzfs.so" is fixed.
+     VERIFIED in tip: modules/tests/Makefile lines 111-135, 196-199, 386.
+
+  2. zfs_builder_bootfs.manifest.skel  3648763514 -> reply 3683216466
+     Answer: one skel, mode-selected in top-level Makefile (lines 2258-2263):
+     openzfs copies verbatim; bsd filters out libzutil/libshare/libzfs_core/
+     libtpool with grep -vE (bsd does not build them). Builder drains/exports
+     via tools/mount/umount.so (common to both). No second file needed.
+     VERIFIED in tip: Makefile 2258-2263, skel contents.
+
+  3. modules/lua/Makefile  3648757578 -> reply 3683216473
+     Answer: out of scope, reverted in commit bcab1b21f ("lua: revert
+     system-lua-fallback convenience"). Gone from tip.
+     VERIFIED: git log modules/lua/Makefile shows bcab1b21f revert; the
+     "OR use system lua"/Nix lines are absent from tip.
+
+  4. fs/vfs/main.cc:2614  3648721095 -> reply 3683218224
+     Answer: mnt_opts "osv/zfs" -> "osv"; mode-agnostic (same mount_fs path
+     for bsd and openzfs), passed to sys_mount as ZFS opts only, not parsed
+     as a path, no tools changed, BSD ZFS unaffected. Part of base commit
+     4a53eef67.
+     VERIFIED in tip: fs/vfs/main.cc ~2613 shows m->mnt_opts = "osv".
+
+  5. bsd/porting/shrinker.cc  3648642543 -> reply 3683218225
+     Answer: arc_shrinker instantiated ONCE, not twice. bsd_shrinker_init()
+     runs at loader startup before libsolaris.so loads, so arc_lowmem_fun is
+     still null and no eventhandler entry matches it -> that branch is never
+     taken. register_shrinker_arc_funs() (called by libsolaris.so once loaded)
+     sets the fn ptrs and creates the single arc_shrinker.
+     VERIFIED in tip: shrinker.cc 54-55 (ptrs default null), 88-114
+     (init matches on arc_lowmem_fun), 119-128 (register creates it).
+
+Top-level summary comment: issuecomment-5131675230.
+
+NEEDING A REAL CODE CHANGE (todo): NONE.
+  All 5 were explanation-only; every claim verified true against tip
+  ef3ecc34. /tmp/pr1423-threads-todo.txt intentionally NOT created (empty).
+
+Already-resolved threads (left untouched, no reply added to avoid noise):
+  3648651958, 3648656492, 3648662514 (taskq) ; 3648677154 (panic) ;
+  3648697321 (kstat) ; 3648712635 (pagecache).
+
+========================================================================
+JOB B: this-session cruft
+========================================================================
+NOTE: gio trash cannot trash /tmp (tmpfs / "internal mount"). Fell back to
+      rm -f (task-permitted) for /tmp bundles AFTER confirming each banked.
+      No rm -rf used. No EC2 boxes touched. .local/*.md and existing
+      .local/ozfs-fixes contents left intact (only added new files).
+
+B.1 /tmp bundles (10) - all removed after banking:
+  9 byte-identical to .local/ozfs-fixes/ copy -> removed:
+    bench, fork-arena-fix, fork-arena-step1, fork-fix-sync, ozfs-mount-fix,
+    pg-fork-arena-full, pr1423-reviewfix, pr1456-filevma, stale-linker-dedup
+  1 name-collision but DIFFERENT content:
+    corruptor-fix.bundle - /tmp copy (24MB, ref corruptor-fix, HEAD c8f9c82)
+    was the REAL one; the banked .local/corruptor-fix.bundle (19815 B) is
+    actually a mislabeled duplicate of fork-fix-sync (HEAD 14667a8).
+    -> preserved the real /tmp copy as .local/ozfs-fixes/corruptor-fix-full.bundle
+       (did NOT clobber the existing bank file), then removed /tmp copy.
+  /tmp now has zero *.bundle.
+
+B.2 /tmp session reports - ensured all mirrored in bank (left /tmp copies):
+  Already mirrored identical (no action): 1423-dedup-report, 1459-report,
+    bcheck-external, ckpt-diag, corruptor2-fix-progress, corruptor2-report,
+    corruptor2-repro, corruptor2, corruptorFIRE, corruptorFIRE2,
+    corruptorFIRE3, corruptor-fix, corruptor, mremap-confirm, pr1423-patches,
+    sigF-f2, sigF-parked, sigF-report, sigF-rootcause, vblk-verify.
+  Copied into bank (were missing): 1459-ip, 1459-vols, corruptor-fix-interim,
+    f2b-report-append-smp4, f2b-report-append-smp8, f2, fcsnap-report,
+    osv-1423val-id, osv-1423val-ip, parity-checkpoint-hang, parity-gaps,
+    parity-gap, pubf2, py313_f2, uncached-parity.
+  Differed - handled conservatively (no clobber):
+    corruptorA.txt   - /tmp newer+larger -> banked as corruptorA-full.txt
+    f2b-rootcause.txt - bank copy was 0 bytes -> banked as f2b-rootcause-full.txt
+    f2b-report.txt   - bank copy NEWER+LARGER already -> left as-is (no loss)
+  Re-verified: nothing banked is ONLY in /tmp.
+
+B.3 worktrees + gc:
+  git worktree prune -v : nothing stale.
+  git gc --auto         : ran clean (no threshold hit), exit 0.
+  Mapped every worktree branch to its PR - ALL map to an OPEN PR, so NONE
+  are removable (older CLOSED PR numbers are superseded predecessors of the
+  same branch's current open PR):
+    close-range=1436 OPEN, fs-syscalls=1429 OPEN, inotify=1440 OPEN,
+    ipv6-forward-port=1442 OPEN, libaio=1433 OPEN, mremap=1432 OPEN,
+    numa-discovery=1437 OPEN, numa-per-node-pools=1445 OPEN,
+    numa-mempolicy=1438 OPEN, sec-driver-backend=1450 OPEN,
+    sec-ext4-readlink=1449 OPEN, sec-iovcnt=1448 OPEN, sec-rofs=1451 OPEN,
+    setrlimit=1435 OPEN, signalfd=1439 OPEN (kept, as instructed),
+    splice=1425 OPEN, membarrier=1434 OPEN, virtio-net-ipv6-offload=1444 OPEN.
+    integ/pg-fork-zfs=1458 OPEN ; integ/pg-fork-arena = local (no PR), keep.
+  No worktrees listed for removal - all live.
+
+EC2 boxes: not touched.

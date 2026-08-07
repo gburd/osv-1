@@ -1,0 +1,39 @@
+=== DEFINITIVE MQ A/B on the #1464 base (agent, m5d.metal osv-mqtest i-05fad4f921197e93a) ===
+Box: i-05fad4f921197e93a m5d.metal (96 vCPU, 4x838G LOCAL NVMe) us-east-2b beef 840154381708
+Image: #1458 6b71c76385 + #1464(512b2b2ec sched-load-balance) + #1465(dfe6b67b4 msix-budget)
+       + #1463(00f2b61d3 virtio-net MQ) + #1468(53bf12513 zero-copy RX refcount). Built clean.
+Guest: -smp48, 32G, PG18.0 musl-PIE, shared_buffers=8G, DEFAULT mmap shared memory (NOT sysv),
+       ZFS raidz1-8k over 4 LOCAL NVMe (NO EBS data path), virtio-net vhost tap0 (vnet_hdr on).
+pgbench -s300, 60s/cell, fresh pool per RW level. 0 EIO / 0 failed EVERY cell all configs.
+
+RECEIVER-THREAD SPREAD (gdb osv info threads, DECISIVE):
+  MQ-OFF nqp1: 1 virtio-net-rx thread (cpu0).
+  MQ-ON  nqp8: 8 virtio-net-rx threads pinned cpu0..cpu7.
+  MQ-ON nqp16: 16 virtio-net-rx threads pinned cpu0..cpu15.
+  => MQ genuinely activates N pinned receiver threads (the #1463 mechanism works).
+
+RO (-S select-only) tps, #1464 base:
+ conn   MQ-OFF(nqp1)  MQ-ON(nqp8)  MQ-ON(nqp16)   best-lift-vs-OFF   vs Linux~190k
+ c1        8728         8094         8548           ~1.0x              0.04x
+ c8       75930        80749        82395           1.08x              0.43x
+ c16      36085        56152        48485           1.56x (nqp8)       0.29x
+ c32      29590        37268        39832           1.35x (nqp16)      0.21x
+ c48      27475        28472        33501           1.22x (nqp16)      0.17x
+ c64      26853        28867        28458           1.08x              0.15x
+
+RW (TPC-B) tps, 0 EIO all:
+ conn   MQ-OFF(nqp1)  MQ-ON(nqp8)  MQ-ON(nqp16)
+ c8       3737         3641         3714     (parity)
+ c32      2762         2802         2757     (parity)
+ c64      2779         2734         (transient conn-timeout, PG alive; c8/c32 = parity)
+
+UNDER-LOAD DIAGNOSTIC (gdb, RO c32, nqp16): 1 rx thread running, 15 waiting;
+  host shows 15 qemu vCPU threads >5% (backends dispersed across ~15 CPUs by #1464).
+  => Even with 16 RX queues, only 1 receiver active at a time. RX threads are idle-WAITING,
+     not CPU-saturated. The inbound stream is not distributed enough to keep >1 receiver busy.
+
+VERDICT: On the #1464 base, MQ gives a REAL but PARTIAL mid-concurrency lift (c16-c48:
+ +22% to +56%), NOT the plateau breakthrough. RO ceiling stays ~30-40k (vs Linux ~190k =
+ 0.15-0.29x at scale). Lift collapses back to ~28k at c64. RW unaffected (parity, 0 EIO).
+ MQ is NOT the lever that closes the OSv-vs-Linux RO gap; the residual is per-request
+ round-trip / wake latency + flow-to-queue distribution, not RX thread count.

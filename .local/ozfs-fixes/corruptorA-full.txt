@@ -1,0 +1,174 @@
+================================================================================
+OSv + PostgreSQL 18 -- ZFS-on-OSv WALL 3 (sustained-write corruptor)
+Session 4: KVM hardware-watchpoint hunt (continues corruptor2.txt / session 3)
+================================================================================
+Date:   2026-07-28   Box: osv-cor-a (ec2-user@3.16.46.123, m5d.metal 96c/377GB,
+        4x local NVMe, KVM; profile OUCH).  Build tree /build/osv, container
+        osv-build (mount /b).  Branch wall3c-watchpoint @ 12f5bedf (dfed474b +
+        3 layout-neutral diagnostics, all flags OFF).  conf_fork=1
+        conf_zfs=openzfs (zfs-2.4.2) fs=zfs.  Author: Greg Burd.
+
+INHERITED (from corruptor2.txt / session 3 -- do NOT re-derive):
+  * Wild POINTER write onto ZFS METADATA (indirect block / blkptr / dnode dbuf)
+    or PT pages in the identity heap.  NOT the in-flight scatter data ABD
+    (WALL3TORN probe: 0 hits; data buffer byte-clean io_start->io_done).
+  * On-disk (persists across re-read), ~128 KiB-aligned unit (16x8k blocks) =
+    SPA_OLD_MAXBLOCKSIZE = zio aggregation/gang/indirect-block region.
+  * Substantially an SMP RACE: reliable -smp4, marginal -smp1.
+  * OPERATIONAL: under a KVM hw watchpoint at -smp4 the guest runs ~30x slower;
+    "watch a victim, continue to corruption" is NOT tractable in one sitting
+    (session 3 finding).  The tractable path is the METADATA CANARY:
+    checksum each block ABD after zio_checksum_generate, re-verify right before
+    vdev_disk_io_start DMA; mismatch => dump victim addr + bt.
+
+================================================================================
+STEP 1 -- REPRODUCTION CONFIRMED (session 4, baseline flags-OFF image)
+================================================================================
+Reseeded a clean 8k lz4 pool: bash /b/.local/ozfs-fixes/seed.sh  (rc=0).
+Boot -smp4 -m32G KVM, drive pgbench -i -s1000 postgres (repro.sh 4 32G 1000):
+
+  RESULT: CORRUPTED.  Signature (B) invalid-page:
+    ERROR: invalid page in block 70579 of relation "base/5/16399"
+    (surfaced at "vacuum analyze pgbench_accounts", after 100% load)
+  Wall time boot->corruption: 86s.
+
+Confirms the box still corrupts reliably at -smp4 + 32G + recordsize=8k on the
+faithful flags-OFF build.  Consistent with corruptor2.txt signatures A/B/C.
+
+VICTIM ADDRESS: not yet captured this session (the invalid-page signature only
+names the PG relation block, not the in-guest identity-heap victim VA).  Need
+WALL3_FAULT_TRACE (app-PC fault) OR the metadata canary to print the victim VA.
+Proceeding to enable diagnostics -> canary -> hardware watchpoint.
+
+STATUS: step 1 done (repro confirmed).  Next: enable canary/fault-trace, capture
+victim VA, then hw watchpoint the writer PC.
+================================================================================
+
+================================================================================
+STEP 2 -- WATCHPOINT/CANARY PASS (session 4, WALL3_ABD_ARENA canary + gdb stub)
+================================================================================
+
+WHAT I BUILT (layout-neutral, off by default):
+  modules/open_zfs/openzfs/module/os/osv/zfs/abd_os.c  WALL3_ABD_ARENA (=0 def)
+  In abd_iter_map(): if a SCATTER-chunk source VA falls in the COW FORK ARENA
+  range [0x300000000000, +512MiB) it prints the chunk VA + abd + flags and
+  panic()s.  Tests Agent B's #1c/#4a: "AS0 gathers a 128KiB write from an ABD
+  chunk that is COW-divergent across the fork boundary."  Rebuilt image
+  (BUILD_RC=0, 50s incremental), booted -smp4 -m32G KVM + gdb stub :1234,
+  reseeded clean 8k pool, drove pgbench -i -s1000.
+
+RESULT: the canary DID NOT FIRE.  => NO ABD scatter chunk was ever gathered
+from the fork arena before the crash.  This RULES OUT Agent B candidate #1c
+(mis-gathered ABD source page from the COW fork arena) as the corruptor: the
+128KiB gather does not read from arena-divergent chunks.  (Consistent with the
+prior WALL3TORN result that the scatter DATA ABD is byte-clean.)
+
+INSTEAD, the guest CRASHED with a LIVE, SYMBOLIZED victim fault (gdb stub) --
+this IS the capture.  Two AS0 CPUs both faulted in sched::thread::wake_impl
+dereferencing a CLOBBERED thread/detached_state:
+
+  CPU#0 (thread 1):  GP fault
+    #3 lockless_queue<sched::thread,&_wakeup_link>::push_back(this=0x480000017c840fc9)
+       ^ 'this' (the target CPU's incoming-wakeup queue) = GARBAGE (0x48000001..,
+         high-half junk -- a valid ptr is 0x4000.. identity or 0x6001.. child)
+    #4 sched::thread::wake_impl(st=0x6001087d5fe0)   <- VICTIM detached_state VA
+       local: tcpu = 0x4036db8d <memory::page_pool::l2::refill()+61>
+       ^ tcpu (target sched::cpu*) CLOBBERED to a .TEXT address -> the
+         detached_state at 0x6001087d5fe0 was scribbled by the wild write.
+    #5 sched::thread::wake(this=0x40010abc8040)
+    #6 sched::cpu::park_timer_fired  <- #7 park_client::timer_fired
+    #8 sched::timer_list::fired  <- #10 invoke_interrupt(vector=33, timer IRQ)
+    #13 sched::cpu::do_idle ... idle thread on AS0 CPU0
+
+    THE VICTIM THREAD (fully symbolized, frame #6 local t):
+      sched::thread this=0x40010abc8040  _id=591  _parent_id=588
+      _name = ">/b/.local/pg18"           <- a FORKED POSTGRES BACKEND thread
+      _func   = fork_thread(...)::<lambda>   (forked-thread trampoline)
+      _cleanup= fork()::<lambda>
+      _detached_state (unique_ptr).get() = 0x6001087d5fe0   <- the clobbered obj
+      _current_as = 0x6000bffae680
+      _app_runtime.get() = 0x6001070e3130
+      _wakeup_link = {_helper=0x6001216e3028, _next=0x6001216e3058}
+    => The VICTIM is a forked PG backend thread's detached_state / scheduler
+       linkage, allocated in the 0x6001.. VA region (NOT identity heap 0x4000..,
+       NOT fork arena 0x3000..).
+
+  CPU#1 (thread 2): assert(ef->rflags & rflags_if) in page_fault (mmu.cc:38),
+    a page_fault taken inside sched::thread::wake_impl (core/sched.cc:1414
+    "if (tcpu != current()->tcpu())") from a DEEP RECURSIVE page-pool refill:
+      wake_impl <- wake <- page_pool::l2::try_alloc_page_batch
+      <- l2::alloc_page_batch <- l1::refill <- l1::alloc_page
+      <- untracked_alloc_page <- pool::add_page <- pool::alloc <- std_malloc(64)
+      <- aligned_new<wait_record> <- coherent_wait_record::coherent_wait_record
+      <- lockfree::mutex::lock(free_page_ranges_lock) <- l2::refill  (RECURSES)
+    i.e. AS0's page-pool refill takes free_page_ranges_lock, builds a
+    coherent_wait_record, and wake_impl faults on a clobbered thread again.
+
+  BOTH CPUs: CR3 = 0xb9d000  (== AS0, the postmaster/kernel address space).
+  So the corrupting + faulting context is AS0 (the txg_sync / completion /
+  idle-timer path), waking a FORKED-backend thread whose scheduler state was
+  wild-written.
+
+DECODE of the victim VA family 0x6001.....:
+  0x6001087d5fe0 >> 39 = 0xC0 = PML4 slot 192.  (Same slot family the prior
+  session's signature-D entropy-ring victim decoded to.)  This is the region
+  where forked-thread detached_state / wait_record / app_runtime objects live
+  ("coherent" fork objects routed to a shared slot).  The wild writer is
+  scribbling 0x6001.. scheduler/thread objects.
+
+INTERPRETATION (updated ranking):
+  - Agent B #1c (ABD source from fork arena) : RULED OUT this session (canary
+    silent).
+  - The victim is CONSISTENT with the corruptor being a 128KiB-granular wild
+    write whose DEST lands on 0x6001.. fork-coherent scheduler/thread objects
+    (detached_state, wait_record, _wakeup_link) -- a WRONG-DEST metadata/DMA
+    copy, matching signatures D/E from corruptor2.txt.  The writer PC is still
+    not named (the fault is the VICTIM being USED, downstream of the write).
+
+NEXT: (a) put a HW watchpoint on a stable 0x6001.. victim object BEFORE it is
+clobbered (feasible now that we have concrete victim VAs and a live gdb stub),
+OR (b) narrow the DEST computation of the 128KiB aggregation/gang write (Agent
+B #1a DEST leg / #2) since the source leg (#1c) is now excluded.
+
+ARTIFACT: canary source at abd_os.c (WALL3_ABD_ARENA), image rebuilt.  Backup of
+pristine abd_os.c at /tmp/abd_os.c.bak on the box.
+================================================================================
+
+================================================================================
+STEP 2b -- VICTIM VA DECODE (decisive: names the memory region)
+================================================================================
+OSv memory map (include/osv/mmu-defs.hh): mem_area_size = 1<<44, base =
+0x400000000000 | (area<<44).  The THREE identity-mapped areas alias the SAME
+physical RAM at three different VAs (translate_mem_area just rewrites top bits):
+  area 0 mem_area::main     = 0x400000000000  (physical/identity map; DMA uses this)
+  area 1 mem_area::page     = 0x500000000000
+  area 2 mem_area::mempool  = 0x600000000000  <-- VICTIM LIVES HERE
+  area 3 mem_area::debug    = 0x700000000000
+
+Victim VA 0x6001087d5fe0  ->  mem_area::mempool (the small-object malloc heap).
+It is IDENTITY-MAPPED and shared verbatim across every fork AS (slot >
+pml4_app_last=127 => kernel slot, cloned as parent_pml4[slot] verbatim).  So the
+victim is NOT COW-divergent; it is a genuine SHARED small heap object
+(a forked PG backend thread's detached_state) that got WILD-WRITTEN.
+
+WHY THIS MATTERS FOR THE WRITER:
+The mempool (0x6000..), main (0x4000..), and page (0x5000..) areas are three VA
+ALIASES of the same physical pages.  A wild 128KiB write issued through the
+0x4000.. (main/physical/DMA) alias to a WRONG physical offset lands on whatever
+object occupies that phys page and is observed as corruption at the 0x6000..
+mempool alias (the detached_state) OR on disk (if it is the DMA source/dest that
+is wrong).  This unifies the on-disk 128KiB corruption (signatures A/B/C) and
+the in-memory scheduler-object clobber (signatures D/E, this capture): ONE wild
+writer using a wrong physical/main-area address or length.
+
+  => The corruptor is a write whose DEST (physical addr) or LENGTH is
+     miscomputed in the AS0 ZFS completion/txg_sync path -- Agent B's #1a DEST
+     leg / #2 gang-header DVA / a bio bio_offset/bcount, NOT the ABD source leg
+     (#1c ruled out: WALL3_ABD_ARENA silent).
+
+NEXT ACTION: hardware watchpoint on a live victim object.  Because the victim is
+a stable identity-heap VA within a boot, and both the main(0x4000) and
+mempool(0x6000) aliases map the same phys, watch the PHYSICAL page via its
+0x4000.. main-area alias (that is the alias a wild DMA/copy would write through)
+to catch the writer PC.  Run at -smp2 for determinism (task guidance).
+================================================================================

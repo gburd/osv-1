@@ -1,0 +1,1 @@
+/b/.local/pg18/src/src/interfaces/ecpg/ecpglib/typename.c

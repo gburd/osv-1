@@ -1,0 +1,35 @@
+===== GCC 11.5 ORIGINAL error (build1.log) =====
+core/mmu.cc:2596:21: error: definition of implicitly-declared ‘virtual mmu::anon_vma::~anon_vma()’
+ 2596 | anon_vma::~anon_vma()
+      |                     ^
+make[1]: *** [Makefile:445: build/release.x64/core/mmu.o] Error 1
+
+===== GCC 11.5 fork+zfs kernel LINK OK (final-cf1, both fixes) =====
+  CXX arch/x64/fork.cc
+  CXX core/mmu.cc
+  CXX libc/process/fork.cc
+CONF_fork=y
+-rwxr-xr-x. 1 root root 9460880 Aug  1 14:46 /mnt/build/osv/build/release.x64/loader-stripped.elf
+
+===== GCC 11.5 image build EXIT 0 + BOOT (gcc11-boot-run3) =====
+ZFS: root mounted ok, z_root=34
+=== IMG BUILD EXIT 0 ===
+-rw-r--r--. 1 root root 7995392 Aug  1 14:46 build/release.x64/usr.img
+ZFS: OpenZFS 5000 initialized
+ZFS: root mounted ok, z_root=34
+Booted up in 363.60 ms
+ZFS: OpenZFS 5000 initialized
+ZFS: root mounted ok, z_root=34
+Booted up in 363.60 ms
+
+===== GCC 13.3 full image BUILD EXIT 0 + BOOT (boot-run2) =====
+OSv v0.57.0-437-g3aebcdfb
+ZFS: OpenZFS 5000 initialized
+Booted up in 166.58 ms
+ZFS: root mounted ok, z_root=34
+ZFS: root mounted ok, z_root=34
+=== BUILD EXIT: 0 ===
+OSv v0.57.0-437-g3aebcdfb
+ZFS: OpenZFS 5000 initialized
+ZFS: root mounted ok, z_root=34
+Booted up in 344.47 ms

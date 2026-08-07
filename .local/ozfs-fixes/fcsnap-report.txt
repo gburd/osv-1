@@ -1,0 +1,182 @@
+================================================================================
+Firecracker Full-VM Snapshot/Restore for OSv + PostgreSQL 18 (musl) + OpenZFS
+Prototype + Measurement Report
+================================================================================
+Author:  Greg Burd
+Date:    2026-07-30 (us-east-2, profile OUCH)
+Goal:    Boot OSv+PG once to "ready", take a Full FC snapshot (memory+vmstate),
+         and on future launches RESTORE from that snapshot so PG is already
+         serving. Measure restore -> first-query vs the 11.75s cold baseline.
+         Isolate any OSv resume bug into its own standalone master PR.
+
+COLD BASELINE (for comparison, from bcheck-external.txt, clean pool):
+  T0 qemu/fc launch -> T7 first external "select 1" = 11.749 s
+    kernel boot        0.608 s
+    ZFS import+mount   0.714 s
+    PG spawn+startup   6.697 s   <-- musl PG PIE mmap + process init (the target)
+    PG start->ready    0.280 s
+    ready->first query ~1.4 s (pgbench-measured true first-conn cost)
+  The 6.7s PG binary-mmap+init is what snapshot-restore should ELIMINATE.
+
+--------------------------------------------------------------------------------
+ENVIRONMENT
+--------------------------------------------------------------------------------
+Box:   osv-fcsnap  i-0c1bb3ba8384d6e28  m5d.metal  us-east-2c
+       18.227.220.137 (public) / 172.31.37.44 (private)
+       96 vCPU, 377 GiB RAM, /dev/kvm present, 4x 838G instance-store NVMe.
+       AL2023 kernel 6.18.38, Firecracker v1.7.0, Docker 25 (build not needed).
+Image: PREBUILT PG18-fork+OpenZFS FC image reused from the bench artifact set
+       (/tmp/fc-transfer on floki, dated Jul 26 = same build as the baseline):
+         loader.elf 73M / loader-stripped.elf 9.4M / usr.img (zfs rootfs) 64M
+         PG 18.4 x86_64-pc-linux-musl PIE, OpenZFS 2.4.3
+       Branch corruptor-fix @ c8f9c82b (full 6-fix stack). No cold build required.
+
+--------------------------------------------------------------------------------
+STATUS LOG (incremental)
+--------------------------------------------------------------------------------
+[setup]  Box launched, deps installed, FC v1.7.0 fetched, image staged. OK.
+
+--------------------------------------------------------------------------------
+HEADLINE RESULT
+--------------------------------------------------------------------------------
+  OSv RESUMES CLEANLY FROM A FIRECRACKER FULL SNAPSHOT.  ZERO OSv fixes needed.
+  OSv is already Firecracker-snapshot-ready for this PG18+OpenZFS workload.
+
+  restore -> first external "select 1"  MEDIAN = 0.243 s   (5 runs, range .234-.244)
+  FC resume (load+resume API return)    MEDIAN = 0.050 s
+  COLD baseline launch -> first query          = 11.749 s
+  ===> 48.4x faster; 11.5 s saved; the 6.7s PG musl-PIE mmap+init is ELIMINATED
+       (it is baked into the snapshotted memory image).
+
+  All 5 restore runs (RUN  FC-resume  restore->first-query):
+    1  0.0503  0.2433
+    2  0.0498  0.2433
+    3  0.0504  0.2440
+    4  0.0502  0.2386
+    5  0.0454  0.2346
+
+--------------------------------------------------------------------------------
+DOES OSv RESUME CLEANLY?  YES.
+--------------------------------------------------------------------------------
+Proof it is a RESUME, not a reboot:
+  * pg_postmaster_start_time() after restore = 13:50:23 (the ORIGINAL pre-snapshot
+    boot), NOT the restore wall-clock (13:52). PG's process/timers continue from
+    the snapshot; it was never restarted.
+  * The marker row (id=42, created 13:51:09, inserted BEFORE the snapshot) is
+    readable immediately after restore -> memory + disk state truly resumed.
+  * PG is fully writable post-restore (INSERT succeeds, row count grows).
+  * No fault / assert / hang on resume across 8+ restores.
+
+--------------------------------------------------------------------------------
+SNAPSHOT ARTIFACTS
+--------------------------------------------------------------------------------
+  vmstate file : 92,166 bytes (90 KB)  - device + vCPU state, tiny.
+  mem file     : 17,179,869,184 bytes (16 GiB, dense) - the full guest RAM.
+                 Highly compressible: first 1 GiB gzips to ~10 MB (mostly zero
+                 pages; PG touched ~2 GB shared_buffers + working set only).
+  time-to-snapshot : PAUSE 0.001 s + WRITE 24.8 s (writing 16 GiB to xfs/NVMe).
+  PRODUCTION NOTE: boot with a smaller --mem (e.g. 2-4 GiB, matched to
+  shared_buffers + working set) to shrink the mem file and the write/restore
+  cost; or use FC diff snapshots. 16 GiB here was the un-tuned bench default.
+
+--------------------------------------------------------------------------------
+DISK CONSISTENCY (memory <-> disk agreement)
+--------------------------------------------------------------------------------
+  Approach: SINGLE-FILE ZFS pool (pgdata, recordsize=8k lz4) on one virtio-blk
+  backing file. At snapshot time the exact pool backing file is copied to
+  pool-at-snapshot.raw. Every restore gets a FRESH COPY of that file, so the
+  guest's in-memory ZFS ARC / PG shared_buffers / dirty pages agree with the
+  on-disk state as of the snapshot instant. (A reflink/overlay COW would be the
+  zero-copy production form; a plain cp is the simplest correct equivalent and
+  is what the demo ships, with the COW upgrade path documented.)
+  Verified: marker row survives; CHECKPOINT flushes and cold table reads serve
+  post-restore -> virtio-blk re-attached and the pool is consistent.
+
+--------------------------------------------------------------------------------
+GOTCHAS (measured, honest)
+--------------------------------------------------------------------------------
+(a) CLOCK SKEW: guest wakes ~50-85 ms AHEAD of host wall clock and stays there
+    (measured +.083 s, +.081 s repeatedly). OSv's kvmclock re-reads the KVM
+    pvclock/wall-clock MSRs (there is a 1 Hz wall-clock sync thread) so the
+    guest clock tracks the host after resume with only a small, stable offset.
+    NO backward jump, NO timer storm, NO hang. PG's now()/timestamps are
+    correct. TOLERATED with no OSv change. (kvmclock.cc already re-syncs.)
+(b) VIRTIO RE-ATTACH: FC restores virtio device + vring state; the HOST tap
+    (fc_tap0) and the DNAT iptables rules must pre-exist on the restoring host
+    (they persist here). After restore: a NEW TCP connection completes
+    (virtio-net queues live), inet_server_addr=192.168.100.2; the full external
+    path floki -> box-public-IP:5432 -> DNAT -> guest also works
+    (inet_client_addr=73.4.58.126). virtio-blk serves reads/writes + CHECKPOINT.
+    No feature-renegotiation or lost-notification issues observed.
+(c) RNG / ENTROPY: two restores from the SAME snapshot produced DIFFERENT
+    random() and DIFFERENT gen_random_uuid(). No OBSERVABLE duplication at the
+    app layer. CAVEAT (honest): this is a weak probe - PG random() reseeds from
+    wall-clock+PID and gen_random_uuid uses PG's own CSPRNG, so the difference
+    may come from the clock advance, not from fresh OS entropy. The deeper OSv
+    question - does the OS entropy pool / any virtio-rng resume with identical
+    state across clones - is NOT fully closed by this PG-only image. For a
+    security-sensitive clone fleet this deserves a dedicated in-guest
+    /dev/random probe. It did not manifest as a bug here.
+
+--------------------------------------------------------------------------------
+OSv RESUME BUGS FOUND -> STANDALONE MASTER PRs
+--------------------------------------------------------------------------------
+  NONE REQUIRED to make resume work. OSv v0.57 (this build 446-gf2857073, the
+  full corruptor-fix serving stack) resumes cleanly from a Firecracker Full
+  snapshot with a live PG18+OpenZFS workload, no core/clock/virtio/IRQ fix
+  needed. Nothing to isolate into a master PR for basic resume correctness.
+
+  Two follow-up items are NOTED (not blocking, not bugs proven here) that could
+  each become a small hardening PR if a production clone fleet needs them:
+    - RNG-on-resume hardening: add an explicit entropy reseed on hypervisor
+      resume so cloned VMs cannot share OS RNG state. (Independent PR; only if a
+      dedicated /dev/random probe confirms duplication - not confirmed here.)
+    - clock: current +50-85 ms offset is harmless; if sub-ms accuracy on resume
+      is ever required, force an immediate kvmclock wall-clock resync on the
+      first tick after resume instead of waiting up to 1 s for the sync thread.
+  Both are OPTIONAL hardening, independent of each other, and independent of the
+  demo. The demo does NOT depend on any OSv change for correct resume.
+
+--------------------------------------------------------------------------------
+IMAGE NOTE
+--------------------------------------------------------------------------------
+  Used the built serving image 446-gf2857073 (F2a virtio-blk full-ring fix +
+  all fixes below it) copied read-only from osv-cor-a's build dir (NO workload
+  run there - a file copy only, per the allowance). The git tree is at
+  447-gc8f9c82b (F2b, the -smp>1 scheduler pre-alloc fix) but the binary was
+  446; F2b only matters under heavy concurrent load, not a single-client
+  restore->select-1 proof, so 446 is the correct serving image for this test.
+
+  KEY FC GOTCHA (image format): OSv's usr.img is QCOW2. Firecracker only accepts
+  RAW block devices - it read the qcow2 header as raw bytes and the ZFS rootfs
+  import failed (spa_import_rootpool(/dev/vblk0.1) failed: 5). Fix: convert once
+  with `qemu-img convert -O raw usr.img usr.raw`. This is a deployment step, not
+  an OSv bug. Documented in the demo README.
+
+--------------------------------------------------------------------------------
+OSV-APPS DEMO CHANGES (bundle: /tmp/apps-fcsnap.bundle)
+--------------------------------------------------------------------------------
+  Repo:   github.com/gburd/osv-apps  branch wip/postgres18-musl-demo (PR #73)
+  Commit: 7215030  "postgres18-musl: Firecracker snapshot/restore (boot once,
+          resume already-serving)"  Author Greg Burd <greg@burd.me>, SSH-signed.
+  Base:   70c7f61 .. HEAD  (git bundle create /tmp/apps-fcsnap.bundle 70c7f61..HEAD)
+  Added to postgres18-musl/:
+    * fc-snapshot.sh - driver: setup (tap+DNAT + qcow2->raw), boot-to-ready,
+      snapshot (pause + Full), restore (fresh COW pool copy + resume),
+      query, measure N (median restore->first-query).
+    * fc-snap.py     - Firecracker HTTP-API helper over the unix socket
+      (boot / snapshot Full / snapshot load+resume). Stdlib-only.
+    * README section "Snapshot / restore (Firecracker)": build steps, how to
+      snapshot + restore, the measured cold-vs-restore table (11.75 s vs
+      0.24 s), the COW disk-consistency approach, and the honest gotchas
+      (clock skew, virtio re-attach, RNG). States the demo needs NO OSv change
+      for correct resume. No em-dashes in the added content.
+  The demo does NOT contain any OSv kernel change (none was required).
+
+--------------------------------------------------------------------------------
+CLEANUP
+--------------------------------------------------------------------------------
+  Box: osv-fcsnap  i-0c1bb3ba8384d6e28  (see final section for termination).
+  Did NOT touch bench-db (18.189.43.159) or osv-cor-a (3.16.46.123) beyond a
+  read-only file copy of the built image from osv-cor-a's build dir (no workload
+  run there). Left both running / user-managed.

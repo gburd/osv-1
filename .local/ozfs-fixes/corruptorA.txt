@@ -1,0 +1,45 @@
+================================================================================
+OSv + PostgreSQL 18 -- ZFS-on-OSv WALL 3 (sustained-write corruptor)
+Session 4: KVM hardware-watchpoint hunt (continues corruptor2.txt / session 3)
+================================================================================
+Date:   2026-07-28   Box: osv-cor-a (ec2-user@3.16.46.123, m5d.metal 96c/377GB,
+        4x local NVMe, KVM; profile OUCH).  Build tree /build/osv, container
+        osv-build (mount /b).  Branch wall3c-watchpoint @ 12f5bedf (dfed474b +
+        3 layout-neutral diagnostics, all flags OFF).  conf_fork=1
+        conf_zfs=openzfs (zfs-2.4.2) fs=zfs.  Author: Greg Burd.
+
+INHERITED (from corruptor2.txt / session 3 -- do NOT re-derive):
+  * Wild POINTER write onto ZFS METADATA (indirect block / blkptr / dnode dbuf)
+    or PT pages in the identity heap.  NOT the in-flight scatter data ABD
+    (WALL3TORN probe: 0 hits; data buffer byte-clean io_start->io_done).
+  * On-disk (persists across re-read), ~128 KiB-aligned unit (16x8k blocks) =
+    SPA_OLD_MAXBLOCKSIZE = zio aggregation/gang/indirect-block region.
+  * Substantially an SMP RACE: reliable -smp4, marginal -smp1.
+  * OPERATIONAL: under a KVM hw watchpoint at -smp4 the guest runs ~30x slower;
+    "watch a victim, continue to corruption" is NOT tractable in one sitting
+    (session 3 finding).  The tractable path is the METADATA CANARY:
+    checksum each block ABD after zio_checksum_generate, re-verify right before
+    vdev_disk_io_start DMA; mismatch => dump victim addr + bt.
+
+================================================================================
+STEP 1 -- REPRODUCTION CONFIRMED (session 4, baseline flags-OFF image)
+================================================================================
+Reseeded a clean 8k lz4 pool: bash /b/.local/ozfs-fixes/seed.sh  (rc=0).
+Boot -smp4 -m32G KVM, drive pgbench -i -s1000 postgres (repro.sh 4 32G 1000):
+
+  RESULT: CORRUPTED.  Signature (B) invalid-page:
+    ERROR: invalid page in block 70579 of relation "base/5/16399"
+    (surfaced at "vacuum analyze pgbench_accounts", after 100% load)
+  Wall time boot->corruption: 86s.
+
+Confirms the box still corrupts reliably at -smp4 + 32G + recordsize=8k on the
+faithful flags-OFF build.  Consistent with corruptor2.txt signatures A/B/C.
+
+VICTIM ADDRESS: not yet captured this session (the invalid-page signature only
+names the PG relation block, not the in-guest identity-heap victim VA).  Need
+WALL3_FAULT_TRACE (app-PC fault) OR the metadata canary to print the victim VA.
+Proceeding to enable diagnostics -> canary -> hardware watchpoint.
+
+STATUS: step 1 done (repro confirmed).  Next: enable canary/fault-trace, capture
+victim VA, then hw watchpoint the writer PC.
+================================================================================

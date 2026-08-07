@@ -1,0 +1,106 @@
+diff --git a/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c b/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c
+index 76ddeeb7..d1a55a73 100644
+--- a/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c
++++ b/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c
+@@ -205,19 +205,21 @@ taskq_dispatch_safe(taskq_t *tq, task_func_t func, void *arg, u_int flags,
+  * We enqueue a do-nothing barrier task and drain on it; since tasks
+  * execute in FIFO order all prior tasks will have finished first.
+  */
+-static void
+-taskq_barrier_run(void *arg __bsd_unused2, int pending __bsd_unused2)
+-{
+-}
+-
+ OSV_LIB_SOLARIS_API void
+ taskq_wait(taskq_t *tq)
+ {
+-	struct task barrier;
+-
+-	TASK_INIT(&barrier, 0, taskq_barrier_run, NULL);
+-	taskqueue_enqueue(tq->tq_queue, &barrier);
+-	taskqueue_drain(tq->tq_queue, &barrier);
++	/*
++	 * ZFS requires taskq_wait() to block until the taskq is fully idle:
++	 * no task queued AND no task active (illumos semantics; see the PORTING
++	 * note in dmu_objset.c).  A system_taskq has 8 worker threads, so the
++	 * old "enqueue one barrier, drain that barrier" trick was WRONG: a free
++	 * worker runs the barrier while the other 7 are still mid dnode_sync /
++	 * dbuf_sync, so taskq_wait returned early and the syncing thread raced
++	 * the still-running workers -> dbuf/dirty-record corruption
++	 * (VERIFY3U(db_level==level) / db_buf==NULL panics in the sync taskq).
++	 * Wait for the whole queue to quiesce instead.
++	 */
++	taskqueue_drain_all(tq->tq_queue);
+ }
+ 
+ /*
+diff --git a/bsd/sys/kern/subr_taskqueue.c b/bsd/sys/kern/subr_taskqueue.c
+index dbedc9ad..8d26e0ce 100644
+--- a/bsd/sys/kern/subr_taskqueue.c
++++ b/bsd/sys/kern/subr_taskqueue.c
+@@ -331,6 +331,39 @@ taskqueue_run_locked(struct taskqueue *queue)
+ 		wakeup(task);
+ 	}
+ 	TAILQ_REMOVE(&queue->tq_active, &tb, tb_link);
++	/*
++	 * A worker just stopped draining.  If the queue is now fully quiesced
++	 * (nothing pending, no other worker active), wake any taskqueue_drain_all
++	 * waiter.  ZFS's taskq_wait() relies on being woken when the taskq goes
++	 * idle (illumos semantics: wait until no task is queued OR active).
++	 */
++	if (STAILQ_EMPTY(&queue->tq_queue) && TAILQ_EMPTY(&queue->tq_active))
++		wakeup(&queue->tq_active);
++}
++
++/*
++ * taskqueue_drain_all - wait until the taskqueue is fully quiesced: no task
++ * pending on tq_queue AND no worker running a task (tq_active empty).
++ *
++ * Unlike taskqueue_drain(queue, one_task) -- which returns as soon as ONE
++ * specific task finishes -- this waits for the WHOLE queue to go idle, which
++ * is what ZFS's taskq_wait() contract requires: on a multi-threaded taskq a
++ * lone barrier task can be run by a free worker while other workers are still
++ * mid-task, so draining one barrier is NOT a full wait.  ZFS also recursively
++ * enqueues new tasks from within running tasks (see dmu_objset.c PORTING note);
++ * because the enqueuing task is itself still "active", tq_active never empties
++ * until the entire recursion completes, so this loop reliably waits for it.
++ */
++void
++taskqueue_drain_all(struct taskqueue *queue)
++{
++	TQ_LOCK(queue);
++	while (!STAILQ_EMPTY(&queue->tq_queue) ||
++	    !TAILQ_EMPTY(&queue->tq_active)) {
++		TQ_SLEEP(queue, &queue->tq_active, &queue->tq_mutex,
++		    PWAIT, "tqdrain", 0);
++	}
++	TQ_UNLOCK(queue);
+ }
+ 
+ void
+diff --git a/bsd/sys/sys/taskqueue.h b/bsd/sys/sys/taskqueue.h
+index 2a630760..d9830b08 100644
+--- a/bsd/sys/sys/taskqueue.h
++++ b/bsd/sys/sys/taskqueue.h
+@@ -79,6 +79,7 @@ int	taskqueue_cancel_timeout(struct taskqueue *queue,
+ 	    struct timeout_task *timeout_task, u_int *pendp);
+ #endif
+ void	taskqueue_drain(struct taskqueue *queue, struct task *task);
++void	taskqueue_drain_all(struct taskqueue *queue);
+ #if 0
+ void	taskqueue_drain_timeout(struct taskqueue *queue,
+ 	    struct timeout_task *timeout_task);
+diff --git a/drivers/virtio-blk.cc b/drivers/virtio-blk.cc
+index b074769d..51a5b39c 100644
+--- a/drivers/virtio-blk.cc
++++ b/drivers/virtio-blk.cc
+@@ -324,6 +324,9 @@ int blk::drain_queue(vring* queue)
+             default:
+                 trace_virtio_blk_req_err(req->bio, req->hdr.sector,
+                                          req->bio->bio_bcount, req->hdr.type);
++                debugf("BLKERR: status=%d sector=%llu bcount=%lu type=%u\n",
++                       (int)req->res.status, (unsigned long long)req->hdr.sector,
++                       (unsigned long)req->bio->bio_bcount, (unsigned)req->hdr.type);
+                 biodone(req->bio, false);
+                 break;
+             }

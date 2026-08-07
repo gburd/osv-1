@@ -1,0 +1,190 @@
+================================================================================
+RECONCILE REPORT -- DROP DATABASE fix vs the two startup bugs (fresh-pool re-test)
+================================================================================
+Author: Greg Burd
+Box:    bench-db 18.189.43.159 (m5d.metal, profile ouch), tree ~osv == /b in the
+        osv-build container, HEAD 3fcc23b365 (verified), CONF_fork=1, conf_zfs=openzfs.
+Date:   2026-07-30 (us-east-2)
+Bundle: /tmp/reconcile-fix.bundle (c8f9c82b3..3fcc23b365; contains 3fcc23b36 = the
+        DROP DATABASE fix commit under scrutiny -- NOT a fix I authored/validated).
+
+--------------------------------------------------------------------------------
+BOTTOM LINE (read first)
+--------------------------------------------------------------------------------
+It is a REAL RESIDUAL REGRESSION, not pool state. Controlled A/B on IDENTICAL
+freshly-seeded pools (fresh initdb via cpiod, clean export, txg 26, never served):
+
+  loader                          fresh single-file      fresh raidz1
+  ------------------------------  ---------------------  ---------------------
+  c8f9c82b (the QUALIFIED commit) 10/10 ready (~9s)       3/3 ready
+  3fcc23b36 (HEAD, +DROPDB fix)    0/10 ready (Bug B)     0/10 ready (Bug B)
+
+The ONLY difference between the two trees is 27+/2- lines in libc/signal.cc
+(the DROP DATABASE self-signal commit 3fcc23b36). Reverting just that file and
+rebuilding restores 13/13 clean boots; restoring it re-introduces the hang.
+
+=> The DROP DATABASE fix (3fcc23b36) is a STARTUP REGRESSION. It fixes the
+   DROP DATABASE wedge but wedges PG startup (Bug B), so PG never reaches
+   "ready to accept connections". As landed the fix is net-negative.
+
+=> The dropdb agent's central claim -- "both startup bugs are present in pure
+   HEAD, therefore NOT caused by the DROP DATABASE fix" -- is WRONG. Their
+   "pure HEAD" build (signal.cc reverted to c8f9c82b) is byte-equivalent to
+   c8f9c82b, which I just booted 13/13. Their pure-HEAD hang was a contaminated
+   build or a dirty pool, not the real c8f9c82b behavior.
+
+=> Bug A (raidz ZFS-mount SEGV at vfs_mount.cc:195) is POOL-STATE dependent: it
+   did NOT reproduce once in 10 fresh raidz boots. It only fired on the dropdb
+   agent's dirty/half-imported raidz (accumulated state + a 1h30m-wedged DROP
+   DATABASE + hard kills). Fresh raidz mounts clean, then hits Bug B like single.
+
+The 25/25 single + 12/12 raidz qualification and the F2b 8/8..12/12 heavy runs
+were all on c8f9c82b -- a materially different tree than HEAD. They stand. The
+regression was introduced AFTER qualification, by the DROP DATABASE commit.
+
+Therefore Step 2 (validate the DROP DATABASE fix) CANNOT be satisfied: the fix
+itself prevents boot-to-ready, so DROP DATABASE can never be exercised on HEAD.
+This report is the Step-3 characterization instead. No speculative fix was made.
+
+--------------------------------------------------------------------------------
+1. METHOD (fresh pool per boot; reap qemu between; identical seed source)
+--------------------------------------------------------------------------------
+Destroyed the dropdb agent's accumulated pool (zpool labelclear on all 6 disks).
+Per boot iteration:
+  reap qemu (pkill + docker restart osv-build osv-net) ->
+  labelclear disks -> FRESH pool create + cpiod-stream a pristine initdb cluster
+    (/b/.local/pg18/data-init: "Database cluster state: shut down", no
+     postmaster.pid, single 16MB WAL segment) + clean zpool export ->
+  reap -> serve boot (import -f -N ; zfs mount ; postgres -D /data ...) ->
+  classify {READY | HANG | MOUNT-SEGV | CRASH} from the console log -> reap.
+Single-file: seed1.sh (nvme5 only) + boot1disk.sh, -smp4 -m32G, hp=off.
+Raidz1(4-disk)+SLOG+L2ARC: raidz-seed3.sh + osv-serve-8k.sh, -smp4 -m32G, hp=off.
+Every pool verified fresh before boot (zdb -l: name=pgdata, txg=26).
+
+The A/B loader swap changed ONLY libc/signal.cc:
+  HEAD loader  = build/last/loader.elf @ 3fcc23b36, 73,123,808 bytes.
+  c8 loader    = same tree, `git checkout c8f9c82b3 -- libc/signal.cc` + rebuild
+                 (rm the stale signal.o to force recompile), 73,123,704 bytes.
+Confirmed both directions (revert -> boots, restore -> hangs). Tree left at HEAD.
+
+--------------------------------------------------------------------------------
+2. RESULTS -- boots-to-ready (the decisive counts)
+--------------------------------------------------------------------------------
+HEAD 3fcc23b36 (with DROP DATABASE fix):
+  fresh single-file : 0/10 ready   -- all Bug B hang (PG starts, listens, logs
+                                       "database system was shut down", then never
+                                       logs "ready to accept connections")
+  fresh raidz1      : 0/10 ready   -- all Bug B hang; 0 mount-SEGV, 0 crash-sig
+
+c8f9c82b (signal.cc reverted = the qualified commit):
+  fresh single-file : 10/10 ready  (5 + 5, all ~8-9s to ready)
+  fresh raidz1      : 3/3 ready    (all ~9s)
+
+Bug A (raidz VFS_MOUNT SEGV): 0 occurrences in 10 fresh raidz boots on HEAD and
+0 in 3 on c8. On a fresh raidz the pool imports clean, `zfs mount pgdata`
+succeeds, PG starts -- so Bug A is not on the fresh raidz mount path at all. It
+is a dirty-pool artifact of the dropdb agent's run.
+
+--------------------------------------------------------------------------------
+3. Bug B -- ROOT CAUSE (live gdb, HEAD, fresh single-file, -smp4)
+--------------------------------------------------------------------------------
+At the wedge: postmaster (thread 653) idle in epoll_file::wait (ServerLoop,
+correct); two PG children (655, 656) parked in sched::thread::switch_to and
+never rescheduled; their stacks live in a fork-child COW AS (addrs 0x6001....).
+Reading thread 655's kernel-stack return addresses (addr2line via loader.elf),
+top-down = call order:
+
+  sigprocmask(int, sigset_t const*, sigset_t*)+283        <- PG child masks signals
+   -> osv::unwait_for_signal(sched::thread*, unsigned)+246
+      -> osv::waiters+1512                                 <- global waiters list (waiters_mutex)
+         -> malloc(size_t)+63                              <- allocate a std::list node
+            -> std_malloc(size_t, size_t)+157
+               -> memory::pool::alloc()+164                <- pool slow path
+                  -> mmu::file_vma::file_vma(addr_range,..,intrusive_ptr<file>,..)+181
+                     -> vfs_file::stat(stat*)+52
+                        -> vn_lock(vnode*)+33
+                           -> memory::pool::alloc()+164     <- RE-ENTERS the allocator
+                              -> mmu::file_vma+181          <- recursion continues
+                                 -> ... (repeats; multiple pool::alloc / file_vma frames)
+
+This is the SAME signature-F allocator-recursion family that F2a/F2b addressed,
+but at a DIFFERENT alloc site than c8f9c82b's coherent_wait_record fix covered:
+here the recursion is the std::list-node allocation inside osv::unwait_for_signal
+(under waiters_mutex), whose pool::alloc slow path constructs a file-backed
+mmu::file_vma (a new pool page), whose vnode-lock/stat path re-enters
+pool::alloc. Manifests as a plain hang (no assert), matching the dropdb report's
+"plain hang" variant of Bug B.
+
+WHY the DROP DATABASE commit triggers it: the commit changes libc/signal.cc
+kill() so a self-signal (pid==getpid()) now runs its handler in the CALLER's own
+COW address space (target_as = current_address_space()) instead of AS0. During
+PG startup the children self-signal (sigprocmask / latch machinery is exercised
+before "ready"); routing those self-signals through the fork-child-AS wait path
+(osv::waiters / unwait_for_signal) is what drags startup into the file_vma-under-
+waiters_mutex allocation that recurses. On c8f9c82b those startup self-signals
+took the AS0 path and never hit this allocation, so it booted clean. The fix's
+own comment asserts "the branch NEVER fires during startup" -- the fresh-pool
+A/B contradicts that: the branch (or its downstream AS-routed handler thread) is
+what perturbs startup enough to expose the waiters_mutex allocator recursion.
+
+--------------------------------------------------------------------------------
+4. THE TRADEOFF (why "just keep the fix" is not viable as-is)
+--------------------------------------------------------------------------------
+To document the bug the fix targets, I booted the c8 loader (no fix) via osv-net
+(host netns, tap0) so an external psql could reach the guest, on a fresh raidz:
+  external psql (osv-net fedora psql 15.6) -> guest 192.168.100.2:5432
+  inet_server_addr = 192.168.100.2, banner = PostgreSQL 18.4 on x86_64-pc-linux-musl
+  CREATE DATABASE x TEMPLATE template0;   -> "CREATE DATABASE", rc=0
+  DROP DATABASE x;                          -> HANGS (psql timed out at 50s, rc=124)
+So on c8 the DROP DATABASE wedge is REAL and reproduces -- that is the bug the
+fix was written for. But the fix, as landed, wedges startup (Bug B), so:
+  * HEAD (fix on):  PG never reaches ready -> cannot even attempt DROP DATABASE.
+  * c8  (fix off):  PG reaches ready, but DROP DATABASE hangs.
+The fix swaps a "hangs on DROP DATABASE" bug for a "hangs on every startup" bug.
+
+--------------------------------------------------------------------------------
+5. PROPOSED NEXT STEPS + PR CLASSIFICATION (no blind landing)
+--------------------------------------------------------------------------------
+Bug B  [fork-stack]  -- the actionable one.
+  Root: std::list-node allocation inside osv::unwait_for_signal under
+  waiters_mutex whose pool::alloc slow path builds a file_vma that re-enters
+  pool::alloc. Fix should mirror F2b's approach: keep the wait path ALLOCATION-
+  FREE. Options, in order of laziness:
+    (a) Narrow the 3fcc23b36 kill() change so the self-signal AS-routing does
+        NOT apply during PG startup / to the postmaster's own startup children
+        (only DROP DATABASE / DROP TABLESPACE need it, which run post-ready).
+        i.e. gate the new branch so it cannot perturb the startup self-signals.
+    (b) Pre-reserve the osv::waiters list node per-thread (like F2b's per-thread
+        coherent wait_record slots) so unwait_for_signal never mallocs under
+        waiters_mutex. This is the general fix and also hardens the wait path.
+  Recommendation: REVERT or gate 3fcc23b36 until (a)/(b) lands, because as-is it
+  regresses boot for the whole benchmark fleet. The DROP DATABASE wedge is the
+  lesser evil (post-ready, one command) vs 0% boot success.
+
+Bug A  [pool-state, likely OpenZFS/#1423-adjacent or an OSv VFS mount edge] --
+  NOT a fresh-pool bug; 0/10 on fresh raidz. It is a dirty/half-imported raidz
+  artifact. If it must be chased, reproduce by hard-killing a serving raidz guest
+  mid-write (dirty the pool) then `import -f` + `zfs mount`, and gdb the wild
+  deref in the ZFS VFS_MOUNT op. Low priority for the benchmark if the harness
+  keeps pool hygiene (fresh or cleanly-exported pool per run).
+
+--------------------------------------------------------------------------------
+6. EVIDENCE INDEX (on the box)
+--------------------------------------------------------------------------------
+  /tmp/rate-single.results, /tmp/rate-raidz.results  -- per-iter boot classifications
+  /tmp/single-boot.$i.log, /tmp/raidz-boot.$i.log    -- per-boot console logs
+  /tmp/build-c8.log / build-c8b.log / build-c8c.log  -- c8 loader rebuilds (73,123,704)
+  /tmp/build-headrestore.log                          -- HEAD loader restore (73,123,808)
+  gdb capture (live): thread 655 stack with the sigprocmask->unwait_for_signal->
+    waiters->pool::alloc->file_vma->vn_lock->pool::alloc recursion (Section 3).
+  /tmp/reconcile-fix.bundle                           -- c8f9c82b3..3fcc23b365 (the commit)
+
+--------------------------------------------------------------------------------
+CLEANUP
+--------------------------------------------------------------------------------
+Tree restored to HEAD 3fcc23b36 (signal.cc = HEAD), loader rebuilt clean
+(73,123,808). All qemu reaped (none running). osv-build + osv-net left up.
+bench-db left running (user-managed). osv-cor-a untouched. No new EBS/instances.
+================================================================================
+
+-- Greg Burd

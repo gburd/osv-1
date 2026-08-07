@@ -1,0 +1,12 @@
+Bug A dedicated box
+instance-id: i-0d9e46966e2afc20b
+type: m5d.metal, AZ us-east-2c, subnet subnet-0b1893bd4bb0bdde2
+IP: 3.129.18.206
+AMI: ami-028ba4d4ccb4b7b72 (AL2023 x86_64)
+volumes (all DeleteOnTermination=true):
+  root /dev/xvda vol-06af664285f6de177
+  data /dev/sdb  vol-02135b415126ce5a6
+  data /dev/sdc  vol-05dbc6d97ecdac6f8
+  data /dev/sdd  vol-0f0ddfc7394df5c7f
+  data /dev/sde  vol-0a37c2b5aa4a2acb3
+tag: osv-bugA

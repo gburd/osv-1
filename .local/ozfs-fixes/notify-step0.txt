@@ -1,0 +1,29 @@
+NOTIFY-FIX STEP 0 -- box + harness up (banked incrementally)
+================================================================================
+Box: i-03b16f4819228b9d1  m5d.metal  us-east-2  18.119.28.142  tag osv-notify
+Base: 401852c67 (integ/pg-fork-zfs tip, has fix#1 switch_to hardening)
+Build: image=zfs-tools,pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 fs_size_mb=1024
+       loader.elf 73,098,184 bytes (== reports' K0-reliable form)
+Harness (valid, fresh-8k-pool-per-boot; matches sched2-fault.txt sec 1):
+  seed2.sh : boot, /zpool.so create -f -o ashift=12 -O recordsize=8k -m /pgpool
+             pgdata /dev/vblk1 ; /tools/cpiod.so receive cluster (cpio_push.py)
+             ; /zpool.so export pgdata.  (OSv cmdline separator is ';' NOT '&&';
+             'echo' is not an OSv program -- both were early harness bugs.)
+  boot8k.sh: fresh usr.img + pgdata.clean.raw copy ; import -f -N ; zfs mount
+             pgdata ; postgres -D /pgpool ; watch for "ready to accept".
+  Missing runtime dirs (pg_notify/pg_serial/pg_snapshots/pg_stat_tmp/pg_tblspc/
+  pg_twophase/pg_commit_ts/pg_dynshmem/pg_replslot + wal/archive_status) had to
+  be recreated in the seed cluster (floki .local/pg18/data was a pruned copy).
+
+K0 baseline (kill() byte-identical to base, SIGURG cross-backend routing only):
+  fresh single-file 8k boot-to-ready = 3/3 READY (smp4).  MATCHES reports' K0.
+
+PG18 latch mechanism on OSv (from .local/pg18 waiteventset.c): WAIT_USE_SIGNALFD
+  (epoll + signalfd, NOT self-pipe).  Each backend: signalfd(SIGURG) fd added to
+  its WaitEventSet epoll; SetLatch(ownlatch) -> WakeupMyProc -> kill(MyProcPid,
+  SIGURG) [only if `waiting`]; cross -> WakeupOtherProc -> kill(pid,SIGURG).
+  SIGURG delivered -> signalfd readable -> epoll wakes.
+
+NEXT: add K1 self-signal perturbation (else if(pid==getpid()) route handler to
+current AS), reproduce 0/10 hang, then STEP 1 page-table-walk diagnosis.
+================================================================================

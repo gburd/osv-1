@@ -1,0 +1,78 @@
+================================================================================
+CONCURRENCY ROOT-CAUSE v2 -- DECISIVE PROFILE (c32 regressed, -smp16 ramfs RO)
+================================================================================
+Config: OSv 9cdfec86 (integ/pg-fork-zfs #1458 tip), PG18.4 musl, fs=RAMFS
+(ZERO ZFS - RO isolates pure CPU/sched/net), -smp 16, -m 40G. Host->guest
+pgbench -S over tap virtio-net (inet_server_addr=192.168.100.2, NOT loopback).
+RO curve reproduced: c8=70k(PEAK) c16=27k c32=18k c48=14.5k -- hard regression.
+
+--- OSv SAMPLER (130849 samples, 8.28s, all 16 CPUs), c32 RO load ---
+  91.79%  sched::cpu::idle()          <-- CPUs IDLE
+   1.73%  sched::cpu::do_idle()       <-- CPUs IDLE
+   ------  = 93.5% IDLE while throughput collapses
+   0.39%  virtio::net::txq::kick_hw / ip_output   (net TX)
+   0.12%  virtio::net::receiver / wait_for_queue  (net RX)
+   0.19%  sys_lseek
+   rest: <0.4% each, scattered
+
+--- gdb osv info threads (c32, 37 PG backends) ---
+  CPU distribution: cpu0=14  cpu1=13  cpu2=8  cpu3=2   (ALL on 4 CPUs)
+  -> 12 of 16 vCPUs IDLE. Backends CRAMMED onto 4 CPUs.
+  Backend statuses: 35 waiting, 1 running, 1 queued.
+  (parked userspace PCs = normal query work: _bt_next/_bt_compare/UnpinBuffer)
+
+================================================================================
+NAMED BOTTLENECK (evidence-backed): NOT lock contention, NOT CPU saturation,
+NOT ZFS, NOT the net queue.  It is a SCHEDULER WAKEUP / THREAD-PLACEMENT defect:
+  - 93.5% of CPU time is IDLE at c32 (sampler).
+  - backends pile onto ~4 of 16 CPUs; 12 vCPUs sit idle (gdb).
+  - a blocked backend's socket-readable wakeup either (a) does not promptly
+    migrate/wake a backend onto an idle CPU, or (b) all backends' wakeups funnel
+    through one waker (the single virtio-net RX receiver thread) that re-queues
+    them onto its OWN cpu instead of spreading -> self-inflicted CPU packing.
+  This is why 4x vCPUs "barely moved it" and why MQ (more RX threads) did not
+  help: the ceiling is the WAKEUP/PLACEMENT path, and adding queues did not
+  change that backends wake concentrated on few CPUs and idle-spin the rest.
+NEXT: c8 PEAK profile for contrast (expect higher util); inspect the wake path
+  (net_channel wake -> epoll_wake -> thread wake -> which CPU it lands on).
+================================================================================
+
+================================================================================
+*** ROOT CAUSE NAMED WITH CODE EVIDENCE (core/sched.cc) ***
+================================================================================
+The RO concurrency ceiling is a SCHEDULER THREAD-PLACEMENT defect:
+OSv has NO wake-time / start-time idle-CPU steering, and its only rebalancer is
+a 100ms lazy load_balance that migrates ONE thread per cycle.
+
+Chain (all in core/sched.cc):
+ 1) thread::start() line 1246:
+      _detached_state->_cpu = _attr._pinned_cpu ? _attr._pinned_cpu
+                                                 : current()->tcpu();
+    A newly-started thread runs on ITS CREATOR'S cpu.  PG forks every backend
+    from the postmaster (one cpu) -> all backends START on ~1-2 cpus.
+ 2) thread::wake_impl() line ~1319:
+      auto tcpu = st->_cpu;                     // last cpu, ALWAYS
+      tcpu->incoming_wakeups[c].push_back(...); // re-queue onto same cpu
+    A blocked backend woken by socket-readable goes BACK to its last cpu.  No
+    check for an idle cpu.  So the clump is self-perpetuating.
+ 3) cpu::load_balance() line 800:
+      tmr.set(now + 100_ms); ... migrate exactly ONE thread to least-loaded cpu.
+    The ONLY spreader.  1 thread / 100ms / cpu cannot disperse 30+ backends
+    across 12 idle cpus under a fast request stream.
+
+MEASURED CONSEQUENCE (matches every prior observation):
+  - 93.5% idle CPU at c32, 81.5% idle even at c8 PEAK (OSv sampler).
+  - 37 backends on 4 of 16 cpus; 12 idle (gdb osv info threads).
+  - "3-of-16 busy, serialized" (prior top -H) -- SAME thing.
+  - 4x vCPUs "barely moved it": more cpus just means more IDLE cpus, because
+    nothing steers wakeups onto them.
+  - MULTIQUEUE did nothing: adding RX threads doesn't change that woken
+    backends return to their clumped home cpu.  This is why the net-queue
+    theory was refuted -- the ceiling was always the scheduler placement.
+
+FIX DIRECTION: add wake/start-time idle-cpu steering (Linux select_task_rq
+analog): when starting or waking an unpinned thread, if its home cpu is loaded
+and an idle cpu exists, place it there.  Alternatively / additionally make
+load_balance aggressive (shorter interval + migrate the imbalance, not 1).
+NEXT: implement + A/B the RO curve.
+================================================================================

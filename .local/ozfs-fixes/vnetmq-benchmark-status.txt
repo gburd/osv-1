@@ -1,0 +1,35 @@
+=== Network throughput A/B (proxy) — HONEST status ===
+Host: 96-vCPU x86-64 metal, KVM, qemu 9.0.2, TAP+vhost. Guest OSv master+MQ, smp16.
+
+pgbench resweep (the intended payoff) could NOT be run on this box: the
+pg18-fork+ZFS image is fork-stack and its build fails under the box's GCC 11.5
+on fork-specific code (core/mmu.cc CONF_fork anon_vma destructor), unrelated to
+this driver. The driver change is master-standalone and needs no fork code, so
+the driver was built + validated on plain upstream/master instead.
+
+As a proxy, iperf3 was used, but it does NOT cleanly reproduce the pgbench RX
+bottleneck and its numbers are NOT decision-grade:
+  * Bulk TCP: ~24 Gbit/s with EITHER nqp=1 or nqp=8. vhost GRO coalesces the
+    stream into few large RX events, so one RX thread is not saturated - bulk
+    bandwidth is not the RX-thread-count bottleneck the diagnosis identified.
+  * UDP -b 0 small datagrams: iperf3's UDP receiver accounting under an
+    unlimited blast is unreliable (server can't keep up counting); the reported
+    per-run "recv" rates (nqp1 1.12G/631M/513M vs nqp8 358M/341M/682M at
+    par 16/32/64, 128B) are noisy and not a valid scaling comparison.
+    Note the datagram DENOMINATOR does scale with queues (nqp8 sends 33M/50M/72M
+    vs nqp1 15M/15M/8M for par 16/32/64) - consistent with more queues moving
+    more packets - but iperf3 UDP is the wrong instrument to quantify it.
+
+What IS proven (mechanism, not a proxy):
+  * Driver negotiates F_MQ, activates nqp=8, runs 8 Rx poll threads pinned to 8
+    distinct CPUs, and the device ACKs CTRL_MQ_VQ_PAIRS_SET(8).
+  * Single-queue path (nqp=1) is unchanged.
+  * The MSI-X budget fix lets the high-vCPU + multi-virtio-blk + MQ-net guest
+    boot (was a deterministic crash).
+
+To get the real RO/RW scaling curve (RO past the ~30k/c8 cap toward Linux's
+204k; RW c64 above ~3000), run the existing pgbench resweep against a guest
+built from the pg18-fork+ZFS image with THIS driver patch applied, on a
+toolchain that builds the fork (the patch applies cleanly to the fork tip -
+verified: `git apply` clean on integ/pg-fork-zfs). That image build was the
+only blocker here, and it is a fork-toolchain issue, not a driver issue.

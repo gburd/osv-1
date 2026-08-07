@@ -1,0 +1,143 @@
+================================================================================
+OSv + PostgreSQL 18 -- LOST-WAKEUP / STARTUP WALL -- ROOT-CAUSED + FIXED
+Milestone: RELIABLE OSv+PG SERVING at default recordsize=8k
+================================================================================
+Author:  Greg Burd
+Date:    2026-07-29
+Box:     osv-cor-a (ec2-user@3.16.46.123), container osv-build, /b
+Branch:  corruptor-fix @ 41c360da  (= 14667a8d [corruptor #1 fix] + patch 0031)
+Build:   scripts/build image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 -j96
+Bundle:  floki:/tmp/lostwakeup-fixA.bundle  (14667a8d..41c360da)
+Classification: [#1423 / OpenZFS]  (pure ZFS-on-OSv mount bug, NOT fork-gated)
+
+================================================================================
+BOTTOM LINE
+================================================================================
+The "forked-backend startup-handoff lost wakeup" that blocked reliable serving
+on ~98% of boots (pg-bench-final.txt) is ROOT-CAUSED and FIXED. It was NOT a
+fork wait/wake coherence bug -- it was a NULL-vnode dereference during ZFS ZIL
+replay at mount, a pure ZFS-on-OSv bug on the shared mount path.
+
+  BEFORE fix: single-file 8k pool aborted at zfs_mount on ~2/3 of boots;
+              raidz1 (benchmark geometry) hit the "registering ... logical
+              replication launcher" then hung on ~98% of boots.
+  AFTER fix:  single-file  25/25 consecutive boots -> "ready to accept" (100%)
+              raidz1(4)+log+cache  12/12 consecutive boots -> "ready" (100%)
+              PG serves real queries; pgbench -i -s50 clean; pgbench -c16 -T45
+              = 211,134 tx / 0 failed / 4839 tps; checkpoints complete clean;
+              no kernel assert / no corruptor signature.
+
+MILESTONE REACHED: OSv+PG now RELIABLY comes up and serves at default 8k on both
+single-file and raidz1 layouts, KVM, -smp 8, 32G. This unblocks BOTH
+benchmarking and corruptor-#2 sustained-RW reproduction.
+
+================================================================================
+ROOT CAUSE (unambiguous, from source + reproduction)
+================================================================================
+WHO is waiting / WHY it "hung": the guest was NOT hung on a lost inter-process
+wakeup. On the ZIL-replay-at-mount path the kernel took a page fault
+(handle_mmap_fault) that, depending on layout/timing, either ABORTED the guest
+(single-file: "Aborted" with a zfs_mount backtrace) or corrupted enough state
+that PostmasterMain wedged before "listening" (raidz1: the benchmark's
+"registering ... launcher" hang). One root, two faces.
+
+The fault (single-file backtrace, addr2line'd against libsolaris.so):
+  osv::handle_mmap_fault <- mmu::vm_fault <- page_fault
+  <- zfs_space              (module/os/osv/zfs/zfs_vnops_os.c:674)
+  <- zfs_replay_truncate    (module/zfs/zfs_replay.c:950)
+  <- zil_replay_log_record / zil_parse / zil_replay (module/zfs/zil.c)
+  <- zfsvfs_setup / zfs_domount / zfs_osv_mount (module/os/osv/zfs/zfs_vfsops.c)
+  <- sys_mount <- mount <- zfs_mount_at <- zfs_mount <- run_main   (AS0, no fork)
+
+Mechanism:
+  On OSv a znode loaded via zfs_zget() OUTSIDE the VFS vget() path has no
+  attached vnode. zfs_znode_alloc() (module/os/osv/zfs/zfs_znode_os.c)
+  kmem_zalloc's the znode and sets up the SA handle + locks but NEVER sets
+  zp->z_vnode, so ZTOV(zp) == NULL. This is a KNOWN OSv-ZFS invariant, already
+  guarded elsewhere (zfs_dir.c uses S_ISDIR(z_mode) instead of
+  ZTOV(zp)->v_type, with a comment naming the z_vnode == NULL case).
+
+  ZIL replay at import/mount is exactly this path. zfs_replay_truncate() does
+  zfs_zget() (no vnode) then zfs_space() -> zfs_freesp() ->
+  zfs_trunc()/zfs_free_range()/zfs_extend(), each of which calls
+      vnode_pager_setsize(ZTOV(zp), ...)
+  On OSv vnode_pager_setsize() is `static inline { vp->v_size = size; }`
+  (include/osv/vnode.h:247). With ZTOV(zp) == NULL this writes NULL->v_size
+  (offset ~56) -> page fault -> mount aborts before PostgreSQL runs.
+
+  INTERMITTENT because it only fires when the ZIL has an un-synced TX_TRUNCATE
+  record to replay at import (depends on export timing). This path became
+  REACHABLE only when patch 0029 (commit 520a29ca) implemented zfs_space for
+  ZIL replay -- before that it was an ENOTSUP stub that silently dropped the
+  record, so the deref never ran.
+
+Why the benchmark called it a "fork handoff lost wakeup": the visible last log
+line on raidz1 was the postmaster's "registering background worker logical
+replication launcher" (bgworker.c:980, PostmasterMain step ~928), emitted
+right before CreateSharedMemoryAndSemaphores / socket-listen / recovery. The
+mount-time fault (or state it corrupted) wedged the guest before "listening",
+which looked like a startup handoff hang. It is the SAME root as the
+single-file mount abort.
+
+================================================================================
+THE FIX  (patch 0031, module/os/osv/zfs/zfs_znode_os.c)
+================================================================================
+Guard each of the 3 vnode_pager_setsize() call sites (zfs_extend,
+zfs_free_range, zfs_trunc) with a NULL-vnode check:
+
+    if (ZTOV(zp) != NULL)
+        vnode_pager_setsize(ZTOV(zp), ...);
+
+Rationale: vnode_pager_setsize only updates the page-cache size hint; a
+replay-loaded znode has no vnode/page cache to size, and zp->z_size + the SA
+update are already authoritative. Matches the existing OSv-ZFS z_vnode==NULL
+guard pattern (zfs_dir.c). NOT fork-gated -- this is a pure ZFS-on-OSv mount
+bug that would also bite a non-fork OSv+ZFS build once patch 0029's zfs_space
+replay is exercised. Delivered as modules/open_zfs/patches/0031-*.patch (the
+OSv ZFS platform layer is maintained as working-tree patches over the
+zfs-2.4.3 submodule, 0001..0031), applied in the working tree; committed to
+the parent repo as 41c360da.
+
+================================================================================
+QUALIFICATION EVIDENCE (pasted, real)
+================================================================================
+Reliability (fix present), recordsize=8k lz4, -smp 8, -m 32G, KVM:
+
+  SINGLE-FILE pool (/b/pgdata.raw), boot-loop:
+    run 1: TOTAL of 10: ready=10 mount_abort=0 badelf=0 hang@bgworker=0 other=0
+    run 2: TOTAL of 15: ready=15 mount_abort=0 badelf=0 hang@bgworker=0 other=0
+    => 25/25 consecutive boots reached "database system is ready to accept
+       connections".
+
+  RAIDZ1(4)+log+cache pool (6 virtio-blk members == benchmark geometry):
+    TOTAL of 12: ready=12 mount_abort=0 badelf=0 hang@bgworker=0 other=0
+    => 12/12 consecutive boots reached "ready".
+
+  Serving proof (raidz1 boot):
+    pg_isready                       -> accepting connections
+    select version()                 -> PostgreSQL 18.4 on x86_64-pc-linux-musl
+    select count(*) from pg_class     -> 415
+    pgbench -i -s50                  -> done in 8.04 s (5,000,000 tuples), clean
+    pgbench -c16 -j4 -T45            -> 211,134 tx / 0 failed / 4839 tps
+    postmaster still accepting connections afterward; checkpoint complete clean;
+    NO PANIC / VERIFY / Assert / range_tree / zero-page / EIO in the console.
+
+OPERATIONAL NOTE (cost me time; for the next agent): scripts/build's final
+image step will silently CORRUPT usr.img if ANY live qemu holds the image write
+lock during the build -> subsequent boots throw osv::invalid_elf_error
+"bad elf header" at boot (before ZFS init). Always kill LIVE qemu (zombies are
+harmless) BEFORE building. A fresh build with zero live qemu produces a clean
+image.
+
+================================================================================
+NEXT: CORRUPTOR #2 (log-spacemap range-tree wild write under sustained -c16 RW)
+================================================================================
+Now that OSv+PG reliably serves at 8k, corruptor #2 can be reproduced on a
+stable base. A 45s -c16 smoke at s=50 on raidz1 was clean; the documented #2
+repro is heavier (pgbench -i -s1000 then -c16 -T120 + checkpoint frenzy). The
+localization + canary approach from corruptor-fix.txt still stands (victim =
+zfs_btree_leaf page, a 4096B mem_area::page alloc on the free_page->page_pool::l1
+path; constant end=0x804000000). Recheck whether this mount fix also affected #2
+(they do NOT obviously share a root: #2 is a sustained-RW wild write, this was a
+mount-time NULL deref).
+================================================================================

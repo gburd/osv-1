@@ -1,0 +1,222 @@
+OSv PR #1423 (selectable BSD/OpenZFS) - open_zfs root-mount fix
+================================================================
+Author: Greg Burd <greg@burd.me>
+Branch: pr/openzfs-draft   base 44f17f6b0   fix commit e2cb7436
+Env:    EC2 m5d.metal, fedora:39 build container, KVM guests (-kernel multiboot boot)
+
+SUMMARY
+-------
+In open_zfs mode the ZFS pool was not usable as the root filesystem: the guest
+mounted an empty pool at / and powered off with "Failed to load object: /hello".
+bsd_zfs worked end to end.  One-line Makefile bug: the compile flag that makes
+the mkfs build tool pick the OpenZFS pool-root mountpoint convention never
+reached the compiler, so the OpenZFS image was populated into the wrong place
+(the builder's ramfs) and shipped with an empty pool.  Fixed; both modes now
+boot native-example from the ZFS root.  conf_zfs=bsd is byte-for-byte unchanged.
+
+
+ROOT CAUSE (what the OpenZFS path was actually missing)
+-------------------------------------------------------
+The mount + pivot themselves were NOT broken.  Instrumenting the boot showed:
+
+    ZFS: root mounted ok, z_root=34         <- zfs_osv_mount + zfs_domount OK
+    DBG: sys_pivot_root ret=0               <- pivot OK (/zfs became /)
+    DBG: zfs_vop_lookup zap_lookup(name=hello) err=2   <- ENOENT
+    DBG: root dataset=osv z_root=34 entries=1
+    DBG: root/ zfs -> ...                   <- the ONLY entry in the pool root
+
+So the mounted osv dataset was empty apart from a single "zfs" child-mountpoint
+stub.  /hello, /etc, /usr were simply not on disk.  The bug was upstream of the
+kernel, in image creation.
+
+Tracing the populate step (scripts/upload_manifest.py boots a zfs_builder that
+runs /tools/mkfs.so then /tools/cpiod.so --prefix /zfs/):
+
+  - mkfs.cc chooses the pool-root mountpoint by #ifdef CONF_ZFS_OPENZFS:
+        openzfs:  zpool create -f -R /zfs -m / osv   (mountpoint / -> mounts /zfs)
+        bsd:      zpool create -f -R /zfs   osv       (BSD default / -> mounts /zfs)
+    The -m / for OpenZFS is required because OpenZFS defaults a pool's root
+    mountpoint to /<pool> (/osv), whereas the old BSD-ZFS port defaulted to /.
+
+  - But the define was attached in the Makefile like this, INSIDE the early
+    "ifeq ($(conf_zfs),openzfs)" block near the top of the file:
+
+        $(out)/tools/mkfs/mkfs.o: CXXFLAGS += -DCONF_ZFS_OPENZFS
+
+    and $(out) is not defined until ~60 lines later:
+
+        out = build/$(mode).$(arch)
+
+    At the point of the mkfs.o line $(out) expands to the empty string, so the
+    target-specific variable bound to the bogus target "/tools/mkfs/mkfs.o"
+    instead of the real "build/release.x64/tools/mkfs/mkfs.o".  The define never
+    reached the compile (verified: `make ... mkfs.o V=1` showed no
+    -DCONF_ZFS_OPENZFS).  mkfs.cc therefore ALWAYS took the #else (BSD) branch,
+    even in open_zfs mode.
+
+  - Consequence in open_zfs mode: the pool was created without -m /, so with
+    OpenZFS's /<pool> default it mounted at /zfs/osv (confirmed:
+    "DBG: zfs_osv_mount ... osname=osv mp_path=/zfs/osv").  Nobody was mounted at
+    /zfs, so cpiod --prefix /zfs/ wrote /zfs/hello etc. onto the builder's
+    RAMFS root, which is discarded on shutdown.  The osv dataset only ever
+    received the osv/zfs child-mountpoint stub.  At boot the loader mounted the
+    (empty) osv pool, pivot succeeded, and every root lookup returned ENOENT ->
+    "Failed to load object: /hello. Powering off."
+
+  - bsd_zfs was unaffected because BSD's pool-root mountpoint already defaults to
+    / (so osv mounts at /zfs with or without the missing define), and cpiod
+    --prefix /zfs/ correctly populated the osv dataset.
+
+
+THE FIX
+-------
+File: Makefile (only file changed; +12 -2)
+
+Split the broken target-specific assignment into (a) a plain make variable set
+in the early conf_zfs=openzfs block, and (b) the actual per-object flag attached
+AFTER `out` is defined, gated on that variable:
+
+    # early block (conf_zfs=openzfs), where $(out) is still unset:
+    conf_zfs_openzfs := 1
+
+    # after `out = build/$(mode).$(arch)`:
+    ifdef conf_zfs_openzfs
+    $(out)/tools/mkfs/mkfs.o: CXXFLAGS += -DCONF_ZFS_OPENZFS
+    endif
+
+Now -DCONF_ZFS_OPENZFS reaches mkfs.o (verified via `make ... mkfs.o V=1`), so
+open_zfs uses `zpool create -f -R /zfs -m / osv`, the pool root mounts at /zfs,
+and cpiod populates the osv dataset exactly as bsd_zfs does.  The loader's
+existing mount_rootfs("/zfs","/dev/vblk0.1","zfs",0,"osv",pivot) then finds a
+populated pool and pivots to it.
+
+Design constraints honored:
+  - Kernel stays impl-agnostic: the ONLY consumer of CONF_ZFS_OPENZFS is the
+    userspace mkfs build tool (tools/mkfs/mkfs.cc:80); no CONF_ZFS_OPENZFS in
+    shared kernel code.  The kernel/vfsops mount path (zfs_osv_mount,
+    zfs_domount, zfs_update_vfsops) was already correct and is untouched.
+  - The change is gated on conf_zfs=openzfs, so conf_zfs=bsd is byte-for-byte
+    unchanged (BSD mkfs.o still compiles without the define, same as before).
+  - No new patch in modules/open_zfs/patches/ was needed: the mount glue in the
+    submodule already worked; the defect was the build wiring that fed it an
+    empty image.
+
+
+VALIDATION (both modes, end to end, m5d.metal / KVM)
+----------------------------------------------------
+Built in separate trees to avoid object contamination:
+  bsd:      ./scripts/build image=native-example fs=zfs
+  openzfs:  ./scripts/build image=native-example fs=zfs conf_zfs=openzfs   (with the fix)
+
+--- conf_zfs=bsd (control, unchanged, must still work) ---
+  VFS: mounting zfs at /zfs
+  zfs: mounting osv from device /dev/vblk0.1
+  VFS: mounting devfs at /dev
+  VFS: mounting procfs at /proc
+  VFS: mounting sysfs at /sys
+  Cmdline: /hello
+  Hello from C code
+  VFS: unmounting /dev / /proc / /
+  Powering off.
+
+--- conf_zfs=openzfs (the fix) ---
+  ZFS: OpenZFS 5000 initialized
+  VFS: mounting zfs at /zfs
+  [ZFS] Pool 'osv' is up-to-date at version 5000
+  ZFS: root mounted ok, z_root=34
+  VFS: mounting devfs at /dev
+  VFS: mounting procfs at /proc
+  VFS: mounting sysfs at /sys
+  Cmdline: /hello
+  Hello from C code
+  VFS: unmounting /dev / /proc / /
+  Powering off.
+
+openzfs was deterministic: 3/3 boots ran the app.
+
+--- proof the mount is a real, writable, persistent ZFS root ---
+Added a temporary /zfsrwtest that writes a file to the ZFS root /, fsyncs, and
+reads it back; then a second boot on the SAME disk re-reads it (validation
+scaffold only, reverted, NOT part of the committed fix):
+  boot 1: ZFSRWTEST: WROTE+READBACK=[zfs-root-rw-ok-persistent] MATCH
+  boot 2: ZFSRWTEST: PERSISTED read=[zfs-root-rw-ok-persistent]
+Confirms real ZFS read+write and persistence across reboot (not ramfs).
+
+
+DELIVERABLES
+------------
+  commit e2cb7436 on pr/openzfs-draft (author Greg Burd), 1 file changed (Makefile).
+  git bundle: 44f17f6b0..HEAD  (ozfs-mount-fix.bundle), verified.
+Full boot logs for both modes captured alongside this report.
+
+================================================================
+APPENDIX A: full conf_zfs=bsd boot log (--verbose)
+================================================================
+cSeaBIOS (version 1.16.3-1.fc39)
+iPXE (https://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+BEFCBD10+BEF0BD10 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+Booting from ROM..OSv v0.57.0-388-g44f17f6b
+4 CPUs detected
+Firmware vendor: Unknown
+console=serial
+bsd: initializing - done
+VFS: mounting ramfs at /
+VFS: mounting devfs at /dev
+net: initializing - done
+devfs: created device vblk0.1 for a partition at offset:6291456 with size:530579456
+virtio-blk: Add blk device instances 0 as vblk0, devsize=536870912
+random: intel drng, rdrand registered as a source.
+random: <Software, Yarrow> initialized
+VFS: unmounting /dev
+zfs: driver has been initialized!
+VFS: mounting zfs at /zfs
+zfs: mounting osv from device /dev/vblk0.1
+VFS: mounting devfs at /dev
+VFS: mounting procfs at /proc
+VFS: mounting sysfs at /sys
+BSD shrinker: event handler list found: 0x600000e62480
+	BSD shrinker found: 0x100000015a50
+BSD shrinker: unlocked, running
+Booted up in 72.23 ms
+Cmdline: /hello
+Hello from C code
+VFS: unmounting /dev
+VFS: unmounting /proc
+VFS: unmounting /
+Powering off.
+
+================================================================
+APPENDIX B: full conf_zfs=openzfs boot log (--verbose, FIXED)
+================================================================
+cSeaBIOS (version 1.16.3-1.fc39)
+iPXE (https://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+BEFCBD10+BEF0BD10 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+Booting from ROM..OSv v0.57.0-388-g44f17f6b
+4 CPUs detected
+Firmware vendor: Unknown
+console=serial
+bsd: initializing - done
+VFS: mounting ramfs at /
+VFS: mounting devfs at /dev
+net: initializing - done
+devfs: created device vblk0.1 for a partition at offset:6291456 with size:530579456
+virtio-blk: Add blk device instances 0 as vblk0, devsize=536870912
+random: intel drng, rdrand registered as a source.
+random: <Software, Yarrow> initialized
+VFS: unmounting /dev
+ZFS: OpenZFS 5000 initialized
+VFS: mounting zfs at /zfs
+[ZFS] Pool 'osv' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+VFS: mounting devfs at /dev
+VFS: mounting procfs at /proc
+VFS: mounting sysfs at /sys
+BSD shrinker: event handler list found: 0
+BSD shrinker: vm_lowmem event handler list not found, skipping
+Booted up in 149.49 ms
+Cmdline: /hello
+Hello from C code
+VFS: unmounting /dev
+VFS: unmounting /proc
+VFS: unmounting /
+Powering off.

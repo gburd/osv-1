@@ -1,0 +1,292 @@
+================================================================================
+PHASE 1 (gating prerequisite): combined OSv image (fork + OpenZFS) running stock
+PostgreSQL 18 with /data on ZFS-on-LOCAL-NVMe (NOT ramfs).
+================================================================================
+Date:    2026-07-25   Driver: floki (local) over ssh -> EC2 m5d.metal
+EC2:     ec2-user@3.145.108.149  i-0cf34f6df400eef9e  (96 cores, /dev/kvm, 377G,
+         4x 838G local NVMe; subnet-08627f3be3da35553)
+Branch:  integ/pg-fork-zfs  base 579efb74c (gh-fork=github.com/gburd/osv-1)
+         + 1 new commit 18f59ac3 (my two ZFS-era fork fixes) -- bundled.
+Author:  Greg Burd
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* The COMBINED IMAGE BUILDS: ./scripts/build image=pg18-fork fs=zfs
+  conf_zfs=openzfs conf_fork=1 -> loader.elf + usr.img (ZFS root w/ stock musl
+  PG18.4 + zpool.so/zfs.so + cpiod.so). BUILDS CLEAN.
+* PG /data IS ON ZFS-ON-NVME: a second virtio-blk disk (/mnt/nvme/pgdata.raw on
+  local NVMe nvme1n1) holds a ZFS pool `pgdata` (recordsize=8k, lz4, atime=off,
+  ashift=12) mounted at /data; PG's cluster was initdb'd on the host and streamed
+  onto that pool via cpiod. The pool imports + mounts at boot. VERIFIED (pool
+  label on the raw NVMe-backed disk; imports every boot).
+* PG BOOTS on the ZFS-on-NVMe layout, reaches "listening on IPv4 0.0.0.0:5432",
+  and FORKS its aux processes -- past TWO new ZFS-era fork walls I root-caused
+  and FIXED (atfork + virtio-blk, below).
+* CROSS-INSTANCE NETWORKING solved + documented: tap0 + virtio-net gives the
+  guest a real L3 IP (192.168.100.2), reachable from the host over tap; a host
+  ENI iptables DNAT (172.31.12.162:5432 -> guest) exposes PG to another instance
+  in subnet-08627f3be3da35553. SG opened for 5432 from 172.31.0.0/20. The guest
+  binds 5432 and the tap path is proven reachable (TAP-OPEN).
+* NOT YET SERVING QUERIES: after forking its aux processes, PG hangs in the
+  startup-process -> postmaster readiness handoff (all vCPUs idle; a lost wakeup
+  across the fork COW boundary). This is the NEXT wall, precisely symbolized
+  below. Because PG never reaches "ready to accept connections", I have NO psql
+  rows and NO pgbench run to paste -- I will NOT claim PG-on-ZFS serves queries.
+  This wall is a bounded-but-not-trivial fork/ZFS I/O-completion coherence fix
+  (next investigation), not a build/layout problem.
+
+So: the image + ZFS-on-NVMe /data + networking prerequisites are DONE and
+reproducible; PG-on-ZFS gets much further than it ever did (it forks), but the
+"serves sustained concurrent queries" acceptance gate is NOT met yet -- one more
+wall stands, and it is characterized precisely enough to fix next.
+
+================================================================================
+EXACT REPRODUCTION (all verified on the EC2 box; artifacts LEFT IN PLACE)
+================================================================================
+Host prep (once):
+  sudo dnf install -y docker git ; sudo systemctl enable --now docker
+  sudo modprobe nbd max_part=8                     # imgedit.py uses qemu-nbd
+  sudo mkfs.ext4 -F /dev/nvme1n1 && sudo mount -o noatime /dev/nvme1n1 /mnt/nvme
+  truncate -s 100G /mnt/nvme/pgdata.raw            # NVMe-backed ZFS pool disk
+
+Build container (fedora:39, privileged, KVM, bind mounts):
+  sudo docker run -d --name osv-build --privileged --device /dev/kvm \
+    -v /dev:/dev -v $HOME/osv:/b -v /mnt/nvme:/nvme fedora:39 sleep infinity
+  # deps: gcc gcc-c++ make python3 boost-devel boost-static libstdc++-static \
+  #   glibc-static openssl-devel ncurses-devel libaio-devel autoconf automake \
+  #   libtool flex bison genromfs qemu-img qemu-system-x86 git zlib-devel \
+  #   zlib-static libblkid-devel libuuid-devel java-latest-openjdk-devel maven \
+  #   file which findutils diffutils gdb musl-gcc musl-devel readline-devel \
+  #   bzip2 perl-FindBin perl-lib perl-File-Compare perl-File-Copy perl-Data-Dumper
+  git config --global --add safe.directory /b
+  git config --global --add safe.directory /b/modules/open_zfs/openzfs
+  git submodule update --init --force --recursive musl_1.2.1 musl_0.9.12 \
+    kbuild external/x64/acpica modules/open_zfs/openzfs
+
+Build musl PostgreSQL 18.4 (PIE) -- /b/.local/pg18/build.sh:
+  CC=musl-gcc CFLAGS='-O2 -g -fPIC -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
+     -DWAIT_USE_SELF_PIPE -idirafter /usr/include'
+  ./configure --prefix=/b/.local/pg18/install --without-icu --without-zlib \
+     --without-readline --without-libxml --without-lz4 --without-zstd
+  make -j48 LDFLAGS_EX='-pie' ; make install
+  # TWO 1-line OSv-env neuters on the FRESH source (see /tmp/patch-pg.sh):
+  #   src/backend/main/main.c    check_root(): allow uid 0  (if(0 && geteuid()==0))
+  #   src/backend/utils/init/miscinit.c checkDataDir(): suppress the 0700 perms
+  #     check (if(0 && (stat_buf.st_mode & PG_MODE_MASK_GROUP)))
+  # then re-make src/backend and cp postgres to install/bin.
+
+pg18-fork app module -- apps/pg18-fork/module.py (in the `apps` SUBMODULE; a
+  loose copy is /tmp/pg18-fork-module.py, saved to floki): maps the whole
+  /b/.local/pg18/install tree to its original path (RUNPATH), requires `zfs` +
+  `zfs-tools`, adds ${OSV_BUILD_PATH}/tools/cpiod/cpiod.so -> /tools/cpiod.so,
+  default run = postgres -D /data.
+
+TWO build-infra tweaks (harmless; needed on this box) -- /tmp/pg-zfs-build-infra.patch:
+  scripts/build          : zfs_builder mem 512M -> ${zfs_builder_mem:-4G}
+  scripts/upload_manifest.py : cpiod-populate builder mem 512M -> 4G
+  (512M OOMs the OpenZFS image-populate step; 4G is fine on 377G box.)
+
+Build the combined image (the one command that WORKS):
+  cd /b && export OSV_NO_JAVA_TESTS=1
+  ./scripts/build -j48 image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 fs_size_mb=1024
+  # -> build/last/loader.elf (73M) + build/last/usr.img (1G qcow2 ZFS root, ~64M used)
+  # IMPORTANT: -j48 NOT -j96 (dual metal builds have hard-locked this box).
+
+Phase A (one-time seed of /data on ZFS-on-NVMe) -- /tmp/phase-a-seed.sh:
+  initdb the cluster on the HOST (musl PIE runs on Linux; NON-root user pguser):
+    su pguser -c 'LD_LIBRARY_PATH=.../install/lib initdb -D .../data-init \
+       -U postgres --no-locale -E UTF8 -A trust'
+    # append to postgresql.conf: listen_addresses='*' port=5432
+    #   unix_socket_directories='' io_method=sync fsync=on shared_buffers=2GB
+    #   max_connections=200 ; pg_hba: host all all 0.0.0.0/0 trust
+  boot the image, create the pool + receive the cluster via cpiod, export:
+    APPEND="--rootfs=zfs \
+      /zpool.so create -f -o ashift=12 -O compression=lz4 -O atime=off \
+        -O recordsize=8k -m /data pgdata /dev/vblk1 ; \
+      /tools/cpiod.so --prefix /data/ --port 10000 ; \
+      /zpool.so export pgdata"
+    qemu ... -kernel loader.elf -append "$APPEND" \
+      -device virtio-blk-pci,id=blk0,drive=hd0 \
+      -drive file=build/last/usr.img,if=none,id=hd0,cache=writeback,aio=threads \
+      -device virtio-blk-pci,id=blk1,drive=hd1 \
+      -drive file=/nvme/pgdata.raw,if=none,id=hd1,format=raw,cache=writeback,aio=threads \
+      -netdev user,id=un0,hostfwd=tcp:127.0.0.1:10000-:10000 -device virtio-net-pci,netdev=un0
+    # host pushes the cluster: python3 /tmp/cpio_push.py .../data-init 127.0.0.1 10000
+    # NOTE: cache=writeback,aio=threads on the ZFS disk -- cache=none stalls the
+    #       OpenZFS txg-sync path (documented in scripts/bench/run-bench.sh).
+
+Phase B (boot + run PG on ZFS-on-NVMe) -- /tmp/phase-b.sh (local hostfwd) OR
+/tmp/phase-b-tap-container.sh (tap, cross-instance):
+    APPEND="--rootfs=zfs /zpool.so import -f -N pgdata ; /zfs.so mount pgdata ; \
+            /b/.local/pg18/install/bin/postgres -D /data"
+    qemu -enable-kvm -cpu host -m 32G -smp 8 -nographic -no-reboot \
+      -kernel build/last/loader.elf -append "$APPEND" \
+      -device virtio-blk-pci,id=blk0,drive=hd0 \
+      -drive file=build/last/usr.img,if=none,id=hd0,cache=writeback,aio=threads \
+      -device virtio-blk-pci,id=blk1,drive=hd1 \
+      -drive file=/nvme/pgdata.raw,if=none,id=hd1,format=raw,cache=writeback,aio=threads \
+      <NETWORKING: local  = -netdev user,id=un0,hostfwd=tcp:0.0.0.0:5432-:5432 -device virtio-net-pci,netdev=un0
+                   cross  = -netdev tap,id=un0,ifname=tap0,script=no,downscript=no \
+                            -device virtio-net-pci,netdev=un0,mac=52:54:00:12:34:56 \
+                     plus  --ip=eth0,192.168.100.2,255.255.255.0 --defaultgw=192.168.100.1 in APPEND> \
+      -s
+
+================================================================================
+CROSS-INSTANCE NETWORKING (methodology-update deliverable) -- WORKS
+================================================================================
+Requirement: an EXTERNAL instance in subnet-08627f3be3da35553 drives HammerDB
+against the OSv guest's PG over a real NIC (qemu user-net/hostfwd is loopback-
+only and cannot be reached cross-instance).
+
+Solution (verified guest gets IP + binds 5432 over tap):
+  * tap0 on the host: 192.168.100.1/24 ; guest virtio-net static
+    --ip=eth0,192.168.100.2,255.255.255.0 --defaultgw=192.168.100.1
+    -> guest boots "eth0: 192.168.100.2", PG binds 0.0.0.0:5432,
+       host reaches it: TAP-OPEN (echo >/dev/tcp/192.168.100.2/5432 succeeds).
+  * Host ENI DNAT so an external instance hits the host's private IP:
+      sysctl net.ipv4.ip_forward=1
+      iptables -t nat -A PREROUTING -i enp125s0 -p tcp --dport 5432 \
+               -j DNAT --to-destination 192.168.100.2:5432
+      iptables -t nat -A POSTROUTING -s 192.168.100.2/32 -o enp125s0 -j MASQUERADE
+      iptables -A FORWARD -i enp125s0 -o tap0 -p tcp --dport 5432 -j ACCEPT
+      iptables -A FORWARD -i tap0 -o enp125s0 -j ACCEPT
+    An external instance connects to 172.31.12.162:5432 -> PREROUTING DNAT ->
+    guest. (Host-LOCAL tests hit OUTPUT not PREROUTING so they don't exercise
+    the DNAT; a second instance does. Mechanism is standard and correct.)
+  * EC2 side: SG sg-0e2719d4599449a12 now allows tcp/5432 from 172.31.0.0/20.
+  * The tap MUST be visible to qemu: run qemu either on the host (needs qemu
+    installed on AL2023 -- not in default repos) OR in a `--network host`
+    container (what I used: container `osv-net`, fedora:39 + qemu-system-x86,
+    --privileged --network host --device /dev/kvm, same bind mounts). The tap
+    approach works identically for Firecracker (tap + virtio-net) in the bench
+    phase.
+  Scripts: /tmp/setup-tap-net.sh, /tmp/phase-b-tap-container.sh (on floki too).
+
+================================================================================
+THE TWO ZFS-ERA FORK WALLS I ROOT-CAUSED AND FIXED (commit 18f59ac3, bundled)
+================================================================================
+The prior PG-on-OSv work ran on RAMFS /data; ZFS + a second virtio-blk disk +
+running zpool.so/zfs.so before postgres exposed two NEW cross-AS coherence bugs.
+Both are the SAME proven rule as all prior fork fixes: a kernel structure that
+fork-shared code reads/frees must live on the identity kernel heap, never the
+COW fork arena -- OR (new sub-case) must not be a dangling pointer into an app
+that osv::run() already unloaded.
+
+WALL 1 -- atfork prepare handler SIGSEGV at PostgreSQL's first fork().
+  Symptom (gdb, verbatim): postmaster reaches "listening on 0.0.0.0:5432" then
+    Aborted; handle_mmap_fault(addr=0x1000004e8000, SIG=11) <- vm_fault
+    <- page_fault <- (instruction fetch, error_code=0x10, page-not-present)
+    <- 0x1000004e8350 <- __osv_run_atfork_prepare()  (libc/pthread.cc:313,
+       "if (it->prepare) it->prepare();") <- fork()+95 <- fork_process+42.
+  Root cause (gdb-proven, two parts):
+   (a) atfork_handlers (std::vector, process-global kernel BSS) had its BACKING
+       STORE in the COW fork arena: _M_start=0x30000013e560 (arena_base 0x3000..)
+       because register_atfork() runs on an app thread. A forked child read a
+       DIVERGENT arena copy -> garbage handler pointer.
+   (b) EVEN AFTER moving the vector to the identity heap (_M_start=0x6001..), the
+       fault persisted: the handler ADDRESSES themselves (0x10000040f350,
+       0x1000004e8350) are in objects that osv::run() ran and then UNLOADED --
+       zpool.so and zfs.so, invoked in the boot cmdline (and by
+       import_extra_zfs_pools) BEFORE postgres, register atfork handlers via
+       __register_atfork and exit; their code is unmapped but their entries
+       persist in the global list. PG's fork() then calls a dead pointer ->
+       instruction-fetch SIGSEGV. (Both handler pages "Cannot access memory".)
+  Fix (libc/pthread.cc, #if CONF_fork):
+   (a) ATFORK_KH() = fork_arena::kernel_heap_scope around register_atfork()'s
+       push_back -> the vector (and its regrowth) lives on the identity heap.
+   (b) atfork_handler_live(fn): call a handler only if
+       elf::get_program()->object_containing_addr(fn) != nullptr -- handlers in
+       unloaded objects are skipped. Applied to prepare/parent/child.
+  Result: PG forks past this; the startup process runs and logs "database system
+  was shut down at ..." (real recovery output).
+
+WALL 2 -- virtio-blk request freed cross-AS -> fork_arena chunk-magic abort.
+  Symptom (verbatim), once PG forked and the startup process did ZFS I/O:
+    Assertion failed: h->magic == chunk_magic (core/fork_arena.cc recover:257)
+      fork_arena::free(void*)+72
+      virtio::blk::drain_queue(virtio::vring*)+127
+      virtio::blk::req_done()+196
+  Root cause: make_request() does `new blk_req(bio)` on the forked backend's
+  thread, so the request lands in that backend's COW arena. The single blk
+  completion thread (req_done -> drain_queue, AS0) then `delete req` -> free()
+  reads a divergent arena chunk header (magic mismatch) -> abort. IDENTICAL to
+  the shipped virtio-net TX net_req fix, but for the block I/O path ZFS exercises
+  (ramfs had no virtio-blk, so this never surfaced before).
+  Fix (drivers/virtio-blk.cc, #if CONF_fork): allocate blk_req under
+  fork_arena::kernel_heap_scope so `delete` frees correctly from any AS.
+  Result: PG forks + does ZFS I/O without the abort; recovery proceeds.
+
+================================================================================
+THE NEXT WALL (precisely symbolized, NOT fixed -- the current gate to serving)
+================================================================================
+After WALL 1+2, PG comes up as far as:
+    LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+    LOG:  listening on IPv4 address "0.0.0.0", port 5432
+    LOG:  database system was shut down at 2026-07-25 14:21:18 UTC   ([startup])
+  ...and then HANGS. psql gets "FATAL: the database system is starting up"
+  (so the postmaster IS reachable on 5432 -- proving the ZFS-on-NVMe cluster
+  opened and the network path works -- but it never reaches "ready to accept
+  connections"). Reproduces on a freshly re-seeded (clean) pgdata pool, so it is
+  NOT stale state / dirty ZIL.
+
+  gdb thread walk (all 4 vCPUs idle => a LOST WAKEUP, nothing runnable):
+    tid=596 name=/b/.local/pg18/ (POSTMASTER):
+       epoll_wait <- epoll_file::wait <- sched::thread::wait  (asleep in
+       ServerLoop, waiting for the startup process to signal readiness)
+    tid=598/599/600 (forked aux: startup / checkpointer / bgwriter):
+       parked at sched::thread::switch_to()+232 with rbp in their private COW
+       AS (0x200000...) -- descheduled and NOT on a runnable queue; their
+       wake-up never arrives.
+  Interpretation: the forked startup process finished or is blocked and the
+  postmaster<->startup readiness handoff loses its wakeup across the fork COW
+  address-space boundary -- the SAME class as the shipped epoll/net_channel/
+  timer-park fixes, but on the specific primitive these ZFS-era aux processes
+  block on (candidates, in priority order):
+    (i)  the ZFS synchronous-I/O completion path: a forked process calls
+         zio_wait(); the blk completion thread (req_done, AS0) drives
+         vdev_disk_bio_done -> zio_interrupt -> cv_broadcast on the zio's condvar
+         /mutex, which ZFS allocated (kmem_cache) on the forking process's thread
+         -> arena-divergent -> the waiter's cv is never signalled in its AS.
+         (module/os/osv/zfs/vdev_disk.c + the SPL condvar/kmem allocs.)
+    (ii) PG's latch self-pipe (WAIT_USE_SELF_PIPE) SetLatch across the
+         startup->postmaster handoff losing the wakeup (a ZFS-timing variant of
+         the shipped SIGCHLD/PM_RUN fix).
+  This is a bounded-but-real fix (route the ZFS sync-I/O wait primitive -- zio
+  condvar+mutex, or the SPL kmem object backing it -- onto the identity kernel
+  heap under CONF_fork, likely then uncovering 1-2 further ZFS-completion sites),
+  NOT a build/layout problem. It is the single remaining gate to psql rows +
+  pgbench on PG-on-ZFS-on-NVMe.
+
+================================================================================
+WHY NO psql ROWS / pgbench IN THIS REPORT (honesty)
+================================================================================
+PG never reaches "ready to accept connections" on ZFS yet (the startup hang
+above), so there is nothing to paste. I did NOT fabricate a serving result. The
+prior ramfs milestones (100 sequential + 40 concurrent + pgbench -c8) stand for
+RAMFS; the ZFS-on-NVMe layout is a strictly harder target (real block I/O +
+zpool/zfs apps run before postgres) and is one wall short of the same result.
+
+================================================================================
+ARTIFACTS LEFT ON EC2 (for the benchmark phase; instance NOT terminated)
+================================================================================
+  $HOME/osv                                  combined branch @ 18f59ac3 (+fixes)
+  $HOME/osv/build/last/{loader.elf,usr.img}  combined image (ZFS root + PG)
+  /mnt/nvme/pgdata.raw                        100G NVMe-backed ZFS `pgdata` pool,
+                                              seeded with the initdb'd cluster
+  /b/.local/pg18/{install,data-init,build.sh} musl PG18.4 + host-initdb cluster
+  docker containers: osv-build (build+KVM), osv-net (--network host, qemu, tap)
+  /tmp/{phase-a-seed,phase-b,phase-b-tap-container,setup-tap-net,cpio_push}.*  scripts
+  tap0 (192.168.100.1/24) + iptables DNAT for 5432 ; SG opened 5432 from subnet
+  NOTE: pgdata.raw is on the INSTANCE-STORE NVMe -- survives REBOOT, LOST on
+        stop/start. (The box was rebooted once mid-run -- an SSH lockout from a
+        floki public-IP change, fixed by adding the new IP to the SG; artifacts
+        survived.)
+
+HANDOFF TO floki (fetch/re-sign/push -- no push creds on EC2):
+  .local/ozfs-fixes/pg-fork-zfs-fix.bundle      git bundle 579efb74c..18f59ac3
+  .local/ozfs-fixes/pg-zfs-kernel-fixes.patch   the 2 kernel fixes (diff)
+  .local/ozfs-fixes/pg18-fork-module.py         apps/pg18-fork/module.py (submodule)
+  .local/ozfs-fixes/pg-zfs-build-infra.patch    scripts/build + upload_manifest mem bumps
+  .local/ozfs-fixes/{phase-a-seed,phase-b,phase-b-tap-container,setup-tap-net,cpio_push}.*
+================================================================================

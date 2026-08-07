@@ -1,0 +1,211 @@
+================================================================================
+signature-F INTERMITTENT LOST-WAKEUP / CHECKPOINT STALL -- ROOT CAUSE + FIX(es)
+================================================================================
+Author: Greg Burd   Classification: [fork-stack]
+Base:   corruptor-fix @ 6ccf4a92 (all 3 wild-write fixes + ZIL-mount patch 0031)
+Box:    osv-cor-a (ec2-user@3.16.46.123), container osv-build, /b
+Build:  scripts/build image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 -j96
+Commit: 1ae2602f (F1 fix)   Bundle: floki:/tmp/sigF-fix.bundle (6ccf4a92..HEAD)
+
+STATUS: F1 root-caused + FIXED + committed + bundled.  F2 root-caused; fix in
+progress.  Qualification NOT yet at 10x (F2 still open).  Honest partial below.
+
+================================================================================
+WHAT signature-F IS (reproduced, this base)
+================================================================================
+Heavy load (pgbench -i -s1000 COPY, or -c16 -T120) intermittently (~1 in 3-4
+runs, -smp4 KVM) WEDGES at "checkpoint starting: wal": guest ~idle, disk grow=0,
+pgbench -i dies with "PQputline failed" (server COPY backend stopped reading).
+The postmaster + a fresh `select 1` STILL ANSWER -> not a total hang.  0
+corruptor signatures (no VERIFY/range_tree/EIO wild write).  A re-run completes.
+
+Reproduced on PRISTINE 6ccf4a92 with the ORIGINAL heavy-repro.sh (no gdb stub):
+run wedged CLEAN at "checkpoint starting: wal", pgbench -i rc=1 (PQputline),
+NO crash signature.  So this is a real base defect, not a harness artifact.
+
+WHO IS PARKED (gdb on the wedged guest, loader.elf symbols):
+  588 postmaster    epoll_file::wait           (ServerLoop -> answers select 1)
+  590 CHECKPOINTER  epoll_wait on its latch    (the wedge: "starting", no "complete")
+  595 a COPY/backend sys_read -> pipe_buffer::read
+  591/594/598       parked backends (switch_to, COW stacks)
+The checkpointer (590) is a fork child of 588, status=waiting, cleanly parked on
+its latch's epoll self-pipe, NOT on a runqueue, stack pages present.
+
+It is a FORK WAKE/SCHEDULE-COHERENCE bug in OSv's scheduler switch/resume of a
+COW fork child, with THREE observed faces (all the same root -- resuming/ waking
+a fork child whose per-AS context is not coherently present):
+  (a) CLEAN STALL: the wake silently fails to schedule the child -> it never
+      runs -> the checkpoint never completes.  (release / no-assert path)
+  (b) ldmxcsr #GP in switch_to        == F1 (FIXED below)
+  (c) assert(sched::preemptable()) page_fault (COW page absent in incoming AS
+      during the non-preemptable switch) / boost::intrusive bstree insert_before
+      "node unique" (runqueue double-insert) == F2 (open)
+Instrumentation proved the SIGURG delivery itself is 100% reliable:
+  kill_urg_child=47 urg_dispatched=47 urg_sigdfl=0 kill_urg_noas=0
+  wake_epoll_call=22506 deliver=22390 noep=77
+So it is NOT a lost signal / lost self-pipe write; it is the SCHEDULER RESUME of
+the woken fork child that is unsafe.
+
+================================================================================
+F1 -- FPU control-word reload after the CR3 swap  (FIXED, commit 1ae2602f)
+================================================================================
+switch_to()'s #1020 FPU-reset tail did:
+    auto fpucw = fnstcw(); auto mxcsr = stmxcsr();   // spilled to -0x34(%rbp)..
+    <switch_as asm: swap rsp/rbp, load incoming CR3, jmp>
+    emms; fldcw(fpucw); ldmxcsr(mxcsr);              // read -0x42/-0x48(%rbp)
+The compiler stores fpucw/mxcsr in %rbp-relative stack slots.  In the CONF_fork
+switch_as path the asm swaps rsp/rbp AND CR3 to the incoming fork child FIRST,
+so fldcw/ldmxcsr read the incoming child's stack under the incoming COW AS --
+garbage.  gdb proof on the wedged guest: poking the checkpointer -> #GP at
+switch_to+251 (ldmxcsr), RSP/RBP == the checkpointer's; the saved slot held
+0xbffc8ea8 (low half of a heap pointer) -> reserved MXCSR bits -> #GP -> the
+resumed thread dies -> permanent wedge.
+
+FIX (arch/x64/arch-switch.hh, #if CONF_fork switch_as branch): restore the
+canonical control words (0x37f / 0x1f80 -- what every OSv thread uses; switch_to
+does no fxsave/fxrstor so no per-thread FPU data is preserved anyway) from a
+kernel-IDENTITY-MAPPED static.  fldcw/ldmxcsr address that fixed .rodata slot
+(RIP-relative), so the reload neither READS the incoming child's garbage stack
+(#GP) nor WRITES it (a COW write-fault in the non-preemptable switch ->
+assert(preemptable()) abort).  Non-fork path byte-identical.  Verified in the
+built loader: `fldcw 0x..(%rip) # canon_fpucw`, `ldmxcsr 0x..(%rip) # canon_mxcsr`.
+
+================================================================================
+F2 -- COW page absent in the incoming AS during the non-preemptable switch (OPEN)
+================================================================================
+After F1, heavy load STILL intermittently wedges/asserts.  gdb: waking a parked
+fork child -> page_fault at a COW address while !preemptable():
+    assert(sched::preemptable())  (arch/x64/mmu.cc:38)  -> abort
+faulting cr2 seen: a COW same-VA STACK addr (0x2000002002xx) and a fork-arena
+addr (0x30000..); also boost bstree insert_before (runqueue node double-insert).
+Root: switch_to / the scheduler resume touches a page (incoming child's COW
+stack, or a per-CPU/timer/runqueue structure) that is NOT PRESENT in the
+incoming child's address space, and the fault lands inside the non-preemptable
+switch where vm_fault (which may sleep) is illegal.  In release (no assert) the
+same missing-page / racy enqueue silently corrupts the runqueue / drops the
+wake -> the CLEAN STALL.
+
+F2 FIX DIRECTION (mirror F1: the resume must touch NOTHING that needs a COW
+fault under the incoming AS in the non-preemptable window):
+  (a) pre-fault / pin the fork child's kernel+app stack pages into ITS AS at
+      child creation / first schedule, so resume never COW-faults the stack; or
+  (b) ensure switch_to + the post-switch unpark_timers/enqueue path touch only
+      shared-identity or already-present pages during the non-preemptable window.
+Pick the minimal correct one, #if CONF_fork.
+
+================================================================================
+QUALIFICATION EVIDENCE (HONEST, PARTIAL -- F2 open)
+================================================================================
+F1 build, -smp4 32G KVM, pgbench -i -s1000 + -c16 -T120:
+  clean runs observed (per phase): several full heavy runs completed clean
+  (e.g. -c16 292k-ish tx / 0 failed / ~2.3-2.4k tps).  BUT a subset still wedge/
+  assert (F2).  NOT yet 10 consecutive clean.  Pristine baseline also wedges,
+  confirming F1 is not a regression and F2 is a pre-existing separate facet.
+  => 10x-clean qualification is BLOCKED on F2.  F1 alone reduces but does not
+     eliminate the stall.
+
+DELIVERED: commit 1ae2602f (F1), bundle floki:/tmp/sigF-fix.bundle.
+
+================================================================================
+UPDATE -- F2 SPLIT INTO F2a (-smp1 stall) and F2b (-smp>1 crash); F1 safe
+================================================================================
+F1 REGRESSION CHECK: 5/5 clean boots to "ready to accept connections" (-smp8,
+lw-loop) with F1 in.  F1 does not regress the reliability floor.
+
+F2 is really TWO facets:
+  F2b (-smp>1 only): boost::intrusive bstree insert_before "node unique" assert
+     -- a RUNQUEUE double-insert during thread MIGRATION (cpu::load_balance /
+     thread::pin push a thread onto min->incoming_wakeups while it is/again
+     becomes runnable).  This is stock-OSv scheduler migration code, only
+     exercised under fork+ZFS+PG heavy load.  Needs deep scheduler work; NOT
+     fixed here (high risk of a worse bug without extensive SMP verification).
+  F2a (reproduces at -smp1, NO migration): the "clean" checkpoint stall.  Under
+     investigation whether it is a TRUE permanent lost wake or a slow-COPY /
+     checkpoint_timeout(300s)-recovery mis-flagged by an aggressive watchdog:
+     the checkpointer's post-"starting" waits (CheckpointWriteDelay) use
+     WaitLatch WITH a short WL_TIMEOUT, so a lost latch wake should self-recover
+     on timeout, not hang forever.  A 420s-tolerance -smp1 test is running to
+     decide.  NOTE the -i failures always show client-side "PQputline failed"
+     (the pgbench CLIENT's COPY write failed) -- consistent with a slow/backed-
+     up COPY over qemu usermode-NAT, not necessarily a server-side permanent
+     wedge.  -c16 -T120 (short TCP txns) qualified CLEAN in the corruptor2 work.
+
+HONEST BOTTOM LINE: F1 is a genuine, verified, committed signature-F fix (the
+ldmxcsr #GP resume crash).  It does not by itself deliver 10x-clean heavy -i
+-s1000 because F2b (migration runqueue double-insert) still crashes a subset of
+-smp>1 runs and F2a's true nature is being pinned down.  10x qualification is
+NOT yet achieved; do not claim it.
+
+================================================================================
+UPDATE 2 -- F2a CONFIRMED a TRUE PERMANENT WEDGE at -smp1 (not slow-COPY)
+================================================================================
+Definitive -smp1 test (F1 build, 420s no-progress tolerance, past PG's
+checkpoint_timeout so a lost latch wake would have self-recovered):
+  run 1: pgbench -i -s1000 done in 155.58 s (CLEAN)
+  run 2: TRUE WEDGE -- 420s+ of zero disk progress, cp_start>cp_complete,
+         `select 1` STILL returns 1, 0 crash signatures.  Permanent, not slow.
+So F2a is a REAL permanent lost wakeup, single-CPU, NO migration, NO scheduler
+SMP race, NO crash.  This is the pure signature-F.
+
+gdb on the -smp1 TRUE wedge (qemu 503, gdb:1234, held for handoff):
+  405 postmaster   epoll_file::wait (AS0)  -> answers `select 1`
+  407 CHECKPOINTER (fork child) status=waiting, _wakeup_link={_helper=
+      0x600100184710,_next=0x600100184b88} -- parked on a waitqueue, its stack
+      top frame epoll_wait+113 (WaitLatch); NOT found on any epoll_file _waiters
+      (326 epoll_files scanned) -> it is parked on a DIFFERENT waitqueue than
+      its own epoll (likely a condvar / the latch path's inner wait).
+  412 COPY backend status=waiting, in pipe_buffer::read, _wakeup_link populated
+      (parked on a pipe/condvar waitqueue 0x6001064dc760).
+  Poking with a manual CHECKPOINT (SetLatch->kill SIGURG): psql returned but the
+  checkpointer did NOT wake (no new "checkpoint complete"), and with F1 in there
+  was NO FPU #GP -- so the wake genuinely does not reach the parked child.
+
+F2a NEXT STEP (for handoff): read the checkpointer's Latch (is_set/maybe_sleeping
+in PG anon-MAP_SHARED) and the two waitqueues (_helper 0x600100184710 /
+0x6001064dc760) to identify the exact lost-wake primitive (condvar vs latch
+self-pipe vs pipe).  The SIGURG DELIVERY is proven reliable (instrumented:
+kill_urg_child==urg_dispatched, no SIG_DFL); the loss is in the waiter never
+being put on / woken from the queue the waker signals -- a fork wait-record /
+waitqueue-linkage coherence bug (cross-AS or same-CPU register-vs-wake race),
+NOT a lost signal.  This is where the remaining fix lives.  The -smp1 purity
+(no migration) rules out F2b's scheduler path for F2a.
+
+MILESTONE STATUS: NOT reached.  OSv+PG does NOT yet run heavy -i -s1000
+reliably; signature-F (F2a permanent lost wake + F2b -smp>1 migration crash)
+remains.  F1 (committed 1ae2602f, bundled) is one real facet fixed and does not
+regress (5/5 clean boots).  Clean OSv-vs-Linux benchmarking is still blocked on
+F2a/F2b.
+
+================================================================================
+UPDATE 3 -- F2a PINNED: infinite-timeout latch wait + lost self-pipe->epoll wake
+================================================================================
+On the -smp1 TRUE wedge, the checkpointer (407) has _active_timers EMPTY
+(size_=0), _timers_parked=false.  So it is blocked in epoll_wait with NO
+timeout timer -> an INFINITE-timeout WaitLatch (PG's ConditionVariableSleep /
+WaitLatch(..., timeout=-1) path uses no WL_TIMEOUT).  With no timeout, a lost
+latch wake is a PERMANENT wedge -- exactly what we see (420s+, never recovers).
+This is why it is permanent, not a 300s-timeout recovery.
+
+The wake that is lost: SetLatch(child) -> kill(child,SIGURG) -> OSv spawns the
+handler thread (PROVEN reliable: kill_urg_child==urg_dispatched) -> in the
+child's AS latch_sigurg_handler -> sendSelfPipeByte writes the child's
+selfpipe_writefd -> the pipe read-end poll_wake -> file::wake_epoll walks the
+fd's f_epolls -> epoll wake.  Instrumentation caught f_epolls EMPTY on
+sigF_wake_epoll_noep=77 poll_wakes: SOME poll_wakes found NO epoll registered on
+the fd.  PRIME F2a HYPOTHESIS: a fork child's epoll_ctl(ADD, selfpipe_readfd)
+registration in the file's f_epolls is lost / incoherent across the fork, so the
+self-pipe write's poll_wake finds no epoll to wake -> the latch byte is written
+but the child's epoll_wait is never notified -> lost wake -> (with the infinite
+timeout) permanent wedge.  The wait_record itself IS already coherent
+(wait_object<waitqueue> uses coherent_wait_record); the gap is the fd->epoll
+readiness-notify registration (f_epolls) coherence for a forked backend's
+self-pipe.
+
+F2a NEXT STEP (handoff, highest value): verify the wedged child's
+selfpipe_readfd file has THIS child's epoll in its f_epolls (read gfdt[selfpipe
+_readfd]->f_epolls); if empty/stale -> fix f_epolls registration to be coherent
+for fork children (like the wait_record/coherent_wait_record fix), so
+poll_wake->wake_epoll reliably reaches the forked backend's epoll.  That closes
+the lost self-pipe->epoll wake.  Then re-run the -smp1 420s test + the 10x
+qualify.  (F2b -- the -smp>1 migration bstree double-insert -- is a separate,
+SMP-only scheduler race.)

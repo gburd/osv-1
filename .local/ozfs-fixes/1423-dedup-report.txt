@@ -1,0 +1,332 @@
+======================================================================
+ OSv PR #1423 (OpenZFS) - MERGE-BLOCKER FIX REPORT
+ patch 0030 de-duplication so the series applies clean from scratch
+======================================================================
+Date:        Wed Jul 29 12:13:56 UTC 2026
+Box:         ec2-user@18.189.43.159 (bench-db, profile OUCH) - REUSED, not launched
+Repo:        ~/osv (gh-fork gburd/osv-1)
+Branch:      pr/openzfs-draft
+Base (pre):  81d736f05bf5fbd8df200632cf4fbb9a039db35a
+New HEAD:    c11f184d54993c8857bcb03295d46a3bbb123329
+OpenZFS submodule pinned commit: 83020cf82
+
+----------------------------------------------------------------------
+ 1. THE DEFECT
+----------------------------------------------------------------------
+patch 0030-zfs-force-single-threaded-inline-ARC-eviction-on-OSv.patch had
+THREE hunks against module/zfs/arc.c:
+  hunk #1 @@ -4096  arc_evict_thread_init(): OSv force zfs_arc_evict_threads=1
+                    = 0030's LEGITIMATE unique content -> KEPT
+  hunk #2 @@ -4756  uint64_t arc_reduce_target_size_noshrink(uint64_t to_free)
+                    = BYTE-IDENTICAL duplicate of a function patch 0009 adds
+                      -> REMOVED
+  hunk #3 @@ -7980  small-RAM arc_c_min cap: if (allmem < (256ULL << 20))
+                                                 arc_c_min = MIN(arc_c_min, allmem/16);
+                    = also already added by patch 0009 -> REMOVED
+
+patch 0009 applies BEFORE 0030, so by the time 0030 runs the noshrink helper
+and the arc_c_min cap are already present in arc.c. 0030 then tried to add
+them a second time, so `git apply` of the whole series rejected on a clean
+tree and the conf_zfs=openzfs build failed. It was masked on already-built
+trees by the modules/open_zfs .osv-patches-applied stamp (apply runs once);
+the aarch64 clean-build exposed it.
+
+----------------------------------------------------------------------
+ 2. EXACT HUNKS REMOVED (diff of the patch file itself)
+----------------------------------------------------------------------
+commit c11f184d54993c8857bcb03295d46a3bbb123329
+Author: Greg Burd <greg@burd.me>
+Date:   Wed Jul 29 12:12:55 2026 +0000
+
+    zfs(openzfs): de-duplicate patch 0030 (drop hunks already in patch 0009 so the series applies clean)
+    
+    Patch 0030 (force single-threaded inline ARC eviction on OSv) carried three
+    hunks against module/zfs/arc.c, but two of them were byte-identical duplicates
+    of content already added by patch 0009 (zfs: fix ARC sizing, memory pressure
+    and OSv platform ...):
+    
+      hunk #1 @@ -4096  arc_evict_thread_init(): OSv force zfs_arc_evict_threads=1
+                        -- 0030's legitimate, unique change. KEPT.
+      hunk #2 @@ -4756  adds uint64_t arc_reduce_target_size_noshrink(...)
+                        -- identical to the function 0009 already adds. REMOVED.
+      hunk #3 @@ -7980  small-RAM arc_c_min cap (allmem < 256 MiB -> allmem/16)
+                        -- identical to the cap 0009 already adds. REMOVED.
+    
+    Because 0009 applies before 0030, the noshrink helper and the arc_c_min cap are
+    already present in module/zfs/arc.c by the time 0030 runs. 0030 then tried to
+    add them a second time, so "git apply" of the full series rejected on a clean
+    tree and the OpenZFS-mode build failed. This was masked on already-built trees
+    because modules/open_zfs applies the series once and records a
+    .osv-patches-applied stamp, so a re-checkout never re-ran the apply; the
+    aarch64 clean-build exposed it.
+    
+    Fix: drop hunks #2 and #3 from 0030, leaving only the arc_evict_thread_init
+    change, and correct 0030's Subject / commit message / diffstat to describe only
+    that change (it was over-scoped / mislabeled). The noshrink helper and the
+    arc_c_min cap remain, exactly once, from patch 0009.
+    
+    Verified: the full series 0001..0030 now applies with zero rejects from a
+    pristine (pinned) OpenZFS submodule; libsolaris.so builds in both
+    conf_zfs=openzfs and conf_zfs=bsd modes; the OpenZFS kernel boots; and
+    arc_reduce_target_size_noshrink + the arc_c_min cap are present exactly once in
+    the applied tree.
+    
+    [#1423/OpenZFS]
+    
+    Signed-off-by: Greg Burd <greg@burd.me>
+
+diff --git a/modules/open_zfs/patches/0030-zfs-force-single-threaded-inline-ARC-eviction-on-OSv.patch b/modules/open_zfs/patches/0030-zfs-force-single-threaded-inline-ARC-eviction-on-OSv.patch
+index a639617b..a58f8e7b 100644
+--- a/modules/open_zfs/patches/0030-zfs-force-single-threaded-inline-ARC-eviction-on-OSv.patch
++++ b/modules/open_zfs/patches/0030-zfs-force-single-threaded-inline-ARC-eviction-on-OSv.patch
+@@ -11,14 +11,22 @@ model the worker running arc_evict_task races the dispatcher / touches state
+ whose VA is not coherent in the worker address space and faults on eva->eva_ml
+ (arc.c:4088, reached via handle_mmap_fault under the ZFS taskqueue).
+ 
+-Force zfs_arc_evict_threads = 1 so eviction runs inline in the caller context
+-via arc_evict_state_impl(), removing the taskq hand-off and the race.  This is
+-the same OSv serialization applied to libtpool dispatch (patch 0021) and
+-dataset mounting (patch 0022); parallel eviction is a throughput optimization
+-OSv does not require.
++Force zfs_arc_evict_threads = 1 in arc_evict_thread_init() so eviction runs
++inline in the caller context via arc_evict_state_impl(), removing the taskq
++hand-off and the race.  This is the same OSv serialization applied to libtpool
++dispatch (patch 0021) and dataset mounting (patch 0022); parallel eviction is
++a throughput optimization OSv does not require.
++
++This patch touches only arc_evict_thread_init().  The ARC-sizing helper
++arc_reduce_target_size_noshrink() and the small-RAM arc_c_min cap live in
++patch 0009 (zfs: fix ARC sizing, memory pressure and OSv platform ...); they
++are not repeated here.
+ 
+ Signed-off-by: Greg Burd <greg@burd.me>
+ ---
++ module/zfs/arc.c | 18 ++++++++++++++++++
++ 1 file changed, 18 insertions(+)
++
+ diff --git a/module/zfs/arc.c b/module/zfs/arc.c
+ index 9912eb818..e0afb1f35 100644
+ --- a/module/zfs/arc.c
+@@ -48,74 +56,5 @@ index 9912eb818..e0afb1f35 100644
+  	if (zfs_arc_evict_threads == 0) {
+  		/*
+  		 * Compute number of threads we want to use for eviction.
+-@@ -4756,6 +4774,49 @@ arc_reduce_target_size(uint64_t to_free)
+- 	return (to_free);
+- }
+- 
+-+/*
+-+ * OSv-specific ARC shrink helper: reduce arc_c and wake the eviction thread.
+-+ *
+-+ * Unlike arc_reduce_target_size(), this function does NOT call
+-+ * dbuf_cache_reduce_target_size().  That helper carries a use-after-free
+-+ * risk in the dbuf eviction path during TXG sync (noted in the upstream
+-+ * comment above arc_reduce_target_size()).  We omit it intentionally.
+-+ *
+-+ * We DO call zthr_wakeup(arc_evict_zthr) when the ARC is still over target
+-+ * so that physical pages are freed quickly, before the OSv memory reclaimer
+-+ * calls wake_waiters() and finds no free pages.  Without the wakeup the
+-+ * eviction thread would not run for up to 1 second (its natural timer), and
+-+ * the heavy ZFS I/O paths (dataset create/destroy, TXG commit) would trigger
+-+ * the shrinker hundreds of times with a long sleep each time, adding many
+-+ * minutes of overhead.
+-+ *
+-+ * Safety: arc_evict_thread() skips buffers held by concurrent TXG sync
+-+ * (they have elevated refcounts from dmu_buf_add_ref).  The link-count
+-+ * corruption seen in earlier testing was caused by ENOSPC in the ZFS pool
+-+ * leaving a partially-written dataset, not by this wakeup.  With a correctly
+-+ * sized pool (fs_size_mb >= 2048) all dataset operations complete cleanly.
+-+ */
+-+uint64_t
+-+arc_reduce_target_size_noshrink(uint64_t to_free)
+-+{
+-+	uint64_t c = arc_c;
+-+	if (c > arc_c_min) {
+-+		uint64_t asize = aggsum_value(&arc_sums.arcstat_size);
+-+		c = MIN(c, MAX(asize, arc_c_min));
+-+		to_free = MIN(to_free, c - arc_c_min);
+-+		arc_c = c - to_free;
+-+		if (asize > arc_c) {
+-+			mutex_enter(&arc_evict_lock);
+-+			arc_evict_needed = B_TRUE;
+-+			mutex_exit(&arc_evict_lock);
+-+			zthr_wakeup(arc_evict_zthr);
+-+		}
+-+	} else {
+-+		to_free = 0;
+-+	}
+-+	return (to_free);
+-+}
+-+
+- /*
+-  * Determine if the system is under memory pressure and is asking
+-  * to reclaim memory. A return value of B_TRUE indicates that the system
+-@@ -7980,6 +8041,18 @@ arc_set_limits(uint64_t allmem)
+- 	/* Set min cache to 1/32 of all memory, or 32MB, whichever is more. */
+- 	arc_c_min = MAX(allmem / 32, 2ULL << SPA_MAXBLOCKSHIFT);
+- 
+-+#ifdef __OSV__
+-+	/*
+-+	 * On OSv VMs with less than 256 MiB of RAM the default arc_c_min of
+-+	 * 2*SPA_MAXBLOCKSIZE (32 MiB) can equal or exceed arc_c_max, leaving
+-+	 * no headroom for the ARC shrinker to reduce memory usage.  Cap it at
+-+	 * 1/16 of RAM (8 MiB at 128 MiB) so that arc_reduce_target_size_*()
+-+	 * can always reclaim a meaningful amount of memory under pressure.
+-+	 */
+-+	if (allmem < (256ULL << 20))
+-+		arc_c_min = MIN(arc_c_min, allmem / 16);
+-+#endif
+-+
+- 	/* How to set default max varies by platform. */
+- 	arc_c_max = arc_default_max(arc_c_min, allmem);
+- }
+ --
+ 2.43.0
+
+----------------------------------------------------------------------
+ 3. CLEAN-APPLY RESULT (core validation)
+----------------------------------------------------------------------
+Method: reset OpenZFS submodule to pinned commit, remove all
+patch-created files + the .osv-patches-applied stamp, then run the exact
+Makefile apply path (single git apply invocation, all patches, VISIBLE
+errors) from a pristine tree.
+
+Patches in the series (apply order):
+     1	0001-OSv-Add-complete-platform-layer-with-SPL-for-OpenZFS.patch
+     2	0002-feat-zfs-Add-OSv-OS-layer-implementation-with-auto-u.patch
+     3	0003-OSv-Update-platform-layer-for-OpenZFS-2.4.1-compatib.patch
+     4	0004-zfs-implement-complete-OSv-platform-layer-for-OpenZF.patch
+     5	0005-zfs-add-vop_cache-zfs_freesp-and-pagecache-bridge-fo.patch
+     6	0006-zfs-add-comment-explaining-fvisibility-hidden-and-de.patch
+     7	0007-zfs-fix-symlink-vnode-type-by-storing-file-type-bits.patch
+     8	0008-zfs-implement-ZFS-encryption-AES-256-GCM-key-managem.patch
+     9	0009-zfs-fix-ARC-sizing-memory-pressure-and-OSv-platform-.patch
+    10	0010-zfs-clarify-that-zio_crypt_os.c-is-superseded-by-zio.patch
+    11	0011-zfs-implement-ZIO_TYPE_TRIM-in-vdev_disk_io_start-fo.patch
+    12	0012-zfs-fix-vdev_disk_bio_done-to-map-BIO_DISCARD-errors.patch
+    13	0013-zfs-add-zfs_mount_setattr-stub-for-OSv-required-by-2.patch
+    14	0014-zfs-skip-.1-partition-append-for-OSv-Crucible-volume.patch
+    15	0015-zfs-fix-zfs_uioskip-to-advance-the-iov-pointer.patch
+    16	0016-zfs-derive-vdev-ashift-from-device-block-size-fix-mu.patch
+    17	0017-zfs-flush-root-znode-in-zfs_osv_unmount-before-disow.patch
+    18	0018-zfs-embed-caller-owned-ostask-in-taskq_ent_t-to-fix-.patch
+    19	0019-zfs-share-decompressed-ARC-pages-into-mmap-page-cach.patch
+    20	0020-zfs-back-getmntent-getmntany-with-live-OSv-VFS-mount-table.patch
+    21	0021-zfs-run-libtpool-jobs-inline-on-OSv.patch
+    22	0022-zfs-force-serial-dataset-mounting-on-OSv.patch
+    23	0023-zfs-use-whole-raw-disk-on-OSv-when-no-.1-partition.patch
+    24	0024-zfs-drain-all-live-znodes-in-zfs_osv_unmount.patch
+    25	0025-zfs-guard-NULL-column-header-in-zpool-list.patch
+    26	0026-zfs-enforce-the-readonly-property-on-OSv.patch
+    27	0027-zfs-advertise-TRIM-support-on-OSv-vdev_disk.patch
+    28	0028-zfs-refresh-osv-vnode-v_size-after-write.patch
+    29	0029-zfs-implement-zfs_write_simple-and-zfs_space-for-ZIL-replay.patch
+    30	0030-zfs-force-single-threaded-inline-ARC-eviction-on-OSv.patch
+
+RESULT (recorded during validation):
+  git apply --whitespace=nowarn <0001..0030>  ->  APPLY_EXIT=0
+  .rej files found: 0  (zero rejects)
+  All patches 0001..0030 apply with NO reject files.
+
+Live re-confirmation right now (fresh pristine re-apply):
+  live APPLY_EXIT=0
+  live .rej count: 0
+
+----------------------------------------------------------------------
+ 4. noshrink + arc_c_min cap STILL PRESENT EXACTLY ONCE (from 0009)
+----------------------------------------------------------------------
+arc_reduce_target_size_noshrink definition count in applied arc.c:
+  1  (expected 1)
+4801:arc_reduce_target_size_noshrink(uint64_t to_free)
+arc_c_min small-RAM cap count in applied arc.c:
+  1  (expected 1)
+8054:	if (allmem < (256ULL << 20))
+0030's arc_evict_thread_init OSv force-single-thread applied (line ~4115):
+4115:	zfs_arc_evict_threads = 1;
+
+----------------------------------------------------------------------
+ 5. BUILD BOTH MODES (from the clean re-apply)
+----------------------------------------------------------------------
+Build container: osv-build (fedora39, gcc 13.3.1, 96 cores), /home/ec2-user/osv -> /b.
+
+conf_zfs=openzfs :  make build/release.x64/libsolaris.so  ->
+                    all 302 OpenZFS ZFS objects recompiled from the re-applied
+                    sources (incl. patched arc.c), "LINK libsolaris.so",
+                    MAKE_LIBSOLARIS_EXIT=0.   EXIT=0
+                    Fresh artifacts: libsolaris.so (16 MiB), arc.o (979 KiB).
+                    arc_reduce_target_size_noshrink present in arc.o and
+                    libsolaris.so (single definition, no duplicate-symbol
+                    link error).
+
+conf_zfs=bsd     :  make build/release.x64/libsolaris.so (legacy in-tree ZFS)
+                    -> bsd arc.c + all bsd solaris objects recompiled,
+                    "LINK libsolaris.so", MAKE_BSD_LIBSOLARIS_EXIT=0.  EXIT=0
+                    (bsd is the default mode; unaffected by the OpenZFS
+                    submodule patches, confirmed still builds.)
+
+Note on the full default image build: `scripts/build fs=zfs conf_zfs=openzfs`
+(no image=) pulls in the `cli` app -> `lua` module, which needs wget/unzip and
+a network luarocks LuaSec build. That is app-packaging infra, unrelated to
+ZFS; the ZFS kernel + userspace all built. A ZFS-focused image
+(image=zfs-test, requires zfs + zfs-tools + tests, no cli/lua) was used for the
+boot test below.
+
+----------------------------------------------------------------------
+ 6. BOOT + ZFS
+----------------------------------------------------------------------
+image=zfs-test conf_zfs=openzfs built: libzfs.so, mkfs.so, zfs.so, zpool.so,
+loader.elf all LINKed successfully (EXIT of the compile+link stage = 0).
+
+The just-built OpenZFS kernel BOOTS:
+    OSv v0.57.0-397-g81d736f0
+    eth0: 192.168.122.15
+    Booted up in 41.60 ms
+    Running mkfs...
+
+The image-population step (upload_manifest.py boots the kernel to cpio files
+into the ZFS image) then hit a PRE-EXISTING, UNRELATED failure:
+    /libzfs.so: failed looking up symbol tdestroy
+    ... libzfs_init ...
+`tdestroy` is a glibc GNU tree-walk extension used by upstream libzfs
+USERSPACE (module/.. is kernel; arc.c does not use tdestroy). OSv's libc does
+not export tdestroy. This is NOT introduced by any of the 30 patches
+(grep of the entire patch series for `tdestroy` = 0 hits) and is orthogonal
+to the arc_evict_thread_init kernel change in patch 0030.
+
+Regression assessment: NONE from this fix. patch 0030 only adds an
+`#ifdef __OSV__` block inside the static kernel function arc_evict_thread_init;
+it cannot affect userspace symbol resolution. The kernel + ZFS kernel module
+build and boot cleanly. Functional ZFS pool create/mount/IO was previously
+validated for the force-single-thread eviction change; this fix does not touch
+that behavior (the force-single-thread hunk is preserved verbatim).
+
+----------------------------------------------------------------------
+ 7. BANK
+----------------------------------------------------------------------
+Commit: c11f184d54993c8857bcb03295d46a3bbb123329  (author Greg Burd, UNSIGNED - no gpg secret
+        key on the box; re-sign locally). commit.gpgsign was set true
+        per-worktree but signing failed with 'No secret key', so the
+        commit was made --no-gpg-sign.
+  c11f184d54993c8857bcb03295d46a3bbb123329
+  Author: Greg Burd <greg@burd.me>
+  Signed: N
+  Subject: zfs(openzfs): de-duplicate patch 0030 (drop hunks already in patch 0009 so the series applies clean)
+
+Bundle: /tmp/1423-patch0030-dedup.bundle  (81d736f05..HEAD)
+/tmp/1423-patch0030-dedup.bundle is okay
+The bundle contains this ref:
+c11f184d54993c8857bcb03295d46a3bbb123329 HEAD
+The bundle requires this ref:
+81d736f05bf5fbd8df200632cf4fbb9a039db35a 
+The bundle uses this hash algorithm: sha1
+
+======================================================================
+ BOTTOM LINE
+======================================================================
+  #1423 series applies CLEAN from scratch (0 rejects)         : YES
+  conf_zfs=openzfs builds (libsolaris.so, EXIT=0)             : YES
+  conf_zfs=bsd builds (default, libsolaris.so, EXIT=0)        : YES
+  OpenZFS kernel boots                                        : YES (41.6 ms)
+  noshrink helper + arc_c_min cap present exactly once (0009) : YES
+  regression from this fix                                    : NONE
+  This un-blocks #1423 merge and #1459.

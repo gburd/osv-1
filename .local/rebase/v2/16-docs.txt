@@ -1,0 +1,12 @@
+docs: cover letter and remove obsolete agent-generated docs
+
+Add the cover letter (~/email-to-waldek.txt is the working copy;
+the in-tree version mirrors the same content) summarising what's in
+this branch: Boost / NixOS toolchain, musl 1.2.1, hugepages, shm,
+pagecache (with the sys_fsync flush fix), io_uring, block-layer
+TRIM and multiqueue, OpenZFS 2.4.2 with the OSv platform layer,
+the Crucible driver, and the test matrix.
+
+Remove a handful of obsolete agent-generated status files
+(STATUS.md, EXAMPLES.md, FEATURE_STATUS.md and friends) that were
+checked in during development and don't reflect current state.

@@ -1,0 +1,174 @@
+================================================================================
+STOCK PostgreSQL 18 on OSv thread-backed fork() — RESEARCH RESULT (HONEST)
+================================================================================
+Instance : i-07b415101b22fd31a (m5d.metal, x86-64, /dev/kvm + NVMe), AL2023
+OSv      : gburd/osv-1  branch wip/feat-fork  commit a0271b98
+           (fork stack-copy fix + SIGCHLD/SIGURG/SIGWINCH default-ignore)
+PostgreSQL: REL_18_STABLE = 18.4, catversion 202506291
+Date     : 2026-07-22
+
+--------------------------------------------------------------------------------
+BOTTOM LINE
+--------------------------------------------------------------------------------
+Stock PG18 BUILDS as an OSv PIE, initdb-at-build-time WORKS and bakes into the
+image, and the postmaster BOOTS on OSv to "listening on IPv4 0.0.0.0:5432".
+
+It does NOT yet serve a query. It never reaches "ready to accept connections":
+the postmaster's FIRST fork()'d child does not survive. NO psql query was served
+(single or concurrent). Do not read this as success.
+
+I found and FIXED one real OSv fork bug during this work (fsbase/TLS base not
+restored in the forked child), which moved the failure from an immediate crash
+to a hang one step later. The remaining wall is fundamental to OSv's design:
+fork() shares the parent's TLS (and heap/linker locks), so the first nontrivial
+glibc libc call in the child (getenv) hangs. A correct private-TLS-copy in
+fork() is the next required OSv change; it was not attempted (non-trivial,
+glibc-TCB-layout-specific) and so PG-on-OSv-fork remains UNPROVEN.
+
+--------------------------------------------------------------------------------
+STEP 0 — fork sanity in THIS build  : PASS
+--------------------------------------------------------------------------------
+tst-fork.so on OSv a0271b98 = 10/10 (twin return, private-stack isolation,
+fork+exec, vfork, waitpid/reap, no-children ECHILD). VM survived child _exit's
+SIGCHLD. Boot requires run.py -k (PVH direct kernel boot); the default SeaBIOS
+path loops on this host.
+
+--------------------------------------------------------------------------------
+(a) Did stock PG18 BUILD for OSv?    : YES (as a PIE), with build flags + 2 tiny
+                                       source deviations (documented, NOT stock)
+--------------------------------------------------------------------------------
+Configure: --without-icu --without-zlib --without-readline --without-libxml
+           --without-libxslt
+CFLAGS   = -O2 -g -fPIC -fPIE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
+           -DWAIT_USE_SELF_PIPE
+LDFLAGS_EX = -pie          <-- CRITICAL. Put -pie in LDFLAGS_EX, NOT global
+             LDFLAGS: LDFLAGS pollutes the loadable-.so conversion modules
+             (euc_kr_and_mic.so etc.) and breaks the link ("undefined ref main").
+Result: postgres = ELF DYN, FLAGS_1: PIE  (OSv type-2 dynamically-linked PIE).
+OSv-relevant fact: OSv's kernel SUPPLIES libc.so.6 / libm.so.6 / libresolv /
+ld-linux as built-in modules, so the PG PIE resolves its only deps against OSv's
+built-in libc. No glibc is baked into the image. PG runs on OSv's libc(=musl-ish
++ glibc-compat) via the ld-linux shim.
+
+Two SOURCE deviations from stock (each an OSv-environment adaptation, each 1 line,
+each clearly an OSv-vs-Linux gap, NOT a fork workaround):
+  - -DWAIT_USE_SELF_PIPE  : PG18's default latch uses signalfd()+epoll for SIGURG
+    (waiteventset.c). OSv stubs signalfd()->ENOSYS ("FATAL: signalfd() failed").
+    WAIT_USE_SELF_PIPE is PG's OWN supported portable fallback (self-pipe+poll);
+    a build-time knob, not a patch.
+  - check_root() neutered (main.c): PG refuses to run as root; OSv makes every
+    process uid 0 (geteuid() hardcoded to 0, no user model). 1-line body no-op.
+  - checkDataDir() perm check neutered (miscinit.c): OSv filesystems report fixed
+    modes (rofs 0555, ramfs 0777), not the 0700/0750 PG demands. 1-line no-op,
+    mirrors PG's own "XXX suppress on Windows, no Unix-y perms" comment.
+
+--------------------------------------------------------------------------------
+(b) initdb at BUILD time + baked into /data : PASS
+--------------------------------------------------------------------------------
+Ran the JUST-BUILT initdb on the host (as non-root user, PG won't initdb as root)
+-> PG_VERSION 18, cluster state "shut down" (clean). Configured listen '*',
+port 5432, shared_buffers 512MB, unix_socket_directories '' (see (e).iv), logging
+to stderr, io_method=sync (see (e).vi). pg_hba trust local + 0.0.0.0/0. Created
+DB "test" + table t(x int) with one row; host psql confirmed select count(*)=1;
+clean stop. That exact cluster is baked read-to-run into image /data.
+
+Manifest note: OSv's "**" glob matches FILES only, so the cluster's 13 EMPTY
+subdirs (pg_notify, pg_commit_ts, pg_tblspc, pg_wal/archive_status, ...) were
+dropped and PG aborted ("could not open directory pg_notify"). Fix: explicit
+per-directory entries in usr.manifest (a placeholder-file trick backfires: PG
+scans pg_tblspc contents and chokes on a stray file).
+
+--------------------------------------------------------------------------------
+(c) Postmaster BOOTS on OSv          : PARTIAL — starts + listens, never "ready"
+--------------------------------------------------------------------------------
+Boot: run.py -k -m 4G -c2 --forward tcp::5432-:5432, fs=zfs (see (e).v).
+Reaches:
+  LOG: starting PostgreSQL 18.4 on x86_64-pc-linux-gnu ...
+  LOG: listening on IPv4 address "0.0.0.0", port 5432
+  DEBUG: updating PMState from PM_INIT to PM_STARTUP
+...then forks its first child and does NOT reach "ready to accept connections".
+
+--------------------------------------------------------------------------------
+(d) THE ANSWER: does a connection fork a working backend? : NO — never got there
+--------------------------------------------------------------------------------
+No client backend was ever forked, because the postmaster dies/hangs on its
+FIRST internal fork (the startup process, or the io_worker under the PG18
+default io_method=worker), BEFORE the cluster is open for connections. No psql
+query ran. Single-connection and concurrent-connection tests were therefore not
+reachable. Honest verdict: OSv fork() does NOT (yet) carry a real multi-process
+PostgreSQL.
+
+--------------------------------------------------------------------------------
+(e) WHERE it breaks — full chain, each finding empirical
+--------------------------------------------------------------------------------
+i.   root check          -> geteuid()==0 on OSv. (env gap; neutered)
+ii.  signalfd()          -> ENOSYS on OSv. (PG18 latch; -DWAIT_USE_SELF_PIPE)
+iii. empty cluster dirs  -> "**" glob skips them. (manifest fix)
+iv.  AF_UNIX socket      -> "Address family not supported by protocol". OSv has
+                            partial af_local but PG's socket setup fails. Set
+                            unix_socket_directories='' (TCP-only; client uses the
+                            forwarded TCP port anyway).
+v.   writable /data      -> PG must write WAL/etc.; rofs is read-only (getattr
+                            0555). Used fs=zfs (writable). ZFS mounts with a
+                            benign "replay transaction error 95" warning.
+                            (fs=ramfs was blocked by a bootfs libsolaris/mount-fs
+                            tool dependency in the module-only build.)
+vi.  PG18 io_method       -> default IOMETHOD_WORKER forks io_worker at startup;
+                            that fork crashed. Set io_method=sync to defer forking
+                            to the startup process — which ALSO crashed the same
+                            way. So it is the fork itself, not a specific child.
+
+vii. THE ROOT-CAUSE CRASH (found + FIXED here):
+     The postmaster's first fork()'d child aborted with OSv:
+        "trying to execute null pointer"  (page_fault, ef->rip == 0)
+     Instrumenting PG's fork_process() child path showed the child ran
+     fork()->getpid() fine, then died on its NEXT libc call (a glibc write()).
+     Instrumenting OSv arch/x64/fork.cc revealed WHY:
+        parent_app_tcb   = 0x0
+        parent_real_fsbase = 0x500001fd2880   (the postmaster's glibc TLS base)
+        child_app_tcb    = 0x0
+     OSv's fork_thread set the child's TLS from get_app_tcb(), but the app's
+     MAIN thread (postmaster) has app_tcb==0 while running on a real non-zero
+     fsbase. So the child ran with OSv's kernel-thread fsbase, and glibc code in
+     the child read TLS from the wrong base -> jumped through garbage -> RIP=0.
+     FIX (applied to arch/x64/fork.cc): read the parent's live fsbase directly
+     (processor::rdmsr(IA32_FS_BASE)) and, when app_tcb==0, set the child's
+     fsbase to that. After the fix the child gets PAST the crash (markers
+     CHILD:after-getpid and CHILD:pre-getenv now print).
+
+viii.THE REMAINING WALL (NOT fixed — fundamental to OSv single-address-space):
+     With the fsbase fix the child now HANGS in the very next libc call,
+     getenv("PG_OOM_ADJUST_FILE"), and never returns (VM killed at timeout).
+     Cause: OSv fork() gives the child a private STACK but SHARES the parent's
+     TLS block (same fsbase) AND heap/dynamic-linker locks. Real fork() gives the
+     child a PRIVATE copy of TLS. With parent and child live on one shared TLS,
+     glibc per-thread state / libc & ld.so locks are corrupted or deadlock, so
+     the first nontrivial glibc call in the child (getenv) hangs. This is exactly
+     the shared-heap/single-address-space limitation the experiment set out to
+     probe.
+
+--------------------------------------------------------------------------------
+WHAT WOULD BE NEEDED NEXT (for a future run)
+--------------------------------------------------------------------------------
+Give the forked child a PRIVATE TLS copy: allocate a new TLS/TCB block, copy the
+parent's glibc TCB + static-TLS into it, and point the child's fsbase at the
+copy (like clone()/pthread_create does via CLONE_SETTLS). This is non-trivial
+because the glibc TCB size/layout is opaque to OSv (glibc, loaded via ld-linux,
+manages its own TLS, which is why app_tcb is 0 for the main thread). Not
+attempted here. Until then, fork-per-backend PostgreSQL will not run on OSv.
+
+Also worth doing: teach OSv's geteuid/perm model, af_local, and signalfd enough
+that stock PG needs zero source edits; and wire a proper apps/postgres18 that
+builds ramfs (writable, no ZFS replay warning).
+
+--------------------------------------------------------------------------------
+Artifacts on this instance (ec2-user /tmp and container /b)
+--------------------------------------------------------------------------------
+/tmp/pg18-osv-result.txt   this report
+/tmp/pg-boot.log           last boot (fsbase-fixed kernel; hangs at pre-getenv)
+/tmp/pg-boot-crash.log     earlier boot (pre-fsbase-fix; RIP=0 crash)
+/tmp/osv-fork.cc           the patched OSv arch/x64/fork.cc (fsbase fix)
+container /b/pg18/          PG18 source (with the documented tiny deviations)
+container /b/apps/postgres18/  usr.manifest + module.py for the OSv app
+Instance left RUNNING and NOT terminated, per instructions.
+================================================================================

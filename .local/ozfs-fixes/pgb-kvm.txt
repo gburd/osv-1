@@ -1,0 +1,264 @@
+================================================================================
+PG18-on-OSv-under-KVM  pgbench TPC-B benchmark  (OSv-KVM cell)
+  Early PG/OSv-vs-PG/Linux comparison; pgbench = the workload we CAN benchmark
+================================================================================
+Date: 2026-07-26   Driver: floki (local) over ssh -> AWS us-east-2 (profile ouch)
+Methodology: /home/gburd/ws/osv/.local/pg-benchmark-plan.md
+             pgbench cell matching the Linux control PG conf + ZFS layout.
+
+DB HOST (under test): pgb-kvm  i-0f830da6b0b1e459a  m5d.metal (96c/377GB)
+   private IP 172.31.46.172  subnet-0b1893bd4bb0bdde2 (us-east-2)  ENI enp125s0
+   Disks: 4x 838GB local NVMe (nvme0/1/3/4n1) + 4x 200GB EBS (nvme5/6/7/8n1)
+   Runs ONLY Postgres-on-OSv-under-KVM.  (Do NOT terminate this box.)
+
+>>> PGBENCH DRIVER INSTANCE-ID: i-0cecfdd8774dafe62  (c5.4xlarge, 172.31.40.70) <<<
+    Name=pgb-kvm-driver  subnet-0b1893bd4bb0bdde2  SG sg-0f71bed6221459cc0
+    pgbench/psql 16.14 (PG16 client, protocol-compatible w/ PG18 server).
+
+--------------------------------------------------------------------------------
+BUILD / IMAGE
+--------------------------------------------------------------------------------
+OSv branch integ/pg-fork-zfs tip 3f20fef4 (fork arena + OpenZFS #1423 + PG18,
+  incl. patch 0029 zfs_write_simple/zfs_space for sync=standard ZIL replay).
+Combined image built on THIS box: ./scripts/build image=pg18-fork fs=zfs
+  conf_zfs=openzfs conf_fork=1 fs_size_mb=1024 -j48
+  -> build/last/loader.elf (73M) + usr.img (64M, ZFS root, PG18.4 musl PIE).
+  (Note: cpiod.so must be pre-built before manifest gen -- chicken/egg fixed by
+   `make build/release.x64/tools/cpiod/cpiod.so` first.)
+PG18.4 musl PIE: CC=musl-gcc -O2 -fPIC -DWAIT_USE_SELF_PIPE, --without-{icu,zlib,
+  readline,libxml,lz4,zstd}, LDFLAGS_EX=-pie. Two OSv neuters: check_root()
+  allow uid0, checkDataDir() suppress 0700 perms check.
+  file: ELF 64-bit LSB pie, interpreter /lib/ld-musl-x86_64.so.1.
+
+--------------------------------------------------------------------------------
+STORAGE (matches Linux control): OpenZFS 5000 raidz1 over 4 EBS + SLOG + L2ARC
+--------------------------------------------------------------------------------
+Pool "pgdata" built IN-GUEST over 7 virtio-blk devices:
+   vblk0 = OS image (rootfs=zfs)
+   vblk1-4 = 4x 200GB EBS (nvme5/6/7/8n1) -> raidz1-0
+   vblk5   = 1x 838GB NVMe (nvme0n1)       -> log (SLOG)
+   vblk6   = 1x 838GB NVMe (nvme3n1)       -> cache (L2ARC)
+Props: ashift=12 recordsize=8k compression=lz4 atime=off logbias=throughput
+   primarycache=all.  PG /data = dataset on the pool.
+Create cmd (in-guest, Phase A):
+   zpool create -f -o ashift=12 -O compression=lz4 -O atime=off -O recordsize=8k
+     -O logbias=throughput -O primarycache=all -m /data pgdata
+     raidz1 vblk1 vblk2 vblk3 vblk4 log vblk5 cache vblk6
+
+--------------------------------------------------------------------------------
+PG config (identical to Linux control)
+--------------------------------------------------------------------------------
+shared_buffers=8GB effective_cache_size=24GB work_mem=32MB max_connections=256
+max_wal_size=16GB checkpoint_timeout=15min synchronous_commit=on.
+OSv-required deviations: unix_socket_directories='' (no AF_UNIX),
+  max_parallel_workers_per_gather=0 (PG parallel-query DSM/fork hang on OSv),
+  autovacuum=off, io_method=sync, fsync=on, huge_pages=try.
+initdb --locale=C (musl has no full locale db) -E UTF8 -A trust.
+
+--------------------------------------------------------------------------------
+BOOT + NET SETUP
+--------------------------------------------------------------------------------
+Boot: qemu -enable-kvm -cpu host -m 32G -smp 32, each raidz member a virtio-blk
+  -drive (num-queues=1: MSI-X vector exhaustion at smp32 otherwise), tap0 NIC
+  (virtio-net) so PG is a real cross-instance L3 endpoint, NOT loopback hostfwd.
+Net: guest eth0=192.168.100.2/24 gw .1 on tap0 (host tap0=192.168.100.1);
+  host ENI enp125s0 iptables DNAT :5432 -> 192.168.100.2:5432 + MASQUERADE +
+  FORWARD accepts.  Driver 172.31.40.70 -> DB host 172.31.46.172:5432.
+qemu runs in container osv-net (--network host, --device /dev/kvm) so tap0 is
+  visible.  Build in container osv-build.
+Hugepages toggle: HUGEPAGES=on adds `-mem-path /dev/hugepages -mem-prealloc`
+  (2M-backed guest RAM; host vm.nr_hugepages=17000, hugetlbfs at /dev/hugepages);
+  HUGEPAGES=off = default anonymous guest RAM.  (On OSv-KVM the honest hugepage
+  analog is the QEMU guest-RAM backing, not PG's huge_pages GUC -- OSv PG shared
+  mem lives in guest RAM regardless.)
+
+Honesty note: OSv-PG = musl PIE (WAIT_USE_SELF_PIPE, neutered root/perms checks,
+  unix_socket_directories='', parallel query off); Linux control = stock glibc.
+  Same SQL + config, different libc.  All pgbench output pasted raw below.
+
+================================================================================
+BRING-UP EVIDENCE (all verified)
+================================================================================
+* Image built clean on pgb-kvm (tip 3f20fef4).
+* Phase A: raidz1 pool created in-guest over 4 EBS + SLOG + L2ARC, 996-file
+  initdb'd cluster streamed via cpiod, pool exported. Clean (rc=0).
+* Boot: OSv v0.57.0-432-g3f20fef4, "ZFS: OpenZFS 5000 initialized", pool
+  'pgdata' imported+mounted, eth0 192.168.100.2, "Booted up in ~360 ms".
+* PG: "starting PostgreSQL 18.4 on x86_64-pc-linux-musl", "listening on IPv4
+  0.0.0.0:5432", crash-recovery clean, "database system is ready to accept
+  connections" at smp8, smp16, AND smp32.
+* CROSS-INSTANCE VERIFIED: driver 172.31.40.70 -> DB host 172.31.46.172:5432
+  over tap0+ENI DNAT returns "PostgreSQL 18.4 ... x86_64-pc-linux-musl" (real
+  cross-instance TCP, musl PIE).
+* STABILITY OBSERVATION: one boot at smp32 crashed at ZFS-mount time in
+  taskqueue_thread_loop -> lockfree_mutex_lock (null deref) BEFORE PG start;
+  a clean retry booted to "ready". Intermittent ZFS-mount taskqueue race at
+  high vCPU count; not seen at smp8/16. Logged; retried clean for the run.
+
+================================================================================
+WORKLOAD PROGRESS (incremental -- pgbench TPC-B, IDENTICAL to Linux control)
+================================================================================
+pgbench -i -s 1000 ; RW sweep -c {1,4,8,16,32,64} -T60 x3 -> medians ;
+RO pass -S -c {1,8,16,32,64} -T60 ; BOTH hugepages {on,off}.
+
+--------------------------------------------------------------------------------
+FINDING #1 (decisive) -- pgbench -i -s 1000 FAILS on OSv-KVM OpenZFS raidz
+--------------------------------------------------------------------------------
+-s 1000 = 100M-row (~15GB) bulk COPY. TWO reproducible failure modes, both in
+the ZFS bulk-write path once a PG relation grows past the 1GB segment boundary
+(pgbench_accounts at s=1000 is ~13GB -> segments base/5/16399, .1, .2 ...):
+
+  ATTEMPT 1: COPY completed 100M rows in 91s (~1.1M tuples/s, guest stable),
+    then the "creating primary keys" checkpoint CRASHED the guest:
+      Assertion failed: owner.load(std::memory_order_relaxed) ==
+        sched::thread::current()  (core/lfmutex.cc: unlock: 261)
+      [backtrace] lockfree_mutex_unlock+470 <- <ZFS cb> <- taskqueue_thread_loop+82
+                  <- thread_main_c
+    = a ZFS-taskqueue lockfree mutex UNLOCKED from a different thread than
+      locked it (cross-thread/cross-AS lfmutex ownership violation). Same
+      taskqueue class as the prior KVM cell's arc_write_done crash, different
+      exact site (lfmutex owner mismatch on the CREATE INDEX + checkpoint path).
+
+  ATTEMPT 2 (fresh re-seeded pool): failed EARLIER, during the COPY itself, at
+    the 1GB segment rollover:
+      ERROR: could not open file "base/5/16399.1" (target block 131072): EIO
+      CONTEXT: COPY pgbench_accounts, line 7992000
+    (131072 * 8KB = exactly 1GB = PG's next relation segment .1). The EIO then
+    POISONED the pool: subsequent reads also EIO
+      FATAL: could not open file "base/5/PG_VERSION": EIO
+    i.e. the OpenZFS-on-OSv raidz went into a suspended/errored state after the
+    large-file write fault; the mount is unusable until re-seed.
+
+VERDICT: -s 1000 (and by extension any dataset whose relations cross the 1GB PG
+  segment boundary under sustained bulk write) is NOT viable on OSv-KVM OpenZFS
+  raidz today. This is the SAME wall class the prior KVM cell documented for the
+  HammerDB TPROC-C schema build (bulk COPY in the ZFS taskqueue/ARC write path).
+  Root cause lives in the ZFS large-file / taskqueue-mutex write-completion path
+  under fork; a real OSv+OpenZFS finding, NOT a pgbench/config issue.
+
+================================================================================
+DIRECTIVE UPDATE (mid-run): confirm catalog wall (KVM==FC?), note io_method,
+  STOP chasing pgbench numbers. Findings below.
+================================================================================
+The parallel Firecracker agent reported: on this image tip (3f20fef4), a fresh
+build cannot init pgbench -- `pgbench -i -s 1000` dies with "type
+pg_catalog.timestamp does not exist" because a catalog-index B-tree page reads
+back ALL-ZEROS through the fork/COW shared-buffer path (the open catalog-
+coherence wall), hypervisor-independent, failing at 16 concurrent logins
+(OK=1/FAIL=15). I was asked to (1) confirm the SAME failure on KVM with a fresh
+raidz+initdb, (2) apply+note io_method=sync (default io_method=worker forks I/O
+worker children that crash the guest on cross-AS reads), (3) report + STOP.
+
+--------------------------------------------------------------------------------
+(1) CATALOG ZERO-PAGE WALL ON KVM: **NOT REPRODUCED** (KVM != FC on this wall)
+--------------------------------------------------------------------------------
+Setup: FRESH raidz1 (re-created in-guest over the 4 EBS + SLOG + L2ARC) seeded
+with a FRESH initdb'd cluster (cold catalogs, never queried), booted smp32/32G,
+io_method=sync. All tests from the external driver over tap+ENI DNAT (real
+cross-instance TCP, 172.31.40.70 -> 172.31.46.172:5432).
+
+  (a) single cold connection:
+        select version();              -> PostgreSQL 18.4 ... x86_64-pc-linux-musl
+        select '2024-01-01'::pg_catalog.timestamp;  -> 2024-01-01 00:00:00   (OK)
+      NO "type pg_catalog.timestamp does not exist".
+
+  (b) pgbench -i -s 10 (cold catalog, 1M rows):
+        1000000 of 1000000 tuples (100%) done (elapsed 0.81 s)
+        vacuuming... creating primary keys...
+        done in 1.43 s.   init rc=0   (OK -- cold init SUCCEEDS on KVM)
+
+  (c) 16 CONCURRENT fresh logins, each reading catalogs
+      (select N, '2024-01-01'::pg_catalog.timestamp, count(*) from pg_class):
+        === concurrent-16 result: OK=16 FAIL=0 ===
+      The FC signature is OK=1/FAIL=15; on KVM it is OK=16/FAIL=0. NOT repro'd.
+
+  (d) pgbench -c16 -j16 -C -T30 (reconnect-per-transaction = 16 concurrent FRESH
+      backend logins repeatedly cold-reading catalogs -- the harshest login
+      storm, closest to the FC pattern):
+        number of transactions actually processed: 188
+        number of failed transactions: 0 (0.000%)      <== 0 FAILED
+        average connection time = 2660 ms   tps = 5.77 (incl. reconnection)
+      Slow (each of 16 threads forks a fresh backend that cold-reads catalogs)
+      but every login + catalog read SUCCEEDS. NO zero-page, NO crash.
+
+  HONEST READ: I did NOT reproduce the FC catalog zero-page wall on this KVM box
+  (same image tip 3f20fef4, fresh raidz + fresh cold initdb). The multi-backend
+  shared-catalog READ path is coherent here up to a 16-way concurrent reconnect
+  storm. This is the SAME non-repro the earlier KVM cell logged (it got
+  OK=32/FAIL=0 on a concurrent catalog-read storm to the tpcc db). So KVM != FC
+  on the catalog-read wall: I cannot confirm the FC finding under KVM. NOT
+  claiming the FC finding is wrong -- only that this KVM instance does not
+  exhibit it under direct multi-backend cold-catalog-read stress. The FC failure
+  likely needs a heavier/different concurrency or a build/state difference
+  between the two boxes' images.
+
+--------------------------------------------------------------------------------
+(2) io_method FINDING (default worker vs sync)
+--------------------------------------------------------------------------------
+* My matrix config already sets io_method=sync (was set before this directive).
+  `show io_method;` -> sync, confirmed in effect. Fresh initdb DEFAULT is
+  `#io_method = worker` (commented) -> PG18 default is worker.
+* I ALSO booted PG with `-c io_method=worker` (override) on the FRESH cluster to
+  test the FC crash: PG reached "ready to accept connections" (crash recovery
+  ran from my prior kill -9), and a RO load `pgbench -S -c8 -j8 -T20` returned
+    number of transactions actually processed: 642829
+    number of failed transactions: 0 (0.000%)   tps = 34512   (guest ALIVE)
+  i.e. io_method=worker did NOT crash the guest under RO read load on my KVM box
+  either. (RO select-only warms into shared_buffers, so the I/O worker cross-AS
+  read path may be lightly exercised; I did not push a worker-heavy read-miss
+  workload to a crash before stopping per directive.)
+* NET: io_method=sync is set (matching the FC fix) and is the safe choice on
+  OSv (avoids forked I/O-worker children entirely). On KVM I could not turn the
+  worker default into a crash under the RO load I ran; noted honestly.
+
+--------------------------------------------------------------------------------
+(3) THE WALL THIS KVM BOX ACTUALLY HITS (reproduced, decisive): RW WRITE PATH
+--------------------------------------------------------------------------------
+Not the catalog READ wall -- the ZFS WRITE-completion taskqueue. Two repros:
+
+ * pgbench -i -s 1000 (100M-row / ~15GB bulk COPY): FINDING #1 above -- either a
+   lfmutex owner-mismatch crash on the CREATE INDEX + checkpoint, or an EIO at
+   the 1GB PG-segment rollover that then poisons the pool (reads EIO).
+
+ * pgbench RW sweep at s=100 (the proven-stable scale): the sweep produced REAL
+   numbers for the first two runs --
+     off-s100 rw c=1 it=1 : tps=283.75  lat=3.524 ms  0 failed
+     off-s100 rw c=1 it=2 : tps=285.38  lat=3.504 ms  0 failed
+   -- then on the 3rd RW run the guest CRASHED with the same signature as -s1000
+   attempt 1:
+     Assertion failed: owner.load(std::memory_order_relaxed) ==
+       sched::thread::current()  (core/lfmutex.cc: unlock: 261)
+     [backtrace] lockfree_mutex_unlock+470 <- <ZFS cb>
+                 <- taskqueue_thread_loop+82 <- thread_main_c
+   = a ZFS-taskqueue lockfree mutex UNLOCKED from a different thread than locked
+   it, under sustained forked-backend WRITE load. So the earlier "clean -s100
+   pgbench" numbers were a warm/short-lived fluke: sustained RW load crashes the
+   guest in the ZFS write-completion taskqueue. This is the real OSv+OpenZFS+fork
+   wall to fix (same class the prior KVM cell tagged: arc_write_done / taskqueue
+   / socket-buffer cross-AS free under bulk write).
+
+--------------------------------------------------------------------------------
+VERDICT + STOP
+--------------------------------------------------------------------------------
+* NO pgbench throughput matrix is reportable: sustained RW load crashes the OSv
+  guest in the ZFS write-completion taskqueue (lfmutex owner-mismatch), and
+  -s 1000 fails outright (crash or pool-poisoning EIO). Only two isolated warm
+  RW c=1 points (283-285 tps, 0 failed) and RO points survived before a crash.
+* KVM != FC on the catalog zero-page wall: I could not reproduce the FC
+  "type pg_catalog.timestamp does not exist" / OK=1-FAIL-15 catalog failure --
+  cold init, 16-way concurrent catalog reads, and a 16-way reconnect storm all
+  succeeded (0 failed) on KVM. Useful cross-check: the two hypervisors diverge
+  here, so the catalog wall is not obviously hypervisor-independent as seen from
+  this box (or needs a heavier/different trigger).
+* io_method=sync applied + confirmed (matches FC fix); worker default did not
+  crash under my RO load.
+* STOPPED retrying pgbench per directive. Boxes left running for the parent to
+  idle-down until the meh/coherence + ZFS-write-taskqueue fixes land.
+
+DRIVER INSTANCE FOR TEARDOWN (parent to terminate):
+  >>> i-0cecfdd8774dafe62  (pgb-kvm-driver, c5.4xlarge, 172.31.40.70) <<<
+DB host pgb-kvm i-0f830da6b0b1e459a left running w/ artifacts (NOT terminated).
+Zombie discipline: qemu always under timeout, pkill -9 after each boot,
+container restarted to clear defunct after crashy boots; ended at 0 qemu /
+0 defunct.
+

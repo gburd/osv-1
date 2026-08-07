@@ -1,0 +1,19 @@
+fs: implement io_uring async I/O interface
+
+Add an io_uring(7) implementation backed by OSv's existing async-I/O
+plumbing.  Supported opcodes: READ, WRITE, FSYNC, NOP, OPENAT,
+CLOSE, READV, WRITEV, POLL_ADD, POLL_REMOVE, TIMEOUT, ACCEPT,
+CONNECT, RECV, SEND.  Submission and completion queues are mmap'd
+into user memory; the SQE/CQE layout matches Linux 5.15 ABI.
+
+Surface:
+  - io_uring_setup(), io_uring_enter(), io_uring_register() syscalls.
+  - SQ poll thread (IORING_SETUP_SQPOLL) for kernel-side submission.
+  - Linked SQEs (IOSQE_IO_LINK) and drain barriers (IOSQE_IO_DRAIN).
+
+Tests: tst-io_uring.cc, 14 sub-tests covering each opcode, link
+semantics, drain ordering, and SQ-poll mode.  Registered in
+modules/tests/Makefile and zfs-tools/usr.manifest.
+
+Note: OSv's io_uring is not used by OpenJDK 21 virtual threads
+(JDK 21 still goes through epoll); see the cover letter for details.

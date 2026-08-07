@@ -1,0 +1,146 @@
+CONCURRENCY DIAGNOSTIC — OSv+PG pgbench RW/RO scaling collapse root-cause
+Image: OSv 86a7d3b37 (fork-stack), PG18.4 musl, raidz1(4xEBS)+SLOG+L2ARC.
+Host: 2-socket x86-64, 96 threads (node0=48). External driver over real VPC.
+
+KEY CONFIG FINDING (from osv-serve.sh, the script that produced the parity numbers):
+  * OSv guest launched with -smp 4  (FOUR vCPUs).
+  * Linux baseline ran numactl node0 = 48 CPUs.
+  => 12x CPU disparity. The "regression past c16" tracks the 4-vCPU ceiling.
+  * OSv virtio-net is HARDCODED single queue pair (_rxq=vq0,_txq=vq1 in
+    drivers/virtio-net.cc:243-244; no VIRTIO_NET_F_MQ negotiation). All N
+    backends' network I/O serialize through one rx + one tx vq.
+
+RO MATH (decisive, RO = pure CPU, data in shared_buffers, no I/O):
+  Linux c32=204565 tps / 48 cores = ~4262 tps/core
+  OSv   c32= 22306 tps /  4 cores = ~5576 tps/core  <-- OSv FASTER per core
+  => the RO "regression" is a vCPU-COUNT artifact, not a scaling defect.
+
+EXPERIMENT PLAN:
+  A) -smp 4  (parity config)  c16/c32/c64 RW + RO  [reproduce collapse]
+  B) -smp 48 (match Linux)    c16/c32/c64 RW + RO  [does it scale?]
+  Fresh pgbench -i -s300 seeded per pool. External driver over VPC.
+
+================================================================================
+MEASURED RESULTS (external driver over VPC, image 86a7d3b37, fresh -s300 pool)
+================================================================================
+
+--- CLUE 1: fresh pool vs dirty (RW, -smp 4, the PARITY config) ---
+  c16 MEDIAN=3177  raw=(2947 3177 3194)        [parity said 3489 — matches]
+  c32 MEDIAN=5160  raw=(5160 5273 3535)        [parity said 2833 — FRESH POOL
+       holds ~5160! iters 1,2 = 5160,5273 then iter3 collapsed to 3535]
+  c64 MEDIAN=2496  raw=(2473 2496 2615)        [parity said 2750 — matches]
+  => The parity c32=2833 was a DIRTY-POOL / run-over-run artifact. On a fresh
+     pool c32 holds ~5160. The within-run iter3 drop = WAL/dirty/ARC state
+     accumulating across the 60s iters. PARTIALLY a measurement artifact.
+     BUT c64 (2496) < c32 (5160) even fresh = a REAL ceiling above c32.
+
+--- vCPU A/B (RW, fresh vs redo-backlog pool) ---
+  -smp 4  : c16=3177  c32=5160  c64=2496
+  -smp 16 : c16=3195  c32=6201(STABLE, no collapse)  c64=3017
+  -smp 48 : BOOT CRASH — MSI-X vector exhaustion (see below)
+  => More vCPUs stabilise c32 (6201 across all 3 iters) but c64 STILL
+     collapses below c32. vCPU count is NOT the whole story.
+
+--- CLUE 3: RO -S (pure CPU+net, NO ZFS write) is the SMOKING GUN ---
+  -smp 4  RO: c8=27929  c32=22306  (from parity)
+  -smp 16 RO: c8=31595  c32=23723  c64=21551
+  -smp 16 RO fine: c1=5120 c2=9793 c4=18565 c8=30562(PEAK) c16=25916(REGRESS)
+  => RO scales LINEARLY to c4-c8 (5k->9.8k->18.6k->30.6k) then SATURATES and
+     REGRESSES at c16. 4x the vCPUs (4->16) barely moved c32 (22306->23723).
+     RO is NOT vCPU-bound. It saturates a SINGLE serialized path at ~c8.
+
+--- PROFILING (host top -H, c64 RO, guest has 16 vCPUs) ---
+  Only 3 of 16 vCPU threads active: 40%, 40%, 20% CPU. 13 vCPUs = 0.0% IDLE.
+  Host: only 4 CPUs >20% busy. Work = ~2.4 CPU spread over 3 vCPUs.
+  => NOT CPU-bound (13 idle vCPUs). SERIALIZED on one path.
+
+================================================================================
+*** ROOT CAUSE (measured): OSv virtio-net SINGLE QUEUE PAIR ***
+================================================================================
+drivers/virtio-net.cc:243-244:  _rxq(get_virt_queue(0), receiver), _txq(vq1)
+  * ONE rx vq + ONE tx vq, hardcoded. No VIRTIO_NET_F_MQ negotiation (the
+    feature constant exists in virtio-net.hh:52 but is never negotiated;
+    _rxq/_txq are single structs, not arrays).
+  * ONE receiver() poll thread at priority_infinity drains the single RX vq
+    (virtio-net.cc:243,250). ALL N backends' inbound queries funnel through
+    this one thread on one CPU.
+  => Every pgbench query for all 64 backends serializes through one RX queue
+     drained by one thread. That thread saturates ~c8 (~30k tps) and then
+     contention regresses it. Linux (multiqueue net + 48 cores) hits 204k.
+     THIS is the shared read/CPU path that caps BOTH RO and RW concurrency.
+
+SECONDARY (RW only): c64 RW (3017) << c64 RO (21551) => the WRITE path adds a
+  further ceiling on top (WAL fsync/ZIL/SLOG + ZFS txg), but the DOMINANT
+  shared bottleneck limiting concurrency scaling is the single-queue net.
+
+--- -smp 48 BOOT CRASH (separate real OSv bug) ---
+  abort() in interrupt_descriptor_table::register_interrupt_handler
+  (arch/x64/exceptions.cc:103) via virtio::blk MSI-X easy_register.
+  IDT has 224 usable vectors (32..255). virtio-blk requests 1 MSI-X vector
+  PER QUEUE and advertises num_queues = min(vCPUs, ...). 7 virtio-blk devices
+  x ~48 queues > 224 => vector exhaustion -> abort during driver load.
+  => OSv cannot boot with many vCPUs + several multiqueue virtio-blk devices.
+
+================================================================================
+VERDICT
+================================================================================
+The collapse is BOTH:
+  (a) PARTLY a dirty-pool measurement artifact — parity c32=2833 was run-over-run
+      state accumulation; a FRESH pool holds c32~5160 (smp4) / ~6201 (smp16).
+      The parity report's c32 number should be re-taken with a fresh pool.
+  (b) MOSTLY a REAL, measured contention: OSv's SINGLE-QUEUE virtio-net.
+
+DOMINANT BOTTLENECK (measured, named): OSv virtio-net single rx/tx queue pair.
+  Evidence: RO (no ZFS write) saturates at c8 (~30k tps) and REGRESSES at c16;
+  4x vCPUs barely moves it; host top -H shows 13/16 vCPUs idle at c64 (serialized,
+  not CPU-bound); source confirms one _rxq/_txq + one receiver() thread, no MQ.
+  Linux (multiqueue net, 48 cores) hits 204k RO — the ~9x RO gap and the RW
+  plateau above c16 are the single net queue, not the fork_arena thread model.
+
+  The prior "fork_arena thread-per-backend serializes" explanation is WRONG as
+  the dominant cause: RO proves backends aren't scheduler-serialized (they scale
+  fine to c8); they're NET-serialized on one queue.
+
+SECONDARY: RW c64 (3017) << RO c64 (21551) => a write-path ceiling (WAL fsync /
+  ZIL-on-SLOG / ZFS txg sync) stacks on top of the net cap. Fix the net queue
+  first (caps everything), then profile the residual write ceiling.
+
+INCIDENTAL BUG (blocks high-vCPU tuning): -smp 48 boot crash = MSI-X vector
+  exhaustion (virtio-blk 1 vector/queue x 7 devices x ~48 queues > 224 IDT slots).
+
+================================================================================
+FIX PLAN (precise, staged) — drivers/virtio-net.cc/.hh
+================================================================================
+GOAL: implement virtio-net multiqueue so N rx/tx queue pairs run N receiver
+threads across N vCPUs, matching Linux's per-core net scaling.
+
+1. Negotiate VIRTIO_NET_F_MQ: add (1<<VIRTIO_NET_F_MQ) to the feature mask
+   (virtio-net.cc:911). Read config max_virtqueue_pairs; pick
+   nqp = min(advertised_pairs, sched::cpus.size(), VECTOR_BUDGET).
+2. _rxq/_txq single structs -> std::vector<rxq>/<txq> (virtio-net.hh:499-501).
+   Queue layout per spec: rx=2*i, tx=2*i+1, ctrl=2*nqp.
+3. One receiver() poll thread + one poll_task PER rx queue; each waits on its own
+   vq. txq per queue; if_transmit selects tx queue by cpu id % nqp (mirror the
+   virtio-blk make_request() queue pick at virtio-blk.cc:390).
+4. MSI-X: register 2*nqp bindings (one vector per rx and per tx queue) in
+   register_msi_bindings (virtio-net.cc:308). CRITICAL: respect the 224-vector
+   IDT budget (arch/x64/exceptions.cc:103) shared with virtio-blk — cap nqp so
+   total vectors across all devices <= 224 (see MSI-X fix below).
+5. Send the CTRL_MQ_VQ_PAIRS_SET command (VIRTIO_NET_CTRL_MQ, virtio-net.hh:104)
+   to tell the device how many pairs the guest will use.
+6. RX steering: qemu/vhost hashes flows to rx queues; each per-queue receiver
+   feeds if_input independently -> parallel across vCPUs. No RSS key needed for
+   the basic win.
+GATE: keep single-queue when nqp==1 (no behaviour change on 1-vCPU/mmio guests).
+TEST: reboot reliability at smp 4/8/16; RO c8/c16/c32/c64 should now scale past
+  30k toward Linux; RW should scale past c16. Same pgbench sweep, 0-failed.
+
+MSI-X BUDGET FIX (also fixes the smp48 boot crash, enables high vCPU):
+  virtio-blk requests 1 vector/queue (virtio-blk.cc:171-184) and virtio-net will
+  too. With many devices+vCPUs this exceeds 224 IDT vectors -> abort. Cap
+  per-device queue count: nqp = min(vCPUs, floor((224 - reserved)/(2*ndevices)))
+  or share a completion vector across queues. Lets OSv boot at high vCPU AND
+  gives net multiqueue headroom.
+
+ESTIMATE: ~300-500 lines across virtio-net.cc/.hh; needs boot-stability +
+  pgbench re-sweep validation. NOT a blind under-pressure edit — staged as above.

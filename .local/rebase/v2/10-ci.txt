@@ -1,0 +1,15 @@
+ci: add Forgejo Actions workflows for Codeberg
+
+Three Forgejo Actions workflows mirroring the existing GitHub
+Actions setup:
+
+  - build.yml: every push, run a debug + release build on x86_64
+    with fs=zfs.
+  - test.yml: every PR, build the test image and run the OSv test
+    suite (tst-pthread, tst-shm, tst-shm-consistency, tst-io_uring,
+    tst-zfs-direct-io, tst-zfs-trim, tst-zfs-encryption, tst-zfs-
+    multirec).  The matrix splits across QEMU + KVM-on-Forgejo runner.
+  - release.yml: on tag push, build a fresh ZFS image and attach it
+    as a release asset.
+
+Mirrors only; neither workflow runs against cloudius-systems/osv.

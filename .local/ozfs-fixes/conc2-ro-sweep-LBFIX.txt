@@ -1,0 +1,11 @@
+2026-08-01 17:08:00.871 UTC [2] LOG:  database system is ready to accept connections
+done in 5.29 s (drop tables 0.00 s, create tables 0.00 s, client-side generate 3.47 s, vacuum 0.18 s, primary keys 1.64 s).
+=== RO sweep WITH AGGRESSIVE LOAD_BALANCE (10ms, drain imbalance) ===
+c=1 tps=12344.156725
+c=4 tps=36821.917660
+c=8 tps=63750.338007
+c=16 tps=29807.058203
+c=24 tps=25659.811041
+c=32 tps=25864.657462
+c=48 tps=23767.898068
+c=64 tps=22271.459058

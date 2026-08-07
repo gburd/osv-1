@@ -1,0 +1,10 @@
+2026-08-01 16:58:15.594 UTC [2] LOG:  database system is ready to accept connections
+done in 5.10 s (drop tables 0.00 s, create tables 0.00 s, client-side generate 3.35 s, vacuum 0.17 s, primary keys 1.58 s).
+=== RO sweep WITH APP-ONLY WAKE+START STEERING ===
+c=1 tps=
+c=4 tps=
+c=8 tps=
+c=16 tps=
+c=24 tps=
+c=32 tps=
+c=48 tps=

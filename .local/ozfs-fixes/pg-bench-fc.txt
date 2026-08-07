@@ -1,0 +1,266 @@
+================================================================================
+PG18 on OSv-under-FIRECRACKER — HammerDB TPROC-C benchmark (RAID-Z NVMe+EBS)
+================================================================================
+Cell: OSv-Firecracker of the PG/OSv-vs-PG/Linux TPROC-C matrix.
+Date: 2026-07-26
+Author: (FC cell agent)
+
+DB HOST (under test):  ec2-user@3.17.75.42  i-04dc5fc9637c06ae2  m5d.metal
+                       96 core / 377GB, priv IP 172.31.12.108, ENI enp125s0
+                       subnet-08627f3be3da35553 (us-east-2a), SG sg-0e2719d4599449a12
+LOAD DRIVER (mine):    i-0effddcc586cf5dca  osv-bench-fc-driver  c5.4xlarge
+                       priv IP 172.31.1.200, pub 3.144.172.26  (HammerDB v5.0)
+Runs ONLY: Postgres-on-OSv-under-Firecracker.  DB host NOT to be terminated.
+
+================================================================================
+SETUP (reproducible)
+================================================================================
+Hypervisor:  Firecracker v1.7.0 (x86_64 release binary -> /usr/local/bin/firecracker)
+OSv image:   loader-stripped.elf (9.4M, FC kernel) + usr.raw (512M raw, from usr.img qcow2)
+             OSv v0.57.0-432-g009234b4, branch integ/pg-fork-zfs (combined fork+OpenZFS)
+             SAME image as the OSv-KVM cell (scp'd from osv-bench 3.145.108.149).
+PG:          stock PostgreSQL 18.4, musl PIE (x86_64-pc-linux-musl), conf_fork=1.
+ZFS:         OpenZFS 5000 (in-guest zpool.so/zfs.so/libsolaris.so).
+Disks (verified lsblk): 4x 838G local NVMe (nvme0/1/3/4n1) + 4x 200G EBS (nvme5/6/7/8n1).
+             root on nvme2n1.
+
+FIRECRACKER BOOT MODEL (differs from qemu; documented):
+  * FC needs the STRIPPED loader (loader-stripped.elf) as kernel_image_path;
+    the full 70M loader.elf does NOT load under FC.  qcow2 usr.img must be
+    converted to RAW (usr.raw) — FC has no qcow2 support.
+  * Multi-drive: stock scripts/firecracker.py adds only ONE drive; I wrote
+    /tmp/fc-run.py (config-file mode, FC v1.7) to attach the OS image + all 6
+    raidz members as virtio-blk, plus a tap NIC.  Guest vblk order = drive
+    declaration order:
+        vblk0 = usr.raw (rootfs=zfs)
+        vblk1..vblk4 = 4x EBS (nvme5/6/7/8n1) -> raidz1
+        vblk5 = 1x NVMe (nvme0n1)             -> log (SLOG)
+        vblk6 = 1x NVMe (nvme3n1)             -> cache (L2ARC)
+  * boot_args prefix "--nopci" (FC = MMIO virtio, no PCI) then the OSv --append.
+  * machine-config: smt=false, vcpu_count + mem_size_mib per run.
+
+FIRECRACKER TAP NET (differs from qemu tap only in device name; same DNAT):
+  fc_tap0 (host 192.168.100.1/24) <-> guest eth0 192.168.100.2 (virtio-net MMIO).
+  Guest static IP via OSv --ip=eth0,192.168.100.2,255.255.255.0 --defaultgw=192.168.100.1.
+  Host ENI DNAT so an EXTERNAL instance reaches PG on the host private IP:
+    iptables -t nat -A PREROUTING -i enp125s0 -p tcp --dport 5432 -j DNAT --to 192.168.100.2:5432
+    iptables -t nat -A POSTROUTING -s 192.168.100.2/32 -o enp125s0 -j MASQUERADE
+    + FORWARD ACCEPT both ways ; net.ipv4.ip_forward=1.
+  SG sg-0e2719d4599449a12 allows tcp/5432 from 172.31.0.0/20 (whole subnet).
+
+RAID-Z pool "pgdata" (IDENTICAL geometry+props to OSv-KVM cell):
+  raidz1  vblk1 vblk2 vblk3 vblk4   (4x 200G EBS, durable, 1-disk fault tolerant)
+  log     vblk5                     (1x 838G NVMe, SLOG)
+  cache   vblk6                     (1x 838G NVMe, L2ARC)
+  props: ashift=12 recordsize=8K compression=lz4 atime=off logbias=throughput primarycache=all
+  Created IN-GUEST under Firecracker by zpool.so; seeded via cpiod over tap net.
+
+PG config (identical across Linux / OSv-KVM / OSv-FC), passed as -c flags:
+  shared_buffers=8GB effective_cache_size=24GB work_mem=32MB max_connections=256
+  max_wal_size=16GB checkpoint_timeout=15min synchronous_commit=on
+  max_parallel_workers=8 max_parallel_workers_per_gather=2 listen_addresses='*' port=5432
+  huge_pages={on|off} per matrix row.
+
+================================================================================
+MILESTONES (verbatim, banked incrementally)
+================================================================================
+
+[1] OSv BOOTS UNDER FIRECRACKER v1.7  -- YES
+    Booted up in 117-208 ms; ZFS root mounted; /zpool.so status works.
+
+[2] RAID-Z POOL CREATES UNDER FIRECRACKER  -- YES (identical to KVM geometry)
+    zpool status pgdata (under FC):
+      pool: pgdata  state: ONLINE
+        raidz1-0  ONLINE   vblk1 vblk2 vblk3 vblk4
+        logs      vblk5
+        cache     vblk6
+      errors: No known data errors
+    Cluster seeded via cpiod over tap (39M, "cpiod finished", clean export).
+
+[3] PG SERVES ON THE RAID-Z UNDER FIRECRACKER  -- YES
+    READY at 2s. From the DB host over tap:
+      select version(); -> PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+
+[4] CROSS-INSTANCE NETWORKING (external driver -> DB host DNAT -> guest)  -- YES
+    From driver i-0effddcc586cf5dca (172.31.1.200):
+      psql -h 172.31.12.108 -p 5432 -U postgres -c 'select version()'
+      -> PostgreSQL 18.4 on x86_64-pc-linux-musl ...  (real cross-instance TCP)
+
+    KNOWN FC-NET QUIRK (watch for throughput impact): Firecracker logs
+    "Failed to parse available descriptor chain: InvalidDataLength" occasionally
+    on the OSv virtio-net MMIO path (6 during the 39M cpiod seed; transfer still
+    completed). This is an OSv-virtio-net-under-FC issue not seen under qemu/KVM.
+    Recorded; watching whether it caps NOPM vs KVM.
+
+[5] ROOT-CAUSE: the ONLY wall on OSv-FC is the PG PARALLEL-WORKER fork path
+    (NOT an FC virtio-blk bug — FC block I/O round-trips correctly).
+
+    Symptom: after fresh seed + serve, catalog index reads return zero pages:
+      ERROR: index "pg_attribute_relid_attnum_index" contains unexpected zero
+             page at block 10   CONTEXT: parallel worker
+      (also pg_authid_oid_index, pg_depend_depender_index, pg_tablespace_oid_index,
+       pg_statistic_relid_att_inh_index — always a CATALOG index, always via a
+       parallel worker.)
+
+    ISOLATION (decisive):
+      * TEST A (max_parallel_workers=8, per plan config): heavy heap DML SUCCEEDS
+        (INSERT 200000 / UPDATE 100000 / DELETE 40000 all commit + checkpoint),
+        but the follow-up `select count(*)` — which dispatches PARALLEL WORKERS —
+        errors with "zero page ... CONTEXT: parallel worker".
+      * TEST B (max_parallel_workers_per_gather=0, no parallel workers): the SAME
+        heavy workload runs CLEAN end to end:
+            INSERT 200000 -> count 200000
+            UPDATE 100000 -> count 200000 (all non-null)
+            DELETE 40000  -> count 160000
+            2nd table INSERT 100000 -> count 100000
+        multiple CHECKPOINTs, zero errors, correct row counts + md5 read-back.
+      * A `zpool scrub pgdata` reports "repaired 0B ... 0 errors" — the on-disk
+        RAID-Z is self-consistent; the zero page is a PG-level read by a forked
+        parallel worker, not ZFS corruption and not a dropped FC block write.
+
+    CONCLUSION: FC virtio-blk (MMIO) write+read-back is CORRECT (matches KVM).
+    The remaining wall is PostgreSQL's PARALLEL-WORKER fork path on OSv — the
+    same "PART B PG PARALLEL-QUERY WALL (in progress)" noted for the KVM cell in
+    pg-raidz.txt. A forked parallel worker's catalog-index reads hit zero pages.
+    This is a fork/COW coherence issue in the parallel-worker child, independent
+    of hypervisor. TPROC-C (point OLTP) does not use parallel gather in its hot
+    path, so it can run with parallel workers effectively unused; but to match
+    the OSv-KVM cell honestly, the parallel-worker wall is the OSv-common gate.
+
+    "Does OSv-Firecracker == OSv-KVM?" — for the STORAGE + NETWORK + BOOT path:
+    YES, FC reproduces KVM's durable-serve behavior. The parallel-worker wall is
+    common to BOTH (it is an OSv fork issue, not hypervisor-specific).
+
+================================================================================
+[6] (a) SEED ARTIFACT vs (b) REAL FORK READ-ZERO BUG  -- ANSWER: (b), and it is
+        NOT Firecracker-specific (KVM fails IDENTICALLY).
+================================================================================
+The pg_authid zero-page hits EVERY connection (pg_authid is read at login), so
+it is a real blocker. I ran the parent's exact discriminator.
+
+CANNOT initdb IN-GUEST on OSv: initdb fork/exec's the `postgres` binary
+(postgres -V, postgres --boot); OSv has no execve of a fresh binary (single
+app per osv::run) -> "could not execute postgres: operating system error 0".
+This is WHY the cluster is host-initdb'd + cpio-seeded (as the KVM cell did).
+So "fresh in-guest initdb" is impossible; I used a read-only successive-
+connection test on a FRESH cpio-seed instead, which is a cleaner discriminator.
+
+DISCRIMINATOR (fresh raidz seed, ZERO writes, just open successive connections):
+  OSv-FIRECRACKER:
+    conn A (1st, brand new cluster): select rolname from pg_authid
+        -> ALL ROLES RETURNED (pg_checkpoint, pg_database_owner, ... OK)
+    conn B (2nd new connection, NOTHING written in between):
+        -> ERROR: cache lookup failed for operator family 1994
+    conn C (3rd new connection):
+        -> FATAL: index "pg_authid_rolname_index" contains unexpected zero page
+                  at block 1
+  OSv-KVM (SAME image, SAME raidz, qemu 8.1.3 PCI virtio-blk, in a fedora
+           container --network host --device /dev/kvm):
+    conn A -> ALL ROLES RETURNED (identical clean read)
+    conn B -> ERROR: cache lookup failed for operator family 1994   (IDENTICAL)
+    conn C -> FATAL: pg_authid_rolname_index ... zero page at block 1 (IDENTICAL)
+    conn D -> same FATAL.
+
+READING:
+  * conn A reads the WHOLE catalog cleanly => the ON-DISK cpio-seeded cluster is
+    GOOD. `zpool scrub pgdata` = "repaired 0B, 0 errors". So NOT case (a): not a
+    corrupted seed, not a bad cpio, not ZFS corruption.
+  * The zero page appears from OPENING SUCCESSIVE NEW CONNECTIONS ALONE, with NO
+    intervening writes. Each new PG connection = a NEWLY FORKED backend. The 2nd
+    forked backend already reads catalog state degraded; the 3rd reads zeros.
+    => CASE (b): a real cross-AS / read-returns-zero bug on the OSv FORK path
+       (a forked backend reads shared catalog / shared-buffer pages that are
+       divergent/zero in its COW address space) -- the SAME defect class as the
+       shipped file_vma / MAP_SHARED-across-backends / _app_runtime walls.
+  * It is HYPERVISOR-INDEPENDENT: Firecracker (virtio-MMIO) and KVM/qemu
+    (virtio-PCI) fail byte-for-byte identically on the SAME image+raidz.
+
+PRECISE SYMBOLIZATION (matches the project's own known-unfixed wall):
+  This is the documented, NOT-YET-CLOSED wall on the HammerDB path in
+  .local/ROADMAP.md (session-15 check-ins):
+    "STORAGE / SHARED-BUFFER mmap coherence ... a MAP_SHARED region (PG
+     shared_buffers / a DSM segment) mapped by one backend AFTER it forked is
+     NOT mapped in a sibling/other backend's AS ... clone_address_space DOES
+     share mmap_shared vmas but a region mapped POST-fork by one backend needs
+     to become visible in sibling backends' page tables too."
+  and the earlier "after ~2 forked backends reaped, the 3rd ... on a corrupt
+  state" (my conn A ok / B degraded / C zero-page = exactly the 1st-ok,
+  2nd/3rd-fail signature). The catalog relation/index pages a sibling backend
+  needs are read through its COW page tables where a divergent-or-zero physical
+  page lives => "unexpected zero page". No write is required to expose it -- the
+  first backend paged the catalog in; the second forked backend's page tables
+  don't resolve those shared pages, so it demand-zero-faults the catalog block.
+
+CONSEQUENCE FOR THE BENCHMARK (honest):
+  HammerDB TPROC-C is inherently MULTI-CONNECTION (each vuser = a connection =
+  a forked backend). The 2nd+ connection cannot read pg_authid at login, so
+  HammerDB cannot even authenticate its vusers, let alone build the schema
+  (CREATE USER/DATABASE/TABLE over many connections) or run the workload. The
+  workload does NOT run to a NOPM/TPM number on this image on EITHER hypervisor.
+  I did NOT fabricate a throughput number.
+
+WHAT DOES RUN (proven, both hypervisors):
+  * OSv boots under FC (117-208 ms) and KVM; ZFS root + raidz import/mount OK.
+  * The RAID-Z (raidz1 4xEBS + SLOG + L2ARC) creates, scrubs 0-errors, and a
+    SINGLE persistent connection does heavy correct work:
+      CREATE TABLE / INSERT 200000 / UPDATE 100000 / DELETE 40000 / CREATE INDEX
+      / CREATE ROLE / multiple CHECKPOINTs, all with correct row counts + md5
+      read-back, zero errors -- as long as it stays in ONE backend.
+  * Cross-instance networking works end-to-end (external driver -> host ENI
+    DNAT -> guest tap -> PG) under BOTH FC and KVM.
+
+================================================================================
+ANSWERS TO THE HEADLINE QUESTIONS
+================================================================================
+Q: Does OSv-Firecracker == OSv-KVM (within noise)?
+A: YES -- stronger than "within noise": they are BEHAVIORALLY IDENTICAL on this
+   image. Same boot, same raidz, same single-connection success, and the SAME
+   multi-connection fork wall with byte-identical error text. Firecracker
+   (virtio-MMIO) reproduces KVM (virtio-PCI) exactly. No hypervisor-specific
+   divergence found. (One FC-only cosmetic quirk: occasional virtio-net
+   "InvalidDataLength" descriptor warnings, non-fatal, transfer completes.)
+
+Q: Stability verdict for stock PG18 on OSv-under-Firecracker, /data on the
+   OpenZFS RAID-Z?
+A: NOT STABLE for a concurrent OLTP workload. Storage (raidz write+read+scrub),
+   boot, and networking are stable; SINGLE-backend SQL is stable. But the
+   fork/COW shared-page coherence wall makes the 2nd+ concurrent connection read
+   corrupt catalog pages -- a hard stability gate that blocks HammerDB. This is
+   a REAL OSv fork finding (not FC, not the storage path, not the seed), and it
+   is the same wall the project already tracks as open on the HammerDB path.
+
+MATRIX (rows we intended vs what the fork wall permits):
+  config          | hugepages | vu | NOPM/TPM/latency | note
+  OSv-Firecracker | off       | 8  | N/A (blocked)    | vuser conn #2+ fails at login (fork read-zero)
+  OSv-Firecracker | off       | 16 | N/A (blocked)    | same
+  OSv-Firecracker | off       | 32 | N/A (blocked)    | same
+  OSv-Firecracker | off       | 64 | N/A (blocked)    | same
+  OSv-Firecracker | on        | *  | N/A (blocked)    | same wall, independent of huge pages
+  (KVM control on this box: identical -- blocked at conn #2, proving OSv-common.)
+  Stability sustained-run (>=30min): NOT ATTEMPTED -- cannot pass the multi-
+  connection gate to start it.
+
+DRIVER INSTANCE (for teardown): i-0effddcc586cf5dca  osv-bench-fc-driver
+  c5.4xlarge, 172.31.1.200 / 3.144.172.26, us-east-2. HammerDB v5.0 installed
+  (PostgreSQL Pgtcl lib loaded OK via libpq.so.5 symlink). DB host osv-bench-fc
+  (i-04dc5fc9637c06ae2) LEFT RUNNING as instructed.
+
+================================================================================
+[7] REFINEMENT (rigor: ruled out connection-churn timing with 2-3s gaps)
+================================================================================
+The wall is triggered by CATALOG-INDEX reads from a forked backend, not by
+connection rate:
+  * `select 1` on 5 successive NEW connections (3s gaps) -> ALL return 1. A
+    forked backend that touches NO catalog index is fine.
+  * `select count(*) from pg_authid` on 5 successive NEW connections (2s gaps):
+      conn #1 -> 17          (correct; first backend pages the catalog in OK)
+      conn #2 -> ERROR: index "pg_statistic_relid_att_inh_index" zero page blk 0
+      conn #3..#5 -> same zero-page error.
+  => The FIRST forked backend reads the shared catalog/relcache pages correctly;
+     every SUBSEQUENT forked backend reads those same shared pages as ZERO. The
+     shared catalog mapping (buffers/relcache) is not coherent across the COW
+     fork boundary for sibling backends. Exactly the ROADMAP "MAP_SHARED region
+     mapped post-fork by one backend not visible in sibling backends' AS" wall,
+     and independent of hypervisor (FC == KVM).
+This is the definitive stability blocker for any multi-connection workload
+(HammerDB, and even a 2nd psql doing a real query) on this image.

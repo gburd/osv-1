@@ -1,0 +1,58 @@
+F2B ROOT-CAUSE (bank a, CORRECTED) -- caller chain + DOMINANT corruption source
+================================================================================
+Author: Greg Burd  Class: [fork-stack]  Base: corruptor-fix @ f2857073
+
+CRASH SITE (confirmed by instrumented repro at -smp4, and by every backtrace):
+  assert(sched::preemptable()) at arch/x64/mmu.cc: a page_fault while
+  preempt_counter != 0.  The captured faults land in several places
+  (wake_impl reading a garbage detached_state->_cpu; posix_memalign writing a
+  corrupt free-list node ~0x4000fffffff8; boost::intrusive list_node
+  set_next/set_previous on a near-null node in interrupt context).  These are
+  all DOWNSTREAM symptoms of one thing: a blown/overwritten kernel stack and a
+  scribbled allocator free-list.
+
+THE CALLER CHAIN (the invariant across ALL captured F2B dumps):
+  Every dump's frame walk shows the same recursive cycle:
+      lockfree::mutex::lock()
+        -> aligned_new<wait_record>            (include/osv/aligned_new.hh:30)
+          -> std_malloc / posix_memalign
+            -> memory::pool::alloc / add_page
+              -> memory::page_pool::l1::refill -> l2::refill / alloc_page_batch
+                -> lockfree::mutex::lock()      (re-enters!)  ... repeat ...
+  i.e. a wait/lock path that ALLOCATES a wait_record, where the allocation
+  itself takes a lock whose slow path allocates again -> unbounded recursion.
+
+DOMINANT ROOT CAUSE (the real one):
+  include/osv/wait_record.hh coherent_wait_record (the fork Stage-2 cross-AS
+  coherence helper) allocated its wait_record with aligned_new<wait_record>
+  (a malloc) INSIDE the lock/wait path whenever a fork child address space was
+  live (fork_child_needs_heap_wait_record()).  coherent_wait_record is
+  constructed in the hottest wait primitives:
+      core/lfmutex.cc:90   mutex::lock()
+      core/condvar.cc:30   condvar::wait()
+      core/rcu.cc:227      rcu synchronize
+  When mutex::lock() is the memory allocator's own free_page_ranges_lock (held
+  during page-pool refill), the aligned_new re-enters the allocator, which
+  re-takes the lock, which allocates another wait_record, ... = unbounded
+  recursion -> kernel-stack overflow (OSv runs kernel code on the app thread
+  stack; there is no separate kernel stack).  The overflow scribbles adjacent
+  thread objects / intrusive lists / the allocator free-list -> the assorted
+  wake_impl-garbage / free-list / boost-list-node faults = signature F2b.
+  Only fires with CONF_fork and a live child AS (heavy pgbench fork load),
+  more often at -smp>1 (more concurrent lock contention forcing the wait path).
+
+WHY THE EARLIER "park_timers re-park" THEORY WAS WRONG:
+  thread::complete() runs AFTER _func() has fully returned and unwound its C++
+  stack (arch-switch.hh: t->main(); t->complete();), so a normally-exiting
+  thread has NO active stack timers; park_timers()'s !has_active_timers() guard
+  already skips it -> there is no dying-thread re-park.  The park subsystem is
+  not the dominant corruptor.  (A park_timers terminating-guard was prototyped
+  and passed 10x clean at -smp8, but that was the recursion not tripping in
+  those runs, not the guard fixing it -- the guard is unnecessary and is
+  dropped.)
+
+THE FIX (adopted): preallocate per-thread reusable coherent wait_record slots
+  on the identity kernel heap ONCE at thread construction (a normal, non-lock
+  allocation context), and hand one out in coherent_wait_record instead of
+  malloc()ing in the wait path.  Breaks the recursion; nothing allocates in the
+  lock/wait path anymore.  See f2b-fix2.txt.

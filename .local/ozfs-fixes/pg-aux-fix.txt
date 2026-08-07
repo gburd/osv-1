@@ -1,0 +1,260 @@
+================================================================================
+[W-arena-freelist] PostgreSQL-on-OSv forked-AUX-process wild fault -- ROOT-CAUSED
+(H2) + FIXED; PG now survives past PM_RUN. Next wall precisely symbolized.
+================================================================================
+Date:    2026-07-24   Host: floki (local, KVM)   Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena
+Branch:   integ/pg-fork-arena   HEAD at start: c1c748da3
+Author:   Greg Burd
+Method:   KVM (-enable-kvm -cpu host) + gdb HARDWARE breakpoints + qemu-monitor
+          gva2gpa/xp physical inspection (the method that pinned the earlier
+          0x4b0000 wall), plus a targeted in-kernel double-alloc detector to
+          DISPROVE a wrong hypothesis, then a deterministic regression test.
+
+================================================================================
+VERDICT (one line)
+================================================================================
+The wall is **H2**: a writable-indirection COW/preemption hazard -- but NOT
+GOT/PLT.  It is the FORK ARENA's own segregated free-list.  On HEAD the arena
+kept its free-list HEADS (and bump pointer) in shared kernel BSS (identity map,
+verbatim-shared across every fork address space, never COW), while the chunks
+and their `next` links are COW-PRIVATE per child.  A free-list threading a
+shared head through per-address-space-divergent memory is incoherent across the
+fork boundary: a chunk one process FREES lands on the shared list and gets
+RE-HANDED to a DIFFERENT process -- even one that still holds that chunk LIVE
+(inherited COW).  The second process overwrites it with fresh data while the
+first still references it: a cross-address-space use-after-free.  PostgreSQL's
+walwriter/checkpointer walked a memory-context block list whose `next` had been
+clobbered with a path string ("...pid...") and SIGSEGV'd in AllocSetReset.
+
+NOT H1 (no file_vma type loss -- this is anon arena memory, correctly cloned).
+NOT the GOT/PLT indirect-branch class either (verified: the fault is a plain
+data-pointer deref in AllocSetReset, not a call*/jmp* through a code pointer).
+
+================================================================================
+THE WALL (reproduced deterministically on HEAD c1c748da3)
+================================================================================
+Boot pg18-fork under KVM, free-run:
+  LOG:  database system is ready to accept connections     <- PM_RUN reached
+  Aborted
+  [backtrace]
+    ... osv::handle_mmap_fault+28 <- mmu::vm_fault+1115 <- page_fault+139
+    <- 0x00000000000013ff    (wild low PC after the wild branch)
+
+A few ms after PM_RUN, a forked AUX process aborts.  Same signature as the
+earlier 0x4b0000 wall (a wild branch whose mis-decoded byte stream clobbers rsp
+via mov $imm,%esp), but a DIFFERENT wild address and a DIFFERENT process, so the
+landscape had changed as the handoff warned.
+
+================================================================================
+THE EXACT MECHANISM (proven via KVM+gdb hardware breakpoints, not inferred)
+================================================================================
+1. WHICH process: hbreak osv::handle_mmap_fault caught the fault in a FORK CHILD
+   (thread name ">/b/.local/pg18" = the aux argv; thread id 29-31; its own COW
+   address space 0x600008a5xxxx -- NOT the postmaster AS0).  The faulting rip is
+   a VALID PG .text address 0x100000609078 = AllocSetReset+0x78:
+        609078:  48 8b 5b 10   mov 0x10(%rbx),%rbx   ; rbx = block->next
+   AllocSetReset walks a memory-context block list:
+        rbx = ctx->blocks; while(rbx){ rdi=rbx; rbx=rbx->next; free(rdi); }
+   So a block's `next` field held garbage.
+
+2. THE GARBAGE VALUE: at the fault, rbx = 0x30006469702e.
+        bytes (LE) = 2e 70 69 64 00 30 00 00  =  ".pid\0" + 0x3000
+   i.e. APPLICATION STRING DATA (a path fragment "...pid...") sitting where a
+   block `next` pointer belongs.  The 0x3000_... prefix is the FORK ARENA base.
+
+3. WHERE THAT LIVES: include/osv/fork_arena.hh: arena_base = 96<<39 = 0x300000000000.
+   So the block, and the garbage, are inside the fork arena (the app COW heap).
+   monitor: g_bump = 0x30000023ac40 (only ~2.3 MB carved).  The garbage
+   0x30006469702e is FAR ABOVE g_bump -> not even a real carved chunk: it is a
+   string that overran / a recycled chunk reinterpreted as a pointer.
+
+4. IT CHANGES UNDER OUR FEET: re-reading the same block VA a moment later (all
+   vCPUs stopped) showed a DIFFERENT, clean value -- proving the block's page is
+   being mutated by ANOTHER address space between the child's faulting read and
+   ours.  A COW-private page could not do that; a chunk being recycled through a
+   SHARED free-list and rewritten by another process can.
+
+5. DISPROVING THE WRONG SUB-HYPOTHESIS (cross-AS double-POP): I instrumented
+   fork_arena::alloc on HEAD with a per-chunk owner shadow (hashed VA -> owning
+   address_space) that screams if a chunk is popped while still owned by a
+   different live AS.  Booted PG: ZERO "[ARENA-BUG]" hits, yet it still crashed.
+   So the two ASes are NOT simultaneously popping the same head.  The real
+   mechanism is subtler: process A FREES chunk B (B goes on the SHARED list);
+   process C (which inherited B LIVE via COW and never freed it) later pops B
+   off the shared list for its own allocation and overwrites it.  C's own data
+   structure still lists B as live -> use-after-free.  This is why a naive
+   double-pop detector misses it: the free() legitimately cleared the owner
+   before the cross-AS re-hand.
+
+6. STATE CONFIRMED FROM SHARED BSS: g_freelist[] at 0x488d94e0 and g_bump at
+   0x488d94c8 are ordinary kernel-BSS globals in the identity map (VA 0x4000...),
+   shared VERBATIM across all address spaces, never COW.  The chunk memory they
+   thread through is COW-private.  A free-list cannot straddle a COW boundary.
+
+================================================================================
+THE FIX (minimal, correct, #if CONF_fork; non-fork byte-identical)
+================================================================================
+core/fork_arena.cc:
+  * The bump pointer STAYS a single GLOBAL atomic: it hands each fresh chunk a
+    VA unique across every address space, so a bump-carved chunk is never
+    double-owned -- correct to share, and it keeps parent/child VA carving
+    non-overlapping.
+  * The free-lists become PER-ADDRESS-SPACE, keyed by the opaque
+    mmu::current_address_space().  A small fixed table (max_as_slots=256) with
+    linear probing holds one set of size-class Treiber heads per AS.  Slot
+    acquisition takes a brief spinlock (touches only shared BSS -- no arena
+    page, so no COW fault, safe with preemption off); the per-AS freelist
+    pop/push stay lock-free so the COW fault a link write may trigger is still
+    serviced with no lock held and preemption on (the arena's original
+    correctness invariant is preserved).
+  * If the slot table ever fills, that AS runs BUMP-ONLY (alloc) / drops the
+    chunk (free) -- correct, just less space-efficient.
+  * release_as(void*) clears a slot when its address space is destroyed.
+core/mmu.cc:
+  * destroy_address_space() calls fork_arena::release_as(as) before freeing the
+    child AS, so a later fork child reuses the slot (bounded slot usage across a
+    long-lived PG's many backends).  Inside the existing #if CONF_fork region.
+include/osv/fork_arena.hh: declare release_as().
+
+Effect: a chunk freed by one process is only ever re-handed to THAT SAME
+process, in its own COW-private pages, so every free-list link a process reads
+is self-coherent.  No process can re-hand a chunk another process holds live.
+(ponytail: O(max_as_slots) linear scan per alloc/free; owners pack from index 0
+so the common case is short; swap for a hash keyed on address_space* if the
+process count ever makes it measurable.)
+
+================================================================================
+THE REGRESSION TEST
+================================================================================
+tests/tst-fork-arena-freelist.cc (registered in modules/tests/Makefile).
+Author Greg Burd.  Models the exact ownership cross-over:
+  - parent allocates NLIVE=256 chunks of the PG block size class, stamps each
+    with a self-describing sentinel, records them in a COW-inherited .bss array
+    (these are the "live, inherited" chunks);
+  - fork();
+  - parent FREES all of them (onto the shared free-list on HEAD) and hammers
+    alloc+scribble of the same class so freed chunks get re-handed + overwritten;
+  - child does NOT free them (they are live to it) but ALSO allocates the same
+    class -- on HEAD that pops the parent-freed live chunks off the SHARED list
+    into the child, which scribbles them -- then verifies its inherited chunks
+    still hold their sentinels.
+  HEAD c1c748da3:  FAIL ("child saw a cross-address-space free-list re-hand of a
+                   live chunk"), deterministically on -smp 1 AND -smp 2.
+  With the fix:    PASS x2 (-smp 1 and -smp 2): inherited chunks never disturbed.
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+Build: CONF_fork=y, fs=rofs, image=tests, -j$(nproc).
+  tst-fork-arena-freelist  PASS (reproduced the crash on HEAD; passes with fix)
+  tst-fork                 done: 0 failures
+  tst-fork-cow             done: 0 failures
+  tst-fork-deep            done: 0 failures
+  tst-execve               done: 0 failures
+  tst-pgfork               done: 0 failures
+  tst-fork-preempt         done: 0 failures
+  tst-fork-socket          PASS (parent socket survived child close)
+  tst-fork-file-mmap       PASS (child reads real file bytes)
+  tst-fork-sigchld-latch   PASS (SIGCHLD -> handler -> epoll woke -> reaped)
+
+Non-fork sanity (conf_fork=1 image):
+  tst-mmap    mmap tests succeeded (-smp 2)
+  tst-kill    SUMMARY: 55 tests, 0 failures
+  tst-sigwait PASSED
+  tst-signal-fills PASSED
+
+conf_fork=0 sanity:
+  ./scripts/build conf_fork=0 fs=rofs image=tests -> rc=0 (clean; all new code is
+    #if CONF_fork -- fork_arena.cc is a CONF_fork TU, the mmu.cc call sits inside
+    the existing #if CONF_fork region).
+  conf_fork=0: tst-kill 55/0; tst-sigwait PASSED; tst-mmap succeeded
+    -> non-fork path unchanged.
+
+PG image rebuilt: ./scripts/build conf_fork=1 fs=ramfs image=pg18-fork -> rc=0.
+
+================================================================================
+THE PAYOFF -- PostgreSQL status (HONEST)
+================================================================================
+Boot: qemu -enable-kvm -cpu host -m 4G -smp {1,2} -nographic
+        -kernel build/last/loader.elf
+        -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data"
+        -drive .../usr.img,if=virtio,cache=none
+        -netdev user,hostfwd=tcp::5432-:5432 -device virtio-net-pci
+
+THE FORKED-AUX-PROCESS WILD-BRANCH WALL IS GONE.  PG now reaches PM_RUN AND the
+aux processes (checkpointer/bgwriter/walwriter) SURVIVE -- it no longer aborts
+in AllocSetReset a few ms after "ready to accept connections".  It advances
+FURTHER than ever before: past PM_RUN, into launching a background worker
+(logical replication launcher, a fresh fork), reproducible on -smp 1 and -smp 2:
+
+  LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+  LOG:  listening on IPv4 address "0.0.0.0", port 5432
+  LOG:  database system was shut down at 2026-07-23 20:18:17 UTC
+  LOG:  database system is ready to accept connections          <- PM_RUN, STAYS UP
+  ERROR: could not open shared memory segment "/PostgreSQL.<n>": ENOENT
+  ERROR: could not open shared memory segment "/PostgreSQL.<n>": ENOENT
+  LOG:  background worker "logical replication launcher" (PID <n>) exited with exit code 1
+
+psql ROWS: NOT YET.  I do NOT claim PG serves queries.  A new, DISTINCT wall now
+blocks the first query.  40 tight-retry psql connects (PGCONNECT_TIMEOUT=1) time
+out because the VM aborts within tens of ms of PM_RUN on the NEXT wall.
+
+NEXT WALL (precisely symbolized, DISTINCT from this one -- newly EXPOSED, not
+introduced: on HEAD PG crashed in AllocSetReset before ever reaching this code):
+
+  A page fault taken in INTERRUPT / non-preemptable context, on a page that
+  needs a COW break -> assert(sched::preemptable()) in arch/x64/mmu.cc:38.
+  Two triggers observed, same root class:
+
+  (a) timer path (idle CPU):
+      __assert_fail <- page_fault (arch/x64/mmu.cc:38, cr2=0x1400000030)
+      <- timer_set::expire <- sched::timer_list::fired
+      <- idt::invoke_interrupt(vector=33) <- interrupt <- cpu::idle
+      i.e. the per-CPU timer set held a timer whose node dereferences a wild
+      pointer (0x1400000030) during expire, from the timer IRQ -- a fork child
+      armed a timer whose timer_base lives in a COW page, and firing it from
+      interrupt context touches a page that would need a COW break.
+
+  (b) net-RX path (triggered by an inbound psql SYN):
+      __assert_fail <- page_fault (arch/x64/mmu.cc:38)
+      <- epoll_wake_in_rcu <- net_channel::wake_pollers
+      <- classifier::post_packet <- virtio::net::receiver
+      i.e. delivering a packet to the listener's epoll wakes pollers whose
+      structures sit in a COW page, and the wake runs in the RX IRQ / RCU
+      (non-preemptable) context -> illegal COW fault.
+
+  (c) page-pool fill-thread path (observed on the committed build):
+      __assert_fail <- page_fault (arch/x64/mmu.cc:38)
+      <- memory::page_pool::l2::refill <- memory::page_pool::l2::fill_thread
+      i.e. the page-pool refill runs a code/data path that COW-faults where
+      faulting is disallowed.
+
+  Common root: a KERNEL structure/path touched from INTERRUPT or otherwise
+  non-preemptable context references memory in a COW-write-protected page after fork.  OSv forbids
+  faulting when non-preemptable, so the COW break asserts.  The cure is to keep
+  such interrupt-reachable structures off the COW arena (route them to the
+  identity kernel heap, the discipline already used for wait_records / signal
+  waiters / inherited-fd sets / per-child signal tables), OR pre-break/pin the
+  specific pages.  This is a SEPARATE investigation from the arena free-list
+  use-after-free fixed here; serving a real psql query is blocked ONLY on it.
+
+Do NOT read this as "PG works": no rows served.  But the specific wall handed
+off -- the forked checkpointer/bgwriter/walwriter taking a wild indirect branch
+in AllocSetReset -- is root-caused (H2, the shared arena free-list) and fixed,
+the aux processes now survive, and PG advances into background-worker territory.
+
+================================================================================
+FILES CHANGED (committed on integ/pg-fork-arena, author Greg Burd)
+================================================================================
+  core/fork_arena.cc          per-address-space free-lists (slot_for/release_as);
+                              shared bump kept; alloc/free key on current AS
+  core/mmu.cc                 destroy_address_space() -> fork_arena::release_as()
+                              (inside the existing #if CONF_fork region)
+  include/osv/fork_arena.hh   declare release_as()
+  modules/tests/Makefile      register tst-fork-arena-freelist.so
+  tests/tst-fork-arena-freelist.cc  new regression test (author Greg Burd)
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+arena-dev: left UP.  On floki (no EC2).
+================================================================================

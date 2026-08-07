@@ -1,0 +1,113 @@
+CORRUPTOR FIX — INTERIM REPORT (Greg Burd box osv-cor-a 3.16.46.123, /build/osv)
+================================================================================
+Status: NOT YET QUALIFIED. Reproduction confirmed, writer region pinned via a
+hardware watchpoint, three candidate fixes built + tested; the page-level UAF is
+REDUCED (delayed ~30x, pgbench -i reaches 87-100% of the 100M-row load vs the
+prior ~7s failure) but NOT yet eliminated. Honest state below so the next step
+is targeted, not blind.
+
+================================================================================
+1. REPRODUCTION (confirmed, deterministic signature)
+================================================================================
+Build: WALL3_PAGE_QUAR=1 conf_zfs=openzfs conf_fork=1 -j96, image=pg18-fork,
+       fresh clean 8k lz4 pool, -smp4 -m32G KVM, pgbench -i -s1000.
+Every run fires the page-quarantine at the SAME structural signature:
+    *** WALL3_PAGE_QUAR UAF: size=4096 first-mismatch-off=1128 ***
+    found @1128: an 8-byte mem_area::page (0x500-alias) pointer, e.g.
+       0x50012422a428  ==  page-alias of (this_freed_page + 0x428)
+    poison INTACT for bytes 0..1127 and 1136..4095 -> a SINGLE 8-byte store,
+    NOT a memset/memcpy. Only offset 1128 (0x468) is clobbered.
+FREEING backtrace (who returned the page to page_range_allocator), every run:
+    page_pool::l2::free_batch  <-  l2::unfill  <-  l2::fill_thread
+    i.e. the L2 page-pool background thread returning excess pages to the range
+    allocator. The page was last a page_pool page; a stale holder wrote it after
+    it left L2.
+CURRENT (eviction) backtrace: a PG/app-space thread calling free() ->
+    page_range_allocator::free (evicting the oldest ring slot).
+
+Decode of the store value (corrected): 0x50012422a428 = mem_area::page (area 1,
+base 0x500000000000) offset 0x12422a428 == freed_page_phys + 0x428. So it is an
+INTRA-PAGE next-style link: obj_at(page+0x468)->ptr = obj_at(page+0x428), in the
+mem_area::page (0x500) alias. 0x500 is produced ONLY by std_malloc's single-page
+branch (allocations in (page_size/4 .. page_size], i.e. ~1KB..4KB), which
+includes ZFS's abd_chunk kmem_cache (bufsize == PAGE_SIZE == 4096).
+
+================================================================================
+2. WRITER REGION — pinned with a hardware watchpoint (KVM debug registers)
+================================================================================
+Built a self-contained DR0-3 write-watchpoint (PQ_DRWATCH): the quarantine arms
+DR on offset 1128 of parked 4K pages on ALL cpus via IPI; the racing writer
+traps into debug_exception(), which dumps registers+backtrace. (Added an
+IPI_PQ_DRWATCH vector, a %dr0..%dr7 loader in arch/x64/mmu.cc, and a
+debug_exception hook in arch/x64/exceptions.cc.)
+
+TRAP #1 (loose value filter): RIP = mmu::vm_fault+926 == the `rep movsq` inside
+handle_cow_write_fault (the fork COW copy: alloc_page(priv); memcpy(priv,shared,
+4096)). But this writes a WHOLE page; the corruptor is a SINGLE 8-byte store ->
+this trap was a FALSE POSITIVE (COW page DATA that merely had bits 44..45==01).
+Confirmed by disassembly (402b89e4 call alloc_page; 402b8a1e rep movsq).
+
+TRAP #2 (tightened filter, canonical 0x500 only): caught NOTHING in 330s -- but
+the DR overhead (IPI every 8 parks + a fault on every benign re-poison of the 4
+watched pages) slowed the guest ~4x and PERTURBED the race enough to suppress it
+(no quarantine fire either). Classic heisenbug: the watchpoint changes timing.
+
+Conclusion on the writer: it is a SINGLE 8-byte store of a canonical 0x500
+(single-page-malloc / abd_chunk) pointer at offset 1128 of a page that has been
+freed to the page_pool. The object-level quarantine of the five ZFS metadata
+caches (abd_chunk, dbuf, arc_buf_hdr full/l2only, dbuf_dirty_record) was CLEAN --
+because delaying the object free keeps its page valid, so an object-granularity
+poison never mismatches; the page-granularity quarantine sees it because the
+PAGE is freed. That is the fingerprint of a PAGE-level use-after-free of a
+single-page (0x500) allocation whose page has already returned to the pool.
+
+================================================================================
+3. CANDIDATE FIXES BUILT + TESTED (all correct improvements; none sufficient alone)
+================================================================================
+(a) mempool.cc pool::free_same_cpu -- CONF_fork: do not untracked_free_page an
+    emptied pool page (keep empties on the pool _free list). [prior agent's fix]
+    Effect: silenced the UAF far longer (pgbench -i reached 91%) then the prior
+    agent hit an assert(preemptable) COW-write-fault; in my runs it ran clean to
+    ~91% but did not finish.
+(b) mmu.cc uninitialized_anonymous_page_provider::unmap -- retain a COW / shared
+    frame instead of freeing it while it may still be mapped by another AS
+    (jointly-owned like pte_shared). Reduced the UAF ~30x (fired at ~230s vs
+    ~7s), NOT eliminated -- so a second free path returns still-referenced frames.
+(c) mempool.cc std_malloc -- an app-thread allocation that the fork arena cannot
+    serve (arena VA exhausted, 512 MiB pure-bump) must NOT fall through to the
+    SHARED identity heap (mempool 0x600 / single-page 0x500), which is mapped
+    verbatim (never COW) in every fork child -> a single frame shared by parent
+    and all backends. Route the fallback to malloc_large()'s app-slot map_anon
+    (COW-isolated) instead. Correct fix for the arena-exhaustion face; did not
+    stop the quarantine fire either (so the residual writer is not this path).
+
+Union of (a)+(b)+(c) WITH quarantine ON: still fires (same offset-1128 sig), so
+there is a frame-lifetime path none of the three closes. All three are real,
+minimal, CONF_fork-gated (non-fork byte-identical) correctness fixes and should
+be kept, but they are not yet the whole fix.
+
+================================================================================
+4. LEADING HYPOTHESIS for the residual writer
+================================================================================
+A PAGE-level use-after-free of a single-page (0x500) allocation. Given the
+force_kernel_heap routing, the 0x500 buffer is a KERNEL/ZFS single-page malloc
+(abd_chunk is exactly PAGE_SIZE). ZFS frees the buffer (page -> page_pool ->
+L2 -> range allocator) while a stale holder later writes an 8-byte pointer link
+into it. This is a ZFS/abd page-level UAF ([#1423/OpenZFS] flavor), NOT purely
+the fork-COW MPSC hazard originally named. The fork-COW fixes reduce it because
+they remove a large source of cross-AS frame churn, but the core stale-write is
+in the ZFS single-page-buffer lifecycle.
+
+NEXT STEP (targeted): watchpoint with MINIMAL perturbation -- arm ONE DR reg on
+one parked page, and make the quarantine SKIP re-poisoning watched pages (kills
+the benign re-trap storm that perturbs timing). OR instrument the ZFS abd free
+path (abd_free_chunks / abd_chunk kmem_cache_free) to poison+guard the chunk and
+catch the stale writer at object granularity WITHOUT delaying the free (so the
+page still frees and the UAF still lands, but on a guarded object).
+
+FILES CURRENTLY ON BOX (branch wall3c-watchpoint, /build/osv):
+  core/mempool.cc  : fixes (a)+(c) applied, WALL3_PAGE_QUAR currently 0
+  core/mmu.cc      : fix (b) applied (+ WALL3_ARENA_DMA diag, off)
+  Backups: /tmp/mempool.cc.stockquar /tmp/mmu.cc.prefix (stock+quar baseline)
+  Fix scripts: /tmp/fix_free_same_cpu.py /tmp/fix_cow_unmap.py
+               /tmp/fix_arena_fallback.py

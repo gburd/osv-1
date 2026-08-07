@@ -1,0 +1,197 @@
+================================================================================
+ PG/Linux pgbench TPC-B CONTROL  --  baseline for PG/OSv-vs-PG/Linux comparison
+================================================================================
+Date        : 2026-07-26 (UTC)
+Purpose     : LINUX-native pgbench TPC-B A/B control. This is the baseline the
+              OSv (KVM + Firecracker) configs get measured against. Lighter,
+              steady-OLTP workload than HammerDB TPROC-C (which is the primary
+              reported result); pgbench here is the early comparison OSv can
+              survive. Methodology: /home/gburd/ws/osv/.local/pg-benchmark-plan.md
+Verdict     : STABLE. Zero crashes, zero failed transactions across all runs
+              (66 rw iterations + all ro iterations). PG stayed up through both
+              hugepages states and the full client sweep.
+
+--------------------------------------------------------------------------------
+ TOPOLOGY (external-driver discipline: driver NEVER on the DB host)
+--------------------------------------------------------------------------------
+DB HOST   : pgb-linux  i-0bf895d3df7cf294e  m5d.metal (96 core / 377 GB)
+            AZ us-east-2c, subnet-0b1893bd4bb0bdde2, SG sg-0f71bed6221459cc0
+            public 18.222.232.239 / PRIVATE 172.31.39.160  (PG listens here)
+            Runs ONLY PostgreSQL (native Linux, AL2023). Do NOT terminate
+            (managed by the requester).
+DRIVER    : pgb-linux-driver  i-01d54ca5b773ea8f5  c5.4xlarge (16 vCPU)
+            AZ us-east-2c, subnet-0b1893bd4bb0bdde2, private 172.31.45.155
+            public 3.134.114.245.  AMI ami-02fff5bd7ef4d2855, key osv-ec2, IMDSv2.
+            Runs pgbench, hits DB over PRIVATE IP :5432 (SG allows 5432 intra-SG).
+            >>> DRIVER INSTANCE-ID FOR TEARDOWN: i-01d54ca5b773ea8f5 <<<
+
+--------------------------------------------------------------------------------
+ EXACT CONFIGS (identical to the OSv configs / the plan)
+--------------------------------------------------------------------------------
+PostgreSQL : 18.4, built from source (tag REL_18_4, commit f5cc81719e6d).
+             Build flags (stock glibc, feature set matched to OSv musl build):
+               --prefix=/usr/local/pgsql --without-icu --without-zlib
+               --without-readline --without-lz4 --without-zstd
+             gcc 11.5.0 (AL2023), x86_64-pc-linux-gnu.
+             Postmaster pinned: numactl --cpunodebind=0 --membind=0.
+
+postgresql.conf (key settings; the rest are initdb defaults):
+  listen_addresses = 172.31.39.160,127.0.0.1
+  port             = 5432
+  shared_buffers   = 8GB          (< 15GB dataset -> real raidz I/O)
+  effective_cache_size = 24GB
+  work_mem         = 32MB
+  max_connections  = 256
+  max_wal_size     = 16GB
+  checkpoint_timeout = 15min
+  checkpoint_completion_target = 0.9
+  synchronous_commit = on
+  huge_pages       = off | on     (toggled per cell -- see matrix)
+
+OpenZFS    : 2.4.2  (zfs-2.4.2-1 / zfs-kmod-2.4.2-1), built from source at
+             tag zfs-2.4.2, commit 6330a45b06d20125de679aae5f63ba14082671ef
+             (matches the OSv submodule pin). DKMS-style in-tree build,
+             --with-config=all, kernel 6.1.176-221.367.amzn2023.x86_64.
+
+ZFS pool `pgdata` (matches the OSv geometry), mountpoint /data:
+  ashift=12  recordsize=8k  compression=lz4  atime=off
+  logbias=throughput  primarycache=all
+  vdev layout:
+    raidz1  over the 4x 200GB EBS gp3    (data)
+      nvme5n1 vol0b08481bf0cdb718d
+      nvme6n1 vol0e36664c247aebd16
+      nvme7n1 vol03bfb333b8563d3d4
+      nvme8n1 vol07f5a63e8e06fb644
+    log   (SLOG)  = nvme0n1  (local NVMe Instance Storage, 838GB)
+    cache (L2ARC) = nvme1n1  (local NVMe Instance Storage, 838GB)
+  (2 spare local NVMe nvme3n1/nvme4n1 unused; root on EBS nvme2n1.)
+
+  zpool status pgdata:
+    pool: pgdata   state: ONLINE   errors: No known data errors
+      raidz1-0 ONLINE  (4x EBS above, all ONLINE 0/0/0)
+      logs:    nvme-Amazon_EC2_NVMe_Instance_Storage_AWS081CBBCD0150E3725 ONLINE
+      cache:   nvme-Amazon_EC2_NVMe_Instance_Storage_AWS211252FD91F42FA7F ONLINE
+
+Dataset    : pgbench -i -s 1000  =>  100M tuples, 15GB logical DB.
+             ZFS used 22.5G, compressratio 1.77x. Exceeds 8GB shared_buffers,
+             so the rw workload drives real raidz I/O (not an in-cache toy).
+             VACUUM ANALYZE run before each hugepages pass.
+
+Huge pages : hp=off cell -> vm.nr_hugepages=0.
+             hp=on  cell -> 4500x 2MB huge pages allocated ON NUMA NODE 0
+             (node1=0), because the postmaster is --membind=0; a flat
+             vm.nr_hugepages splits pages evenly across both nodes and node0
+             then can't back the ~8.25GB shared segment. PG confirmed
+             huge_pages=on with 4117 pages reserved.
+
+Client     : pgbench 16.14 (AL2023 postgresql16-contrib) vs server 18.4 --
+             TPC-B is protocol-compatible; the SQL + scale are identical across
+             all configs, so the client is a constant.
+
+--------------------------------------------------------------------------------
+ WORKLOAD
+--------------------------------------------------------------------------------
+Read-write TPC-B (pgbench default) : clients {1,4,8,16,32,64}, jobs=min(c,16),
+                                     -T 60s, 3 iterations -> medians.
+Read-only (pgbench -S)             : clients {1,8,16,32,64}, -T 60s, 3 iters.
+Both run for hugepages {off, on}.
+tps = "without initial connection time" (== excluding connections).
+latency = pgbench "latency average" (ms). Variance = tps spread (max-min of 3).
+
+================================================================================
+ RESULTS MATRIX  (medians of 3;  tps = tps excluding connections)
+================================================================================
+
+READ-WRITE TPC-B  (tps median / latency median ms / tps spread over 3 iters)
+ clients | hp=off  tps      lat     spread | hp=on   tps      lat     spread
+ --------+---------------------------------+--------------------------------
+    1    |    411.86        2.428    10.24  |    403.21        2.480    3.44
+    4    |   1482.69        2.698    31.22  |   1468.11        2.725   11.64
+    8    |   2916.88        2.743   147.04  |   2951.07        2.711   33.44
+   16    |   5317.37        3.009   399.72  |   5554.08        2.881  138.89
+   32    |   8272.40        3.868  1344.64  |   9543.39        3.353  762.39
+   64    |  12166.69        5.260   673.63  |  12207.51        5.243 1056.46
+
+READ-ONLY (-S)    (tps median / latency median ms / tps spread over 3 iters)
+ clients | hp=off  tps       lat     spread | hp=on   tps       lat     spread
+ --------+----------------------------------+---------------------------------
+    1    |   5209.92         0.192    453.30 |   5522.76         0.181    33.12
+    8    |  50541.23         0.158   7723.31 |  54019.33         0.148  7286.99
+   16    |  98154.86         0.163   3568.66 | 101219.01         0.158  1189.40
+   32    | 163344.54         0.196   4215.01 | 164592.74         0.194  3132.87
+   64    | 250469.21         0.256   4953.78 | 251999.61         0.254  2833.57
+
+--------------------------------------------------------------------------------
+ READS (Linux control, quick observations -- full read is for the OSv A/B)
+--------------------------------------------------------------------------------
+* Scaling is healthy up to 64 clients on 48 node-0 cores. rw tps climbs
+  monotonically 1->64 (412 -> ~12.2k); no cliff yet at 64 (< core count).
+* Huge pages help most in the mid-range under contention:
+  rw c=32 +15.4% (8272 -> 9543 tps), c=16 +4.5%; c=1/4 within noise (slightly
+  lower, expected -- TLB win needs concurrency). rw c=64 flat (+0.3%), likely
+  raidz/WAL-bound there, not TLB-bound.
+  ro: hp=on modestly higher at every point (c=1 +6.0%, c=8 +6.9%) and notably
+  TIGHTER variance (e.g. ro c=16 spread 3569 -> 1189).
+* ro tps is ~20x rw at 64 clients (250k vs 12.2k) -- reads served from
+  ARC/shared_buffers; writes pay raidz1+SLOG+WAL. This is the expected split
+  and sets the ceiling the OSv virtio-blk path must approach.
+* Variance is low relative to signal (rw spreads a few % of median); medians
+  are trustworthy. Highest relative variance at rw c=32 (~16%), still the
+  clear +HP win.
+
+--------------------------------------------------------------------------------
+ RAW pgbench OUTPUT (median points; full logs: pgb-off.log / pgb-on.log)
+--------------------------------------------------------------------------------
+[rw hp=off c=64 iter2 -- median]
+  transaction type: <builtin: TPC-B (sort of)>   scaling factor: 1000
+  number of clients: 64   number of threads: 16   duration: 60 s
+  number of transactions actually processed: 728662
+  number of failed transactions: 0 (0.000%)
+  latency average = 5.260 ms
+  tps = 12166.694173 (without initial connection time)
+
+[ro hp=off c=64 iter1 -- median]
+  transaction type: <builtin: select only>       scaling factor: 1000
+  number of clients: 64   number of threads: 16   duration: 60 s
+  number of transactions actually processed: 14993731
+  number of failed transactions: 0 (0.000%)
+  latency average = 0.256 ms
+  tps = 250469.212223 (without initial connection time)
+
+[rw hp=on c=64 iter1 -- median]
+  transaction type: <builtin: TPC-B (sort of)>   scaling factor: 1000
+  number of clients: 64   number of threads: 16   duration: 60 s
+  number of transactions actually processed: 731371
+  number of failed transactions: 0 (0.000%)
+  latency average = 5.243 ms
+  tps = 12207.510741 (without initial connection time)
+
+[ro hp=on c=64 iter2 -- median]
+  transaction type: <builtin: select only>       scaling factor: 1000
+  number of clients: 64   number of threads: 16   duration: 60 s
+  number of transactions actually processed: 15076895
+  number of failed transactions: 0 (0.000%)
+  latency average = 0.254 ms
+  tps = 251999.614234 (without initial connection time)
+
+--------------------------------------------------------------------------------
+ STABILITY
+--------------------------------------------------------------------------------
+* Zero PANIC/FATAL/crash in the postmaster log across both passes.
+* Zero failed transactions in every pgbench run (all "0 (0.000%)").
+* Clean checkpoints throughout; no wedge, no restart.
+
+--------------------------------------------------------------------------------
+ FILES (this run)
+--------------------------------------------------------------------------------
+  /tmp/pgb-linux.txt      -- this report
+  /tmp/pgb-linux.tsv      -- machine-readable matrix (banked incrementally)
+  /tmp/pgb-off.log        -- full raw pgbench output, hugepages=off pass
+  /tmp/pgb-on.log         -- full raw pgbench output, hugepages=on pass
+
+--------------------------------------------------------------------------------
+ TEARDOWN NOTE
+--------------------------------------------------------------------------------
+  Driver to terminate:  i-01d54ca5b773ea8f5  (pgb-linux-driver, c5.4xlarge)
+  DB host pgb-linux (i-0bf895d3df7cf294e): DO NOT terminate -- managed by you.
+================================================================================

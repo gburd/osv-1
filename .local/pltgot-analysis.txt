@@ -1,0 +1,46 @@
+== resolve_pltgot fork-coherence bug: early code analysis ==
+branch integ/pg-fork-zfs tip 9cdfec869 ; box i-02ee57620084817db (3.19.61.154, m5d.metal us-east-2c)
+
+LAZY PLT RESOLUTION PATH (x64):
+- At load (relocate_pltgot, core/elf.cc:819): pltgot = .got.plt (writable, file-backed app segment).
+  pltgot[1] = this (elf::object*), pltgot[2] = __elf_resolve_pltgot.
+  Each unresolved JUMP_SLOT GOT entry points back to its PLT stub.
+- First call to an unresolved symbol: PLT stub pushes reloc index + reads pltgot[1..2],
+  jumps to __elf_resolve_pltgot (arch/x64/elf-dl.S). That reads index+obj off stack,
+  calls elf_resolve_pltgot(index, obj) -> obj->resolve_pltgot(index) (elf.cc:882).
+- resolve_pltgot: dynamic_ptr<Elf64_Rela>(DT_JMPREL); symbol(sym) -> _prog.with_modules (ALLOCATES a
+  modules_list vector copy); _used_by_resolve_plt_got.insert (ALLOCATES hash node) under mutex;
+  arch_relocate_jump_slot WRITES the resolved addr into the GOT slot (WRITE to .got.plt).
+
+WHERE STATE LIVES ACROSS FORK (clone_address_space, core/mmu.cc:491):
+- App PML4 slots 1..127 are COW-cloned (private, diverge on write).
+- Kernel slots 0,128..511 shared verbatim.
+- libsolaris.so writable .data/.bss registered as fork_shared_module_range -> SHARED (never COW).
+- The PG executable + libc.so live in COW app slots => their .got.plt is COW.
+
+HYPOTHESES for the NULL-fault (obj deref or GOT read/write in first-in-child resolve):
+ H1 (leading): the GOT (.got.plt) page write at LOAD time (pltgot[1]=this etc, and any parent-resolved
+    slots) landed in AS0's page; a fork child that is FIRST to touch that GOT page demand-faults a FRESH
+    file-backed page (or COW breaks wrong) so pltgot[1]==0 / stale -> obj==NULL -> fault in resolve_pltgot.
+ H2: symbol()/with_modules allocation or _used_by_resolve_plt_got.insert lands in COW arena; the hash
+    node / mutex state is not the NULL though (would be a diff fault).
+ H3: the fpu_lock / preemption path.
+
+NEXT: reproduce, catch fault under -gdb, read cr2 + backtrace + faulting slot + which of pltgot[1]/obj is 0.
+FIX candidate (laziest): bind-now the app + libs BEFORE fork so no lazy resolution ever happens in a
+child (DT_BIND_NOW-style eager resolve at load / just before first fork). CONF_fork-gated.
+
+== REPRO ATTEMPT 1: minimal fork+deep-PLT (tst-fork-pltgot.cc) -> PASSED (NO fault) ==
+Boot 276ms, child forked BEFORE touching libm/libc PLT syms, resolved sqrt/cbrt/log2/
+strtol/wcslen/clock_gettime/snprintf etc first-in-child. Exit 42, 0 failures, -smp4.
+=> the SIMPLE "child first to resolve a shared-lib PLT slot" case ALREADY WORKS on this branch.
+The real bug is more specific to PG/HammerDB. Candidates now:
+ - the PG executable is a PIE; resolution of the MAIN OBJECT's own PLT (self-referential) under
+   concurrent AS0 postmaster activity.
+ - _used_by_resolve_plt_got.insert(sm.obj->shared_from_this()) racing/allocating in COW arena
+   when sm.obj differs from this (cross-object PLT).
+ - a dlopen'd extension library (PG loads .so's) resolving in a forked backend.
+ - concurrency: AS0 (postmaster) resolving the SAME slot in the SAME object concurrently while a
+   forked child also faults it -> the GOT slot / object bookkeeping torn across AS.
+NEXT: read arch_relocate_jump_slot + symbol() for the NULL deref; consider the shared_from_this /
+_used_by_resolve_plt_got path (allocates + takes a mutex) as the cross-AS-incoherent state.

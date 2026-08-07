@@ -1,0 +1,75 @@
+signature-F LOST-WAKEUP -- ROOT CAUSE FOUND  [fork-stack]
+========================================================
+Author: Greg Burd   Base: corruptor-fix @ 6ccf4a92
+
+WHO IS PARKED: the checkpointer (PG pid 590 = OSv thread 590, fork child of
+postmaster 588), status=waiting, in sched::thread::switch_to -> its resume path.
+
+THE PRIMITIVE / WHY IT NEVER WAKES: it is NOT a lost SIGURG or a lost epoll wake.
+Instrumentation on the wedged guest proved the wakeup path WORKS:
+    sigF_kill_urg_child  = 1   (a backend's SetLatch->kill(590,SIGURG) DID fire)
+    sigF_urg_sigdfl      = 0   (did NOT hit the SIG_DFL early-out)
+    sigF_urg_dispatched  = 1   (the SIGURG handler thread WAS created + started)
+    (no signal_handler thread alive afterward -> the handler RAN to completion)
+    sigF_epoll_wake      = 22145 (epoll wakes fire fine; all via the lock-free ring)
+So the SIGURG reached the checkpointer's AS and ran its handler.  The wakeup is
+delivered.  The checkpointer STILL cannot resume.
+
+DECISIVE: firing a manual `CHECKPOINT` from a fresh conn (another SetLatch->
+kill(590,SIGURG)) did NOT wake it -- instead the console printed a GENERAL
+PROTECTION FAULT whose register frame IS the checkpointer's:
+    RIP = sched::thread::switch_to()+251  (processor::ldmxcsr, arch-switch.hh:182)
+    RSP = 0x200000200180   RBP = 0x2000002001d0   (== thread 590 saved rsp/rbp)
+    backtrace: general_protection <- ex_gp(entry.S) <- ~lock_guard <- switch_to
+addr2line: 0x4038346b = processor::ldmxcsr (processor.hh:423, the SSE ctrl reload).
+
+ROOT CAUSE (from disassembly of switch_to, CONF_fork same-VA path):
+switch_to() saves the OUTGOING thread's FPU control words to a STACK scratch slot
+    +167  fnstcw  -0x34(%rbp)
+    +178  stmxcsr -0x34(%rbp)
+then does the same-VA fork switch:
+    +218  mov 0x8(%rcx),%rsp     ; rsp -> INCOMING (checkpointer) thread stack
+    +226  mov %rdx,%cr3          ; CR3 -> INCOMING thread ADDRESS SPACE
+then RESTORES the FPU control words FROM THE SAME STACK SLOT, AFTER the swap:
+    +242  fldcw   -0x34(%rbp)    ; reads -0x34(%rbp) ...
+    +251  ldmxcsr -0x34(%rbp)    ; ... now resolving through the INCOMING AS  <- GP FAULT
+
+Because rsp/rbp and CR3 were already switched to the incoming fork child, the
+-0x34(%rbp) reload no longer reads the control words that fnstcw/stmxcsr saved --
+it reads whatever the INCOMING thread's stack holds at that offset, under the
+INCOMING (COW-diverged) address space.  When that garbage has RESERVED MXCSR bits
+set, ldmxcsr #GP-faults and the thread being switched-to can never resume.
+
+WHY IT MATCHES signature-F EXACTLY:
+  - intermittent (~1 in 4): only faults when the incoming stack's -0x34 garbage
+    has a reserved MXCSR bit set; usually benign, sometimes fatal.
+  - NON-corrupting: a wrong-page READ + #GP, never a wild write -> 0 corruptor sig.
+  - stalls forever: once a fork thread's resume #GPs it is dead; re-poking re-faults.
+  - fork-only: the plain (non-CONF_fork / same-AS) switch path also reloads
+    -0x34(%rbp), BUT with no CR3 change the slot stays valid -> no bug there.  Only
+    the switch_as (fork child, different AS) path repoints the stack+CR3 first.
+  - postmaster + `select 1` keep answering: they are AS0 threads; the fatal reload
+    only bites a switch INTO a COW fork child (checkpointer/bgworker/COPY backend).
+
+FIX (next): the FPU control-word restore must NOT read a stack slot that the
+rsp/rbp/CR3 swap has repointed to the incoming thread's AS.  Hold fpucw/mxcsr in
+registers across the swap (or restore FPU state before the CR3 switch), so the
+reload uses the captured values, not the incoming stack.  #if CONF_fork only.
+
+================================================================================
+THE FIX (arch/x64/arch-switch.hh, #if CONF_fork switch_as path)
+================================================================================
+switch_to()'s #1020 FPU-reset tail restored the control words from C locals
+(fpucw/mxcsr) the compiler spills to %rbp-relative stack slots.  In the fork
+same-VA switch, the asm has already swapped rsp/rbp AND CR3 to the incoming
+child, so those reloads read the incoming child's stack under the incoming
+(COW-diverged) AS.  Fix: in the switch_as branch, restore the CPU-canonical
+control words via processor::init_fpu() (fninit + mxcsr=0x1f80, the value every
+OSv thread runs with and thread startup already uses), reading NOTHING from the
+repointed stack.  The non-fork path is byte-identical (still restores the
+captured fpucw/mxcsr; no CR3 change there means no hazard).  switch_to does no
+fxsave/fxrstor, so no per-thread FPU data was preserved across a switch anyway
+-> init_fpu is behavior-preserving.  conf_fork=0: the whole change is under
+#if CONF_fork -> no-op.
+
+Delivered on branch corruptor-fix, Author Greg Burd, [fork-stack].

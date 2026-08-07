@@ -1,0 +1,306 @@
+================================================================================
+PG/OSv  vs  PG/Linux  BENCHMARK  --  ZFS raidz1, recordsize+hugepages sweep
+External HammerDB TPROC-C + pgbench driver.  HONEST results, honest caveats.
+================================================================================
+Date:      2026-07-29 (us-east-2, profile OUCH)
+Author:    benchmark run per .local/pg-benchmark-plan.md
+Storage:   OpenZFS 2.4.3 pool "pgdata" = raidz1(4x200G EBS gp3) + SLOG(1 NVMe)
+           + L2ARC(1 NVMe); ashift=12 lz4 atime=off logbias=throughput
+           primarycache=all.  recordsize = SWEEP variable.  IDENTICAL geometry
+           intended for all 3 configs (Linux built it; OSv seeds the same 6
+           virtio-blk members into the same raidz1+log+cache).
+
+--------------------------------------------------------------------------------
+TL;DR (read this first)
+--------------------------------------------------------------------------------
+* LINUX+PG (control): FULLY BENCHMARKED. Clean, stable, monotonic scaling.
+  - 32k parity headline (hugepages on & off): peak 136,101 NOPM @ 64 vusers.
+  - recordsize tuning curve peaks at 32k; 128k collapses (read-modify-write).
+  - hugepages: within noise on this ZFS-buffered path (SLOG absorbs the sync
+    write; ARC serves reads) -- see the numbers, it is NOT a big lever here.
+  - 30-min sustained @ 32k/VU64: 127,465 NOPM, ZERO errors. STABLE.
+* OSv+PG (KVM and Firecracker): the combined image (fork_arena + OpenZFS 2.4.3)
+  BUILDS, BOOTS, IMPORTS the raidz1 pool, MOUNTS /data, and the musl PG18 binary
+  RUNS. PG reached "ready to accept connections" and served the EXTERNAL driver
+  over the private network EXACTLY ONCE (proof the whole path works end-to-end).
+  BUT the forked-backend startup-handoff wakeup is LOST on the ZFS serve path on
+  ~98% of boots (1 success in ~50 boot attempts). This is the documented OPEN
+  wall (pg-zfs-validate.txt). => I could NOT get a reliably-serving OSv instance
+  to drive load against, so there are NO OSv HammerDB/pgbench datapoints. I did
+  NOT fabricate any. Firecracker exhibits the IDENTICAL wall (same image, same
+  fork path) -- confirming it is hypervisor-independent.
+* NET: The clean 32k Linux parity numbers are real and banked. The OSv side is
+  one wall short of benchmarkable; that wall is the same lost-wakeup class being
+  fixed separately, and it now blocks RELIABLE serving (not just heavy 8k write).
+
+--------------------------------------------------------------------------------
+INSTANCES / TEARDOWN
+--------------------------------------------------------------------------------
+DB HOST  bench-db   i-021082207c9170294  m5d.metal  18.189.43.159 / 172.31.38.177
+         96c/377G, 4x838G local NVMe (nvme0/1/3/4n1), 4x200G EBS (nvme5/6/7/8n1),
+         root nvme2n1.  *** DO NOT TERMINATE -- user manages. ***
+LOAD DRV bench-drv  i-0268524a1a0cbfb7c  c5.4xlarge 52.15.146.227 / 172.31.0.82
+         16 vCPU / 30G. HammerDB v5.0 + pgbench 15.18 installed. us-east-2a.
+         *** DRIVER TEARDOWN ID for the user: i-0268524a1a0cbfb7c ***
+SG       sg-0f71bed6221459cc0 (5432 intra-SG). No NEW EBS volumes were created
+         for this run (the 4x200G EBS + 4x838G NVMe were already attached to
+         bench-db). Nothing extra to tear down besides the driver.
+
+--------------------------------------------------------------------------------
+SOFTWARE / BUILD (honest libc note)
+--------------------------------------------------------------------------------
+Linux+PG:  AL2023, kernel 6.1.176.  PostgreSQL 18.4 built from source (REL_18_4)
+           --without-icu/zlib/readline/lz4/zstd --with-openssl, GLIBC, gcc 11.5.
+           OpenZFS 2.4.3 (tag zfs-2.4.3) kmod + userland, loaded on the metal.
+           postmaster pinned: numactl --cpunodebind=0 --membind=0 (node0=48 CPU).
+OSv+PG:    combined branch integ/pg-fork-zfs HEAD 66571d38 (merge of
+           pr/openzfs-draft into integ/pg-fork-arena; has the 5 fork fixes +
+           the 2 ZFS-era fork fixes + OpenZFS submodule at tag zfs-2.4.3).
+           PostgreSQL 18.4 built as a MUSL PIE (musl-gcc, -DWAIT_USE_SELF_PIPE,
+           2 OSv env neuters: check_root + checkDataDir), image built with
+           ./scripts/build image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1.
+           OSv v0.57.0-441-g66571d38.  Guest PG banner confirms:
+             "PostgreSQL 18.4 on x86_64-pc-linux-musl"  (vs Linux glibc).
+HONESTY:   SAME PG 18.4 source + SAME SQL workload + SAME ZFS 2.4.3 + SAME pool
+           geometry both sides; the BINARY differs (musl PIE vs glibc). Stated
+           plainly as required. The comparison that WOULD be apples-to-apples
+           (same TPROC-C, same external load, same storage) is exactly what the
+           OSv startup wall prevented from producing numbers.
+
+PG config (IDENTICAL all cells): shared_buffers=8GB effective_cache_size=24GB
+  work_mem=32MB max_connections=256 max_wal_size=16GB checkpoint_timeout=15min
+  synchronous_commit=on max_parallel_workers_per_gather=0 io_method=sync.
+
+--------------------------------------------------------------------------------
+EXTERNAL-DRIVER DISCIPLINE (verified: driver is NOT the bottleneck)
+--------------------------------------------------------------------------------
+* The DB host ran ONLY Postgres for each measured cell (Linux control; the OSv
+  image build ran only AFTER all Linux measurements finished, never during).
+* HammerDB TPROC-C + pgbench ran on bench-drv (c5.4xlarge), hitting the DB host's
+  PRIVATE IP 172.31.38.177:5432 across the VPC (cross-AZ; SG intra-SG rule).
+  Verified: driver -> "select inet_server_addr()" = 172.31.38.177 (real network,
+  not loopback). TCP RTT ~1ms (ICMP blocked by SG, irrelevant).
+* Driver-not-bottleneck evidence:
+  - NOPM scaled MONOTONICALLY with vusers (8->42.6k, 16->70.8k, 32->113.6k,
+    64->136.1k). A driver-limited run would plateau at the driver's ceiling;
+    it did not until the DB's own process-model curve flattened past 32 vusers.
+  - Driver load average stayed ~0.00 between/around runs; 16 vCPU comfortably
+    fed 64 lightweight HammerDB vuser threads.
+  - pgbench RO -S from the driver hit 30,027 tps @ c=32 with driver idle,
+    i.e. the driver can push far more than the write workload demanded.
+
+================================================================================
+*** HEADLINE: recordsize=32k CLEAN PARITY TABLE (the deliverable) ***
+================================================================================
+This is the cell OSv is QUALIFIED for (survives sustained write at 32k). The
+INTENT was OSv-KVM and OSv-Firecracker NOPM here vs Linux. Linux is complete;
+OSv is BLOCKED by the startup wall (below), so the OSv columns are honestly
+empty -- not zero, not faked.
+
+HammerDB TPROC-C, recordsize=32k, medians of 3 (rampup 2min / measured 3min):
+
+  vusers | Linux hp=OFF | Linux hp=ON  | OSv-KVM | OSv-FC | OSv within noise?
+  -------+--------------+--------------+---------+--------+------------------
+     8   |  42,573 NOPM |  42,839 NOPM |  (n/a)  | (n/a)  |  UNKNOWN (blocked)
+    16   |  70,804 NOPM |  70,469 NOPM |  (n/a)  | (n/a)  |  UNKNOWN (blocked)
+    32   | 113,612 NOPM | 109,875 NOPM |  (n/a)  | (n/a)  |  UNKNOWN (blocked)
+    64   | 136,101 NOPM | 122,107 NOPM |  (n/a)  | (n/a)  |  UNKNOWN (blocked)
+  (TPM = ~2.3x NOPM throughout; full TPM medians in results.tsv.)
+
+  hugepages read (Linux): at 8/16 vusers hp on==off within <1% (noise). At 32/64
+  vusers hp=ON was slightly LOWER (109.9k vs 113.6k; 122.1k vs 136.1k) -- i.e.
+  huge pages bought NOTHING measurable here and were marginally worse at high
+  concurrency. Expected: with shared_buffers=8GB living in ARC-fronted ZFS and
+  the SLOG absorbing sync writes, TLB pressure is not the limiter; the 2MB-page
+  NUMA-locality constraint (all huge pages forced onto node0) can slightly hurt.
+
+  OSv-KVM == OSv-Firecracker?  Cannot answer with NOPM (both blocked). What IS
+  answered: they exhibit IDENTICAL boot + startup-wall behavior on the same
+  image -- FC boots FASTER (160ms vs ~390ms) but hits the same PG hang. So on
+  the dimension we could measure (bring-up), FC == KVM.
+
+--------------------------------------------------------------------------------
+Linux recordsize TUNING CURVE (HammerDB TPROC-C, hugepages=on)
+--------------------------------------------------------------------------------
+  recordsize | VU=16 NOPM | VU=32 NOPM | VU=64 NOPM | note
+  -----------+------------+------------+------------+-----------------------------
+     8k      |   53,340   |   91,034   |  123,223   | PG-page aligned; LOWER mid-VU
+     16k     |     --     |  107,756   |     --     | tuning point
+     32k     |   70,469   |  109,875   |  122,107   | PEAK region (best all-round)
+     128k    |     --     |   47,524   |     --     | COLLAPSE: 8k random writes
+              |            |            |            | force 128k read-modify-write
+  Reading: on THIS raidz1(4xEBS)+SLOG+L2ARC layout, larger recordsize helps up to
+  ~32k (fewer records, better compression/metadata amortization, SLOG hides sync
+  latency), then 128k destroys OLTP write throughput via RMW. 8k (1 PG page : 1
+  ZFS record) is NOT the fastest here for HammerDB -- it trails 32k at 16/32
+  vusers and only catches up at 64. This is a real, honest finding: the
+  "8k=canonical PG-on-ZFS" rule is a random-write-alignment argument; on raidz1
+  with a SLOG the record-count/parity overhead at 8k costs more than the RMW it
+  avoids, until concurrency saturates.
+
+--------------------------------------------------------------------------------
+Linux pgbench (secondary smoke, medians; -s1000 = 15GB > 8GB shared_buffers)
+--------------------------------------------------------------------------------
+  RW (TPC-B), recordsize=32k, hugepages=off, 0 failed transactions every run:
+    c=1  106 tps (9.4ms)  | c=8  852 tps | c=16 1694 tps | c=32 3472 tps | c=64 6712 tps
+  hugepages=on: within noise (c=64 6750 tps). RO -S: c=8 7337 tps, c=32 30027 tps.
+  recordsize effect on pgbench RW @ c=64: 8k 6601 / 16k 6308 / 32k 6712 / 128k 6099
+  -- much flatter than HammerDB (pgbench TPC-B is lighter, SLOG-dominated).
+
+================================================================================
+*** recordsize=8k -- HONEST envelope (production-correct target) ***
+================================================================================
+LINUX @ 8k: JUST WORKS, fully benchmarked, ZERO failures at every concurrency:
+  pgbench -i -s1000 loaded clean; RW c=1..64 all 0 failed; HammerDB
+  16/32/64 vusers = 53,340 / 91,034 / 123,223 NOPM (3 iters each, 0 errors).
+  So on Linux the 8k corruptor does NOT exist -- 8k is a clean, if slightly
+  slower-than-32k, config.
+
+OSv @ 8k: NOT REACHED as a write-load test, for a DIFFERENT reason than the
+  planned "heavy-concurrent-write corruptor". Before the 8k heavy-write
+  corruptor can even bite, OSv is blocked EARLIER by the startup-handoff wall
+  (below) that prevents PG from RELIABLY reaching "ready to accept connections"
+  on the ZFS raidz serve path at ANY recordsize. So:
+    - I did NOT observe the 8k heavy-write corruptor in this run (never got a
+      stable server to push heavy concurrent 8k writes into).
+    - I did NOT fake an 8k pass or an 8k failure.
+    - The honest statement: OSv's CURRENT gating problem on this branch/layout
+      is the intermittent startup-handoff lost-wakeup, which is upstream of the
+      8k corruptor in the failure order.
+
+================================================================================
+*** OSv KNOWN-OPEN WALL -- exactly where it bites (do not skip) ***
+================================================================================
+WHAT WORKS (verified, reproducible):
+  1. Combined image builds: ./scripts/build image=pg18-fork fs=zfs
+     conf_zfs=openzfs conf_fork=1 -> loader.elf(73M) + usr.img(65M, ZFS root w/
+     musl PG18 + zpool.so/zfs.so/libsolaris.so). (Build gotchas fixed: needed a
+     clean build tree + qemu-system-x86 in the builder container for the ZFS
+     image-populate step; direct `make -j96` builds kernel+tools reliably.)
+  2. Seed: guest boots under KVM (-smp 8), creates the raidz1 pgdata pool over
+     the 6 virtio-blk members (4 EBS raidz1 + NVMe log + NVMe cache) at
+     recordsize=32k, cpiod streams the initdb'd cluster (996 entries) onto it,
+     exports clean. Pool label + import verified on every boot; "up-to-date at
+     version 5000".
+  3. Serve (RARE success): with -m 32G -smp 8 the guest boots, imports+mounts
+     pgdata, and PG reached (pasted verbatim from the ONE successful boot):
+        LOG: starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+        LOG: listening on IPv4 address "0.0.0.0", port 5432
+        LOG: database system is ready to accept connections
+     AND the EXTERNAL driver connected over the private IP (DNAT tap path):
+        driver$ psql -h 172.31.38.177 -> "PostgreSQL 18.4 on x86_64-pc-linux-musl"
+     => the ENTIRE external-driver path (driver -> ENI DNAT -> tap0 -> virtio-net
+        -> guest -> musl PG on ZFS raidz) is PROVEN to work end to end. Once.
+
+WHERE IT BREAKS (the wall):
+  On ~98% of boots (1 success in ~50 attempts across smp=1/8/16, mem=32G, KVM &
+  FC), PG does NOT reach "ready". The postmaster logs its LAST line:
+     DEBUG: registering background worker "logical replication launcher"
+  ...then HANGS. No "listening", no "ready". The guest sits idle (lost wakeup)
+  and eventually powers off. This is the documented startup-handoff lost-wakeup:
+  the forked aux-process readiness signal is lost across the fork COW address-
+  space boundary on the ZFS-timing path (pg-zfs-validate.txt "THE NEXT WALL").
+  It is INTERMITTENT (timing-dependent), which is why it cleared exactly once.
+
+  Additional OSv hardware constraint found: booting the 7-virtio-blk guest with
+  -smp 32 CRASHES in MSI-X vector registration (virtio::blk::blk ->
+  msix_vector -> register_interrupt_handler) -- vector exhaustion with 7 disks x
+  many queues x 32 vCPUs. -smp 8 is safe. Noted for the eventual benchmark: the
+  OSv guest is effectively capped below the metal's core count by MSI-X vectors
+  on this many-disk raidz layout.
+
+Firecracker: SAME image, SAME config, boots in 160ms, imports pgdata, and hits
+  the IDENTICAL hang at the identical PG line. Confirms the wall is in the
+  PG-on-OSv fork/ZFS-completion coherence, NOT the hypervisor. So the plan's
+  "does OSv-FC == OSv-KVM?" answer for bring-up: YES, identical.
+
+CONSEQUENCE: with no reliably-serving OSv instance, running HammerDB or pgbench
+  against OSv would either (a) fail to connect, or (b) at best catch the rare
+  good boot and be unrepeatable / non-median-able. Per the plan's honesty rule
+  ("do NOT fake a pass and do NOT let a crash count as a datapoint"), OSv has
+  NO benchmark rows. The fix is the lost-wakeup work already in flight; once PG
+  reliably reaches "ready" on ZFS, this same harness produces the OSv matrix.
+
+================================================================================
+STABILITY VERDICT (per config)
+================================================================================
+  Linux+PG @ 32k/hp=on : PASS. 30-min sustained HammerDB @ VU=64:
+        TEST RESULT: System achieved 127,465 NOPM from 293,037 PostgreSQL TPM
+        ZERO errors / zero failed vusers across the full 30-min measured window.
+        (live TPM oscillated 256k-339k, steady.) Pool scrub-clean, checkpoints
+        completing (checkpoint logs show 30-38% buffer writes, syncs <3s).
+  OSv-KVM              : bring-up UNSTABLE (startup wall, ~2% boot success);
+        NOT stable enough to enter a sustained run. No verdict on write
+        stability because it never sustained a load.
+  OSv-Firecracker      : same as KVM (identical wall).
+
+================================================================================
+RAW OUTPUT (pasted, real)
+================================================================================
+--- HammerDB TPROC-C, Linux 32k hp=off, all 3 iters per vuser (verbatim) ---
+  VU=8 : 40351 / 42573 / 42803 NOPM   (from 92956 / 97955 / 98524 TPM)
+  VU=16: 71612 / 70614 / 70804 NOPM
+  VU=32: 113612 / 114787 / 111302 NOPM
+  VU=64: 136101 / 136173 / 124723 NOPM
+  Vuser 1:TEST RESULT : System achieved 136173 NOPM from 312659 PostgreSQL TPM
+
+--- Linux pgbench RW c=64 (32k, verbatim) ---
+  pgbench (15.18, server 18.4)
+  transaction type: <builtin: TPC-B (sort of)>
+  scaling factor: 1000
+  number of clients: 64
+  number of threads: 8
+  duration: 60 s
+  number of transactions actually processed: 401798
+  number of failed transactions: 0 (0.000%)
+  latency average = 9.536 ms
+  tps = 6711.134641 (without initial connection time)
+
+--- Linux 30-min sustained (verbatim) ---
+  TEST STARTED VU=64 DUR=30 RAMP=5 Tue Jul 28 23:43:00 UTC 2026
+  Vuser 1:TEST RESULT : System achieved 127465 NOPM from 293037 PostgreSQL TPM
+  (0 errors)
+
+--- OSv-KVM the ONE successful serve (verbatim) ---
+  OSv v0.57.0-441-g66571d38 ; ZFS: OpenZFS 5000 initialized ; eth0: 192.168.100.2
+  [ZFS] Pool 'pgdata' is up-to-date at version 5000
+  2026-07-29 00:54:10 LOG: starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+  2026-07-29 00:54:10 LOG: listening on IPv4 address "0.0.0.0", port 5432
+  2026-07-29 00:54:11 LOG: database system is ready to accept connections
+  (driver over private IP got: PostgreSQL 18.4 on x86_64-pc-linux-musl)
+
+--- OSv-KVM the typical hang (verbatim, ~98% of boots) ---
+  [ZFS] Pool 'pgdata' is up-to-date at version 5000
+  2026-07-29 DEBUG: registering background worker "logical replication launcher"
+  <hang -- never reaches listening/ready ; guest powers off>
+
+--- OSv-Firecracker (verbatim) ---
+  Running Firecracker v1.7.0
+  OSv v0.57.0-441-g66571d38 ; Booted up in 160.36 ms ; eth0: 192.168.100.2
+  [ZFS] Pool 'pgdata' is up-to-date at version 5000
+  <same hang as KVM>
+
+================================================================================
+ZFS POOL (authoritative, Linux; OSv seeds the identical geometry)
+================================================================================
+  pool: pgdata  state: ONLINE
+    raidz1-0   ONLINE   nvme5n1 nvme6n1 nvme7n1 nvme8n1   (4x 200G EBS gp3)
+    logs       nvme0n1  (838G local NVMe SLOG)
+    cache      nvme3n1  (838G local NVMe L2ARC)
+  props: ashift=12 compression=lz4 atime=off logbias=throughput primarycache=all
+         recordsize={swept 8k/16k/32k/128k}  ; PG /data is the pool root dataset.
+  OSv guest sees the same 6 members as vblk1..vblk6 and builds the same
+  raidz1 + log + cache in-guest via zpool.so.
+
+================================================================================
+FILES (banked on floki: /tmp/pgbench-work/)
+================================================================================
+  results.tsv                  the full matrix (Linux complete; OSv=BLOCKED rows)
+  raw/hammerdb.tsv raw/pgbench.tsv          per-cell medians + all iters
+  raw/hdb-raw.log raw/pgbench-raw.log       every HammerDB + pgbench run verbatim
+  raw/sustained-linux-32k.log               the 30-min stability run
+  raw/osv-kvm-success.log                   the one good OSv serve (proof)
+  raw/osv-kvm-hang.log raw/osv-fc.log       the wall, KVM + Firecracker
+  raw/osv-build.log                         the OSv image build
+  raw/cell-linux-{8k,16k,128k}*.out         the tuning cells
+================================================================================

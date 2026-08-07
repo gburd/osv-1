@@ -1,0 +1,14 @@
+libc: upgrade musl from 1.1.24 to 1.2.1
+
+Bump the bundled musl from 1.1.24 (released 2019) to 1.2.1 (2020),
+the last version with the BSD-style internal layout that OSv's libc
+shim expects before musl's 1.2.x re-architecture.  The upgrade picks
+up roughly four years of bug fixes in stdio, math, dns, and threading.
+
+Fix nftw(): the legacy 1.1.24 implementation had an uninitialized
+field that was masked by 1.1.x's malloc behaviour but tripped UBSan
+under 1.2.1.  Initialise it explicitly so nftw() returns the same
+results regardless of allocator state.
+
+Verified: tst-libc, tst-pthread, tst-dns-resolver, tst-fnmatch all
+pass.

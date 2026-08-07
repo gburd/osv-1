@@ -1,0 +1,278 @@
+PostgreSQL 18 fork-per-backend on OSv (CONF_fork) — PREEMPTION / CONTEXT-INTEGRITY
+WALL: fix-direction experiments + two bounded fixes + honest remaining wall
+================================================================================
+Date: 2026-07-24  Host: floki (local, NOT EC2)  Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena  branch integ/pg-fork-arena
+Base HEAD: 5d93af47f   Work committed on top:
+   7e18b5854  tests: add tst-fork-preempt (initial mmap-based repro)
+   99a21295b  fork: signal-waiters -> identity heap; honest preempt test + mmap repro
+gdb method: TCG (qemu64, NO kvm) + -s -S; gdb build/last/loader.elf.  Reliable
+   stops: break abort / break *<app-pc>.  Stub rejects TLS ($fs) and $cr2 in
+   mid-run breakpoint CONDITIONS and struggles to evaluate memory-read
+   conditions on 20 iret sites (see METHOD NOTES) — this is what blocks the
+   final exact-store watchpoint, exactly as the prior report predicted.
+
+
+TL;DR (what changed vs the prior report)
+----------------------------------------
+1. The prior report's PRIMARY hypothesis -- fix-direction (b), the deferred-CR3
+   same-VA switch and its following FPU-control reload in
+   arch/x64/arch-switch.hh -- is DISPROVEN, two independent ways:
+     (i)  disassembly: the fpucw/mxcsr reload after the switch reads
+          [rbp-0x42]/[rbp-0x48] which are slots on the IDENTITY-MAPPED IST /
+          kernel stack, valid in every address space; it never touches rip/rsp.
+     (ii) EXPERIMENT: forcing switch_as through an EAGER CR3 load (mov cr3 BEFORE
+          the rsp/rbp swap and before the fpu reload) did NOT change the PG
+          crash at all -- so CR3-switch timing is not the cause.
+2. The corruption is NOT restored by an interrupt return (iret): breakpoints on
+   all 20 iretq sites conditioned on the frame's saved rip == 0x1000004b0000
+   never fire while the crash still happens.  So fix-direction (a)
+   (entry.S FS-base/IST r12 app-TCB restore on iret) is also not the path.
+3. Proven mechanism: the fork child reaches the wild target 0x1000004b0000 with
+   a COMPLETELY INTACT stack and register file (rsp=0x200000200cb0 pointing at a
+   valid frame whose top is &CheckpointerMain; rax/rbp/r12/r13/r15 all live
+   InitAuxiliaryProcess values).  It is NOT a stack `ret` (the return address on
+   top of the stack is the correct 0x41c2e0, not 0x4b0000) and NOT an `iret`.
+   By elimination it is an INDIRECT branch -- `jmp *mem` / `call *mem` -- through
+   a code pointer whose value is 0x1000004b0000.  The prime suspect is a PLT
+   stub `jmp *GOT[n]` reading a GOT slot that is momentarily wrong in the child's
+   COW address space under free-run preemption (single-stepping never
+   reproduces; free-run preemption reproduces deterministically -- the classic
+   race signature).  0x4b0000 is page-aligned and inside BackendInitialize,
+   which the checkpointer never legitimately runs; "ClientAuthInProgress" in the
+   prior report was just the nearest symbol to where the wild branch landed.
+4. Along the way I found and FIXED a real, separate cross-address-space bug that
+   was ONE of the two PG crash variants (see FIX #1), and root-caused a second
+   real bug (fork-child mmap; see WALL #2).  Neither is a full fix for the wild-
+   branch corruption, which remains the wall.
+
+NO psql rows were served on OSv.  PG still aborts a few seconds after
+"listening", right after the checkpointer prints "InitAux shmem read OK".
+
+
+THE DECISIVE EXPERIMENTS (results, not guesses)
+-----------------------------------------------
+A. Regression test tst-fork-preempt (new, committed, GREEN):
+   A long-lived fork child spins for seconds DEEP in a 64-level nested same-VA
+   stack, hammering .data/.bss globals, its own stack, the FPU (live doubles)
+   and syscalls (getpid/sched_yield) while the parent competes for the CPU, so
+   the child is preempted many hundreds of times.  It keeps a stack-local
+   checksum in lockstep with a .bss checksum and the parent waitpid-verifies a
+   known exit code.
+     Result: PASSES, 0 failures, reliably, on -smp 1 AND -smp 2.
+   => The preemptive context switch, by itself, PRESERVES a fork child's
+      register/stack context across many switches.  This is the single strongest
+      piece of evidence AGAINST "the preemptive switch corrupts the context",
+      and it is why fix-direction (b)/(c) are the wrong tree.  (I also tried
+      adding sigprocmask churn to the child loop -- still PASSES.)
+
+B. Eager-CR3 experiment (fix-direction b), TEMPORARY patch to arch-switch.hh:
+   switch_as threads now do `mov new_cr3,%cr3` BEFORE the rsp/rbp swap and before
+   the emms/fldcw/ldmxcsr reload.
+     Result: PG crashes IDENTICALLY (same "Aborted" right after "InitAux shmem
+     read OK").  => CR3-switch timing is not the cause.  Reverted.
+
+C. iret-corruption test (fix-direction a): breakpoints on all 20 kernel iretq
+   sites conditioned on the popped frame rip == 0x1000004b0000.
+     Result: never fires while the crash still occurs.  => the wild rip is not
+     delivered by an interrupt/exception return.
+
+D. Wild-target capture: break *0x1000004b0000 (the exact wild PC).
+     Result (deterministic): app arrives at 0x4b0000 with
+       rsp = 0x200000200cb0   (VALID; [rsp]=0x10000041c2e0 &CheckpointerMain,
+                                [rsp-8]=0x1000004a8e6d InitAuxiliaryProcess+0x6d)
+       rbp = 0x10000099e3a8   (&MyProc)   rax = 0x1000009b10ae (&IsUnderPostmaster)
+       r15 = 0x10000041c2e0   (&CheckpointerMain)   rcx = 1
+     Disassembling from 0x4b0000:
+       0x4b0000: bc 27 50 00 c6   mov $0xc6005027,%esp   <-- destroys rsp HERE
+       0x4b0005: 00 01            add %al,(%rcx)         <-- faults (rcx=1 -> #PF at 1)
+     So the prior report's "rsp=0xc6005027 sourced from .text" is a SYMPTOM:
+     the wild rip=0x4b0000 lands mid-.text, and the byte sequence there happens
+     to be `mov $imm32,%esp` which clobbers rsp with the .text bytes.  The CAUSE
+     is purely the wild rip=0x4b0000; rsp is intact until that instruction runs.
+
+
+ROOT-CAUSE CLASSIFICATION (refined, proven by elimination)
+----------------------------------------------------------
+The fork child (checkpointer) performs an INDIRECT branch (`jmp *`/`call *`
+through memory -- almost certainly a PLT `jmp *GOT[n]`) whose target pointer is
+0x1000004b0000 instead of the intended function.  Stack and registers are
+otherwise a coherent InitAuxiliaryProcess snapshot.  It is timing/preemption
+dependent (deterministic under free-run preemption on a single CPU; never under
+single-stepping).  The pointer that feeds the indirect branch is momentarily
+wrong -- consistent with a COW / same-VA hazard on a writable indirection table
+(GOT / a PG function-pointer table) in the child's private address space that is
+only observable when the child is preempted between the store that established
+the pointer and the branch that consumes it.  Confirming the EXACT indirection
+slot and the store that corrupts it needs a hardware watchpoint on the child's
+GOT slot (or KVM+hbreak); the TCG gdb-stub here rejects the required mid-run
+condition evaluation -- the same blocker the prior report flagged.
+
+
+FIX #1 (APPLIED, bounded, correct) -- signal-waiters cross-AS list
+------------------------------------------------------------------
+libc/signal.cc: the global `waiters` (std::array<std::list<sched::thread*>>,
+one list per signal) is manipulated CROSS-ADDRESS-SPACE: a fork child and its
+parent both push_front()/remove() on the same shared list (reached from
+sigprocmask, which the checkpointer calls during init).  Its std::list NODES
+were being allocated from the COW fork arena, so a child's node became a
+COW-private page; the shared list sentinel (in kernel .bss, shared across every
+AS) then pointed at an arena VA that resolves to DIFFERENT physical pages in the
+parent vs child, so a later list::remove() traversal followed a dangling
+next/prev link and page-faulted -- and because that happened with interrupts
+disabled, it tripped `assert(ef->rflags & rflags_if)` in arch/x64/mmu.cc:39.
+
+gdb backtrace that pinned it (before the fix):
+   #17 osv::unwait_for_signal(t=0x4000bfe00040, sigidx=0)  libc/signal.cc
+   #16 std::list<sched::thread*>::remove(...)  (traversal)
+   #15 _List_iterator::operator++            <-- faults, addr~0, IRQs off
+   ... -> page_fault:39 assert.
+Fix: force the identity kernel heap (fork_arena::kernel_heap_scope) around the
+waiters push/remove -- the same rule already applied to thread objects and
+wait_records.  Gated CONF_fork.  Committed (99a21295b).
+   Effect (proven): the page_fault:39 crash VARIANT is eliminated; PG now fails
+   only via the wild-branch corruption above.  This is a genuine correctness fix
+   that also matters for the shipping PR #1456 (same code).
+
+
+WALL #2 (root-caused, NOT bounded) -- fork-child mmap is not AS-aware
+--------------------------------------------------------------------
+A fork child that calls mmap() AFTER fork and writes the region SIGSEGVs
+deterministically (repro: tests/tst-fork-child-mmap.cc, standalone, NOT in the
+suite because it aborts the unikernel).  Root cause (proven with gdb + prints):
+the per-child address space is consulted ONLY by the page-FAULT path
+(core/mmu.cc vm_fault uses `as->vmas`, the child's private vma_list populated by
+clone_address_space).  The mmap / munmap / mprotect ALLOCATION path --
+mmu::allocate(), map_anon(), find_hole(), evacuate(), find_intersecting_vma(s),
+protect() -- plus the global vma_range_set, are NOT address-space aware; they
+always use the GLOBAL vma_list.  So a child's new mmap:
+   - picks a hole from the GLOBAL vma_list (often colliding with the child's own
+     same-VA stack top, e.g. it returned 0x200000201000, one page above the
+     stack), and
+   - inserts the new vma into the GLOBAL vma_list, NOT the child's as->vmas.
+The child's first write #PFs, vm_fault searches as->vmas, finds NO vma, and
+SIGSEGVs (kernel pc -> abort()).  Deterministic on -smp 1 with a single
+mmap+write -- NOT preemption dependent.
+   A correct fix is a MEDIUM/LARGE mmu refactor (not bounded): make
+   allocate/map_anon/find_hole/evacuate/munmap/mprotect/msync operate on the
+   current thread's address_space, giving a child AS its own vma_range_set and
+   threading address_space* through ~10 functions, defaulting to the kernel AS
+   so the (heavily-tested) non-fork path is byte-identical.  ~83 references to
+   the global vma_list, ~12 to vma_range_set, would need auditing.  This affects
+   ALL memory management, so it warrants its own PR + full mmu test pass, not a
+   drive-by patch.  It is a SEPARATE bug from the wild-branch wall (PG's crash is
+   the wild branch, not a child mmap), but it will bite any fork child that
+   mmaps after fork and must be fixed for general fork correctness.
+
+
+WHAT A CORRECT FIX FOR THE WALL REQUIRES
+----------------------------------------
+The wall is the wild indirect branch (WALL, above).  The remaining unknown is
+WHICH indirection slot holds 0x4b0000 and WHAT store corrupts it under
+preemption.  The definitive next step (blocked here only by the TCG gdb-stub):
+   - Boot PG under KVM + gdb with HARDWARE breakpoints, OR add a tiny in-kernel
+     diagnostic that does NOT allocate/print in the fault path (the console
+     write path malloc()s and, in a fork child, re-enters fork_arena::alloc ->
+     COW fault -> nested fault; I hit this and it produced a red-herring "nested
+     too deeply" cascade until I removed the print).  Record into a preallocated
+     ring buffer instead and dump at abort.
+   - Arm a HW watchpoint on the child's GOT region (postgres PIE, the .got /
+     .got.plt) for a write of 0x1000004b0000, OR on the specific GOT slot the
+     PLT stub just before 0x4b0000's caller uses, armed once the child is in
+     InitAuxiliaryProcess.  That catches the exact corrupting store.
+   - Hypothesis to test first: the child's GOT/.data.rel.ro pages are COW; verify
+     they are correctly relocated in the child AND that no code path writes them
+     while another context (parent/kernel) observes a half-written slot.  If the
+     GOT is the culprit, the fix is to treat the app's writable relocation tables
+     like the arena/TLS: ensure they are privatized coherently at clone time and
+     never partially written across a preemption boundary.
+
+Given the evidence (context switch proven sound; CR3 timing proven irrelevant;
+iret proven not involved; stack+regs intact; wild indirect branch), the
+remaining work is a targeted GOT/indirection-table investigation, not a switch/
+IRQ-path rewrite.  If shipping PR #1456 now, document the limitation as: "a fork
+child that runs long enough to be preempted while consuming a writable
+indirection table (PLT/GOT) can take a wild indirect branch; heavy long-lived
+fork children (e.g. a full PostgreSQL backend set) are not yet supported."  Note
+the preemptive context switch itself is sound (tst-fork-preempt), so the
+limitation is narrower than "fork children must not be heavily preempted".
+
+
+VALIDATION (this work, all green)
+---------------------------------
+CONF_fork=y ./scripts/build -j conf_fork=1 fs=rofs image=tests  (OK, kernel relinked)
+  tst-fork        10/10 PASS  (run 5x: "0 failures" every run)
+  tst-fork-cow     PASS       ("done: 0 failures")
+  tst-fork-deep    PASS       ("done: 0 failures")
+  tst-execve       PASS       ("done: 0 failures")
+  tst-pgfork       PASS       ("done: 0 failures")
+  tst-fork-preempt PASS       ("done: 0 failures"), reliable on -smp 1 and -smp 2
+conf_fork=0 sanity:
+  ./scripts/build -j conf_fork=0 fs=rofs image=tests -> rc=0 (clean; the signal
+  fix is entirely #if CONF_fork).
+PG image rebuilt:
+  ./scripts/build -j conf_fork=1 fs=ramfs image=pg18-fork -> rc=0
+
+
+POSTGRES STATUS (no overclaiming)
+---------------------------------
+PG boots to:
+  LOG: starting PostgreSQL 18.4 ...
+  LOG: listening on IPv4 address "0.0.0.0", port 5432
+  ... forks the checkpointer, which reaches InitAuxiliaryProcess ("InitAux shmem
+  read OK") and then takes the wild indirect branch to 0x1000004b0000 ->
+  mov $imm,%esp -> #PF at addr 1 -> SIGSEGV -> abort -> unikernel down, within a
+  few seconds of "listening".  Deterministic on BOTH -smp 1 and -smp 2.
+PG does NOT reach "database system is ready to accept connections".
+NO psql query was served.  NO real rows were produced on OSv.  SINGLE and
+CONCURRENT psql: NOT SERVED.  I do NOT claim PG works.
+
+
+REPRO
+-----
+Fast local repro of the (now GREEN) preemption stress + the two bugs:
+  cd /b/.local/worktrees/fork-arena && export CONF_fork=y
+  ./scripts/build -j$(nproc) conf_fork=1 fs=rofs image=tests
+  ./scripts/run.py -c 2 -m 2G -e /tests/tst-fork-preempt.so        # PASS
+  # standalone mmap-in-child bug (aborts the unikernel; not in the suite):
+  #   add tst-fork-child-mmap.so to modules/tests/Makefile, rebuild, then
+  ./scripts/run.py -c 1 -e /tests/tst-fork-child-mmap.so           # SIGSEGV
+PG wall (rebuild image first -- image=tests OVERWRITES usr.img):
+  ./scripts/build -j$(nproc) conf_fork=1 fs=ramfs image=pg18-fork
+  qemu-system-x86_64 -m 4G -smp 1 -cpu qemu64 -nographic \
+    -kernel build/last/loader.elf \
+    -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+    -drive file=build/last/usr.img,if=virtio,cache=none \
+    -netdev user,id=un0,hostfwd=tcp::5432-:5432 -device virtio-net-pci,netdev=un0
+gdb catch of the wild target:
+  break *0x1000004b0000   # then: info registers; x/4i 0x1000004b0000
+
+
+METHOD NOTES (for the next investigator)
+----------------------------------------
+- Restart arena-dev to reap zombie qemus (stale gdb-stub qemu holds :1234 + the
+  usr.img lock and silently kills the next boot; also boots the WRONG image if
+  you last built image=tests -- "Failed to load object: postgres. Powering off.").
+- DO NOT debug_ll()/printf in the page-fault path of a fork child: the console
+  write path malloc()s, which in an app thread routes to fork_arena::alloc, whose
+  first write to a bump chunk is a COW fault in the child -> a NESTED fault while
+  already servicing one -> "exception nested too deeply".  This is an INSTRUMENT-
+  INDUCED artifact, not the bug; I chased it for a while.  Record into a
+  preallocated ring buffer and dump at abort() instead.
+- The TCG gdb-stub rejects TLS ($fs vars like sched::exception_depth /
+  sched::s_current) and $cr2/$pc in mid-run breakpoint CONDITIONS, and is flaky
+  evaluating memory-read conditions across many breakpoints.  Use plain
+  breakpoints + ef->* memory fields, or move to KVM+hbreak for the GOT watchpoint.
+- The build only relinks loader.elf when a KERNEL source changes; a bare
+  `image=tests` after editing core/*.cc may leave a STALE loader.  Confirm the
+  loader.img timestamp advanced, and watch for link errors (a wrong `extern`
+  silently leaves the OLD kernel in build/last if the link fails but the image
+  step still runs).
+
+FILES
+-----
+Committed on integ/pg-fork-arena (author Greg Burd):
+  libc/signal.cc                    (FIX #1)
+  tests/tst-fork-preempt.cc         (GREEN preemption-stress regression test)
+  tests/tst-fork-child-mmap.cc      (standalone mmap-in-child repro; not in suite)
+Bundle: /tmp/fork-arena-progress.bundle  (git bundle 6594e93f0..HEAD)

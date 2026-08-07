@@ -1,0 +1,22 @@
+java/build: NixOS Java compatibility and binutils 2.46
+
+OpenJDK from the host worked on Debian/Ubuntu but failed on NixOS
+because java/jshell binaries embed an absolute /nix/store path in
+their RUNPATH.  Fix:
+
+  - module.py: patchelf java/jshell binaries at install time so
+    RUNPATH points at /usr/lib/jvm/java/lib (the OSv layout) rather
+    than the build-host's nix-store path.
+  - common.gmk: bump C++ standard from c++11 to c++14 because Boost
+    1.89's interfaces require it.
+  - jni_helpers.cc: include <stdexcept> (was implicit before
+    Boost 1.89 / GCC 14 tightened the standard headers).
+  - pom.xml: drop the `<classifier>jar</classifier>` directive that
+    was removed in maven-assembly-plugin 3.7.1.
+
+Concurrent fix: binutils 2.46 changed how it handles weak symbol
+visibility for archived static libraries; adjust the Makefile rule
+for libsolaris.so to keep the OSv export-symbols list authoritative.
+
+Java OpenJDK 21 image now boots and runs the SubmissionPublisher
+virtual-thread benchmark (100/100 tasks complete) on OSv ZFS.

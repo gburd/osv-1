@@ -1,0 +1,237 @@
+================================================================================
+[W-branch] PostgreSQL-on-OSv fork COW-clone file_vma bug -- FIXED
+================================================================================
+Date: 2026-07-24  Host: floki (local, KVM)  Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena
+Branch: integ/pg-fork-arena  Base HEAD: 7c217c854 (W-mmap fix in)
+Author: Greg Burd
+Method: fix from the KVM+hbreak diagnosis in /tmp/w-branch-kvm.txt; validated
+        with a new regression test + the full fork/mmu suite; then booted
+        stock PostgreSQL 18.4 to measure how far past the wild-branch wall it
+        now advances.
+
+================================================================================
+THE BUG (from the proven diagnosis, not re-derived)
+================================================================================
+core/mmu.cc clone_address_space() rebuilt EVERY child VMA as an anon_vma:
+    struct vma_snap { uintptr_t start, end; unsigned perm, flags; };  // no type
+    snap.push_back({v.start(), v.end(), v.perm(), v.flags()});         // geometry only
+    auto *nv = new anon_vma(addr_range(s.start, s.end), s.perm, s.flags); // ALWAYS anon
+So a file_vma (e.g. PostgreSQL's file-backed .text, mapped by the ELF loader via
+map_file -> file_vma) became ANONYMOUS in the fork child.  When the child demand-
+faulted a .text page not already present from the COW page-table clone, vm_fault
+dispatched to the base vma::fault -> demand-ZERO page instead of file_vma::fault
+reading the file.  The child then executed zeros -> wild indirect branch (rip
+0x1000004b0000, mid-instruction in BackendInitialize) -> SIGSEGV.  This was the
+wall blocking stock PostgreSQL: the checkpointer child ran a large, mostly-cold
+.text path (InitAuxiliaryProcess/BaseInit region) whose pages were never demand-
+faulted in the postmaster, so the COW clone handed the child absent PTEs and the
+child zero-filled its own executable pages.
+
+================================================================================
+THE FIX
+================================================================================
+Two independent, arena-INDEPENDENT correctness fixes plus two OSv accommodations
+to actually reach a running PG.
+
+(1) Preserve each parent VMA's dynamic type in clone_address_space
+    [core/mmu.cc, all inside the existing #if CONF_fork region]
+
+    - vma_snap widened to carry, for a file_vma, a `fileref file` and
+      `f_offset foffset`:
+          struct vma_snap { uintptr_t start, end; unsigned perm, flags;
+                            fileref file; f_offset foffset; };
+    - Snapshot loop (UNDER the parent's vmas_mutex read lock): dynamic_cast to
+      file_vma; if it is one, copy fv->file() (an intrusive_ptr copy -> a
+      refcount bump taken under the lock, which keeps the file alive into the
+      rebuild) and fv->offset().  Anon vmas store a null fileref.  The
+      intrusive_ptr copy targets the pre-reserved snap storage, so it never
+      faults under the lock (keeps the documented no-malloc-under-vmas_mutex
+      discipline).
+    - Rebuild loop (AFTER the lock, as anon_vma was): if s.file is set,
+      reconstruct via `s.file->mmap(range, s.flags, s.perm, s.foffset)` -- the
+      SAME call map_file and file_vma::split use.  That gives the child the
+      correct page_allocator automatically (map_file_page_read for a MAP_PRIVATE
+      file mapping, map_file_page_mmap for a cached/shared one) and the new
+      file_vma holds its OWN fileref.  Anon vmas still clone as anon_vma.
+      Perms/flags are passed through verbatim (the .text vma keeps
+      perm_read|perm_exec so the child's instruction fetch is allowed).
+      Reusing file->mmap() means zero duplication of the read-vs-mmap selection.
+    - Object construction stays in the post-lock rebuild loop (so a file_vma
+      allocation can hit the malloc-pool refill path without the fork-time
+      deadlock the comments warn about); only the fileref ref-bump happens under
+      the lock, and the rebuild just moves it in.
+    - The whole clone runs under the existing `fork_arena::kernel_heap_scope kh`
+      at the top of clone_address_space, so the file_vma allocations (and any
+      page-cache reads they trigger later) land on the identity kernel heap, not
+      the COW arena.
+
+    Lifetime / teardown [core/mmu.cc destroy_address_space]:
+    - Pre-existing behaviour LEAKED the child's vma objects (the intrusive
+      vma_list destructor does not delete elements; destroy_address_space only
+      freed page tables).  With a file_vma that would also leak its fileref
+      (keeping the file object alive forever).  Fixed by disposing the child's
+      own vma_list before `delete as`:
+          as->owned_vmas->clear_and_dispose([](vma *v){ delete v; });
+      ~vma is a no-op for base/anon (and touches no global list, so it is safe
+      here); ~file_vma deletes its page_allocator and releases its fileref.
+      This closes both the new file_vma-fileref leak AND the pre-existing
+      anon_vma + edge-marker leak.
+
+(2) Keep shared kernel filesystem objects OFF the COW fork arena
+    [fs/fs.hh, fs/vfs/vfs_vnode.cc, fs/vfs/vfs_dentry.cc, fs/ramfs/ramfs_vnops.cc;
+     each new code path gated #if CONF_fork]
+
+    Once the child correctly file-faults its .text, servicing that fault does
+    real file I/O (file_vma::fault -> ::size(_file) -> vfs stat/read).  Those
+    paths WRITE to shared FS objects: a struct file's f_count, a vnode's v_lock,
+    a ramfs node's rn_atime.  In a fork child those objects, if allocated in the
+    COW arena by the app, are write-protected -- so the write takes a COW fault
+    NESTED inside the page-fault handler (which already holds vmas_mutex and is
+    one exception deep).  That nested fault needs vmas_mutex for_write ->
+    reschedule at exception_depth==2 -> `assert(exception_depth <= 1)` (and would
+    deadlock).  The fix is the SAME class the fork-arena design already documents
+    for thread objects / wait_records: file, vnode, dentry and ramfs inodes are
+    kernel infrastructure INHERITED across fork and must live on the identity
+    kernel heap (shared verbatim, never COW).  A one-line
+    `fork_arena::kernel_heap_scope kh;` wraps each allocation:
+      - fs/fs.hh make_file<>()          -> every struct file
+      - fs/vfs/vfs_vnode.cc vget()      -> vnode + its fs-private v_data (VFS_VGET)
+      - fs/vfs/vfs_dentry.cc dentry_alloc() -> dentry + d_path
+      - fs/ramfs/ramfs_vnops.cc ramfs_allocate_node() -> ramfs inode + name + map
+
+(3) OSv accommodations needed to actually run PG (not the W-branch fix, but
+    required to reach the payoff -- honest about scope):
+    - runtime.cc setsid(): was WARN_STUBBED + return -1, which PG treats as
+      FATAL ("setsid() failed").  OSv has no sessions; return a plausible
+      non-negative session id so single-"session" apps proceed.  (Not gated;
+      strictly more correct for a sessionless OS.)
+    - PG source (/b/.local/pg18/src, NOT in this repo): the postmaster's
+      refuse-to-run-as-root guard (main.c) and the 0700 data-dir permission
+      check (miscinit.c) were suppressed for OSv (uid 0 unikernel, ramfs image
+      packer does not preserve 0700).  These are PG-side build accommodations,
+      analogous to WIN32's own suppressions; they are NOT OSv kernel changes.
+      NOTE: the prior diagnostic PG build carried OSVDBG stderr spam + these
+      same suppressions as uncommitted local edits; the OSVDBG prints were
+      removed for the measurement build because a forked child hammering the
+      shared tsm console during startup hits an unrelated console-write-in-child
+      fault (an instrument artifact, exactly as /tmp/w-branch-kvm.txt warned).
+
+================================================================================
+THE REGRESSION TEST
+================================================================================
+tests/tst-fork-file-mmap.cc (added to modules/tests/Makefile tests list; the
+usr/common manifests regenerate from that list automatically).  Author Greg Burd.
+
+  - parent opens a READ-ONLY ROFS file (/rofs/mmap-file-test1, ~47 KiB) and
+    reads the EXPECTED bytes of a mid-file page (page 5) via pread on a SEPARATE
+    fd (does not fault the mapping's PTE);
+  - parent mmaps the file MAP_PRIVATE, PROT_READ, but does NOT touch the target
+    page (so no PTE exists for it -> the COW clone hands the child an absent PTE);
+  - fork();
+  - the CHILD reads the target page FIRST -> demand fault -> must read the real
+    file bytes.
+
+  Read-only ROFS was chosen deliberately: it matches the real case (an
+  executable's file-backed .text demand-paged from the read-only image) and
+  avoids the writable-fs access-time write that is a DISTINCT nested-fault issue.
+
+  Reproduction confirmed on HEAD 7c217c854 (before the fix): child reads 0x00
+  (zeros), want 0x72 -> MISMATCH, exit 70.  With the fix: child reads 0x72 ->
+  OK, exit 55, PASS.  Deterministic on -smp 1.
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+Build: CONF_fork=y, fs=rofs, image=tests, -j$(nproc).
+
+  tst-fork-file-mmap        PASS x5 (was reproducing the bug on HEAD; now reads
+                            real file bytes 0x72)
+  tst-fork                  0 failures
+  tst-pgfork                0 failures (9/9)
+  tst-fork-cow              0 failures (6/6)
+  tst-fork-deep             0 failures (3/3)
+  tst-execve                0 failures (3/3)
+  tst-fork-child-mmap       PASS
+  tst-fork-preempt (-c 2)   0 failures
+  tst-mmap (-c 2)           mmap tests succeeded
+  tst-mmap-file             SUMMARY: 30 tests, 0 failures
+  tst-mmap-file-cow         PASSED
+  tst-huge                  huge tests succeeded
+  tst-vfs                   *** No errors detected
+
+  conf_fork=0 fs=rofs image=tests -> builds clean (rc=0).
+
+================================================================================
+THE PAYOFF -- PostgreSQL status (HONEST)
+================================================================================
+Build: CONF_fork=y, fs=ramfs, image=pg18-fork.
+Boot:  qemu -enable-kvm -cpu host -m 4G -smp 2 -nographic \
+         -kernel build/last/loader.elf \
+         -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+         -drive .../usr.img,if=virtio,cache=none \
+         -netdev user,hostfwd=tcp::5432-:5432 -device virtio-net-pci
+
+THE WILD-BRANCH WALL IS GONE.  Before the fix, the checkpointer child died at
+"InitAux shmem read OK" -> wild rip 0x4b0000 (executing zeros in file-backed
+.text).  After the fix, the child runs REAL file-backed .text straight through
+InitAuxiliaryProcess, RegisterPostmasterChildActive, SpinLockAcquire, and
+**BaseInit** -- the region that used to be zero-filled.  Proven by instrumented
+run: every OSVDBG checkpoint past the old wall now prints from real code.
+
+Startup now advances to:
+  - postmaster: "starting PostgreSQL 18.4 ...", "listening on IPv4 ... port 5432"
+  - checkpointer child forks, runs real .text, passes setsid()
+
+THE NEXT WALL (precisely symbolized, DISTINCT from W-branch):
+  Assertion failed: inp->inp_socket == 0L
+    (bsd/sys/netinet/in_pcb.cc: in_pcbrele_locked:1197)
+  bt: in_pcbrele_locked <- (netstack) <- async::async_worker::run()
+  This fires shortly after "listening", when the forked child closes the
+  inherited listen socket (ClosePostmasterPorts).  The BSD inpcb/socket are
+  `new`'d in app context (arena) and inherited by the child; the child's socket
+  teardown releases a pcb whose inp_socket is still set -- a socket/inpcb
+  lifetime bug in the BSD network stack under fork's fd/socket inheritance.  It
+  is a separate subsystem from clone_address_space's VMA typing and is NOT the
+  W-branch bug.
+
+  psql rows: NOT YET.  PG does NOT reach "database system is ready to accept
+  connections"; no psql query was served; NO real rows produced.  I do NOT claim
+  PG works.  The milestone this fix delivers is unambiguous and proven: the
+  file-backed .text wild-branch wall is eliminated -- PG's forked children now
+  execute their real, demand-paged executable instead of zeros.
+
+================================================================================
+RELEVANCE TO SHIPPING PR #1456 (per-child COW address space)
+================================================================================
+YES -- fix (1) belongs in #1456.  clone_address_space collapsing every child
+VMA to anon_vma is a straight correctness bug in the per-child COW address
+space: ANY file-backed mapping (a program's .text/.rodata, an mmap'd data file)
+is silently turned anonymous in the child and demand-zero-filled instead of read
+from its file.  The fix is arena-INDEPENDENT (it uses only file->mmap() + the
+existing snapshot/rebuild split + vma disposal on teardown), so it applies to
+#1456 as-is and makes #1456 correct for file-backed mappings under fork.  Fix
+(2) (shared FS objects off the arena) is arena-SPECIFIC and only relevant if
+#1456 also routes app allocations through a COW arena; if #1456 shares the app
+heap differently, its analogue is "ensure inherited FS kernel objects are not
+per-child-COW."  Fix (3) is unrelated to #1456 (OSv syscall/PG-build
+accommodations).
+
+================================================================================
+FILES CHANGED (committed on integ/pg-fork-arena, author Greg Burd)
+================================================================================
+  core/mmu.cc              clone_address_space type-preserving snapshot/rebuild;
+                           destroy_address_space vma disposal
+  fs/fs.hh                 make_file<> on identity heap under CONF_fork
+  fs/vfs/vfs_vnode.cc      vget vnode alloc on identity heap under CONF_fork
+  fs/vfs/vfs_dentry.cc     dentry_alloc on identity heap under CONF_fork
+  fs/ramfs/ramfs_vnops.cc  ramfs_allocate_node on identity heap under CONF_fork
+  runtime.cc               setsid() returns a session id instead of -1
+  tests/tst-fork-file-mmap.cc   new regression test (author Greg Burd)
+  modules/tests/Makefile   register tst-fork-file-mmap.so
+  (PG-side, NOT in this repo: main.c root-check + miscinit.c data-dir-perms
+   suppressions for OSv, in /b/.local/pg18/src)
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+arena-dev: left UP.  On floki (no EC2).
+================================================================================

@@ -1,0 +1,56 @@
+=== WAKE-TIME IDLE-CPU STEERING in OSv sched: A/B RESULT ===
+Box i-01246675efc30375e m5d.metal (96 vCPU, 4x838G LOCAL NVMe) us-east-2 beef 840154381708.
+Base = #1458 fork tip 6b71c76385 + cherry-pick #1464 sched-load-balance (512b2b2ec).
+Fix = "sched: steer woken threads to idle CPUs" (standalone commit, stacks on #1464).
+A = steer OFF (CONF_sched_wake_idle_steer=0) = #1464-only baseline.
+B = steer ON  (CONF_sched_wake_idle_steer=1) = #1464 + wake-steering.
+Both: -smp48, 48G, PG18.0 musl-PIE, ZFS raidz1-8k on 4 LOCAL NVMe files, SLIRP hostfwd 5432
+(single virtio-net RX queue = the profiled bottleneck preserved), default mmap DSM.
+Driver pgbench from the same host. 0-failed every cell shown.
+
+--- MATCHED RO A/B (pgbench -S, -s20, 30s, 0-failed both sides) ---
+ conn   A steerOFF   B steerON    B/A
+ c1        12109       11565      0.95
+ c8        72328(pk)   71907(pk)  0.99   <- both peak at c8
+ c16       47337       49878      1.05
+ c32       34924       34844      1.00
+ c48       32753       32723      1.00
+ c64       32398       31886      0.98
+ => RO curves are IDENTICAL within noise. Wake-steering does NOT further lift the RO
+    plateau on top of #1464. Both plateau ~32k at c32-c64.
+
+--- RW baseline (A steer OFF, -s300, 60s, 0-failed) ---
+ c1=1070 c8=4227 c16=3420 c32=3191 c48=3056 c64=2837  (near-parity RW, completes clean)
+
+--- THREAD SPREAD (top -H of qemu vCPU threads under c32 RO) ---
+ A steer OFF (#1464): 15 vCPU threads >5% CPU, guest ~560% (5.6 cores) busy.
+ (vs the pre-#1464 DEFINITIVE matched run: only 6-7 busy vCPUs, ~2.5 cores, clump on 5 CPUs.)
+ => #1464's aggressive load_balance ALREADY dispersed the clump (5 -> 15 CPUs), which is
+    what lifted the plateau from the matched run's ~12k to ~32k. Wake-steering had little
+    additional clump to disperse.
+
+=== CRITICAL FINDING (honest, negative for the standalone fix as-is) ===
+1. THE REAL LEVER WAS #1464 (sched-load-balance), NOT wake-steering. On the pre-#1464
+   substrate the matched run measured a ~12k RO plateau with backends clumped on ~5 of 48
+   CPUs. With #1464 alone the plateau is ~32k and 15 CPUs are busy: the 10ms/drain-the-whole-
+   imbalance load_balance already spreads the woken-backend clump. Wake-time steering on top
+   of #1464 adds ~0 to the RO curve (B/A ~= 1.00 every cell).
+2. WAKE-STEERING REGRESSES THE WRITE PATH. With steering ON, pgbench -i at moderate+ scale
+   (>= s50, and re-init at s20) LIVELOCKS: the guest spins ~242% CPU and the heavy concurrent
+   COPY/index write never completes (steer OFF completes s300 init in ~43s). The read-only
+   path is stable; the write path is not. => not safe to land as-is.
+3. Implementing it safely required, in order: export_runtime from the HOME cpu scale (not the
+   waker's) [a prior "no-export" attempt wedged]; skip status::sending_lock wakeups (lock
+   hand-off); confine steering to wake() thread context, never the IRQ-path
+   wake_with_irq_disabled() [nested-reschedule exception_depth assert]; and app-threads-only
+   [kernel workers page-pool/reaper/taskqueue tripped ran_for's _renormalize_count assert and
+   crashed the seed boot]. Even after all four guards, RO is a null and RW livelocks.
+
+=== ROADMAP IMPLICATION ===
+The plateau (OSv RO ~32k vs Linux ~190k, with #1464) is NOT wake-placement once #1464 is in.
+The residual ceiling is elsewhere: the SINGLE virtio-net RX receiver thread funneling all
+inbound (now the next lever, MQ becomes relevant since #1464 already provides idle CPUs), and
+loopback/SLIRP + fork-COW overheads. Wake-steering is the WRONG next lever on the #1464 base.
+RECOMMENDATION: do NOT open the wake-steer PR (redundant vs #1464 for RO, RW-livelock bug).
+Ship #1464 as the sched improvement (already on pr/sched-load-balance). Re-evaluate MQ RX +
+per-packet-alloc on the #1464 base as the next throughput lever.

@@ -1,0 +1,212 @@
+================================================================================
+[W-branch] PostgreSQL-on-OSv wild indirect branch — ROOT CAUSE PINNED via KVM+hbreak
+================================================================================
+Date: 2026-07-24  Host: floki (local, KVM)  Container: arena-dev (fedora:39)
+Method: KVM (-enable-kvm -cpu host) + gdb hardware breakpoints/watchpoints +
+        qemu-monitor gva2gpa / xp physical inspection.  This is the capability
+        the TCG stub lacked; KVM honors DR0-3 and the monitor resolves the
+        child's page tables, which is what closed the case.
+Diagnostic build: OWN clean worktree at /home/gburd/ws/osv/.local/worktrees/
+        wbranch-wt, HEAD 99a21295b + core/mmu.cc & include/osv/mmu.hh cherry-
+        picked from 7c217c854 (the W-mmap fix).  NO code committed; diagnostic
+        only.  arena-dev left up.
+
+================================================================================
+VERDICT (one line)
+================================================================================
+W-branch is a DISTINCT bug from W-mmap.  It is a fork COW-clone defect: the
+fork child's VMA list is rebuilt with EVERY vma re-created as an anon_vma
+(core/mmu.cc:611-612), so the PostgreSQL executable's FILE-BACKED .text
+(file_vma, created by the ELF loader via map_file) becomes ANONYMOUS in the
+child.  When the child (the checkpointer) demand-faults a .text page that was
+not already present via the COW page-table clone, vm_fault dispatches to the
+base vma::fault -> ZERO-FILLS the page instead of reading the file.  The child
+then executes zeros / a misaligned byte stream and lands at the "wild" target
+0x1000004b0000.  It is preemption/timing sensitive only because it depends on
+WHICH .text pages happen to still be present from the COW clone vs. which get
+re-faulted in the child; the corrupting "store" is the kernel's own page-fault
+handler installing a fresh zero page over an executable VA.
+
+The W-mmap fix does NOT clear it and is NOT the cause: W-mmap fixes the mmap
+ALLOCATION path (find_hole/allocate into the child AS); W-branch is in the fork
+VMA-CLONE path (clone_address_space) and mis-types the child's vmas.  Confirmed:
+PG still aborts identically after "InitAux shmem read OK" with the mmap fix in.
+
+================================================================================
+THE EXACT MECHANISM (proven, not inferred)
+================================================================================
+1. The wild target 0x1000004b0000 is NOT a corrupt code pointer in a GOT/PLT
+   slot.  I dumped the child's entire .got (0x97ae50) and .got.plt (0x97afe8)
+   live at the wild branch: NO slot contains 0x1000004b0000.  The GOT is
+   correctly bound (PG libc PLT slots resolve to OSv kernel libc, e.g. atexit ->
+   0x4023a9e0; all sane).  So the leading "corrupt GOT slot" hypothesis is
+   REJECTED.
+
+2. 0x4b0000 = BackendInitialize + 0x50.  BackendInitialize is 0x4affb0..0x4bddc1.
+   0x4b0000 lands 3 bytes INTO the instruction at 0x4afffd
+   (lea 0x5027bc(%rip),%rcx = 48 8d 0d bc 27 50 00), so it MIS-decodes as
+   `mov $0xc6005027,%esp` (bytes bc 27 50 00 c6) which then clobbers rsp — this
+   is why prior analysis saw "rsp sourced from .text".  Symptom, not cause; the
+   cause is the wild rip=0x4b0000.
+
+3. The child arrives at 0x4b0000 with a coherent InitAuxiliaryProcess register
+   snapshot (matches the prior report exactly):
+     rip=0x1000004b0000  rsp=0x200000200cb0  rbp=0x10000099e3a8 (&MyProc)
+     rax=0x1000009b10ae (&IsUnderPostmaster)  r15=0x10000041c2e0 (&CheckpointerMain)
+     r12=0x10000099e3a0 (&ProcGlobal)  rbx=0x40818720 (=*stderr, an OSv kernel
+       FILE* in kernel .data — legitimate, not corruption)
+   Stack return chain (all correct):
+     [rsp+0x00]=0x10000041c2e0  &CheckpointerMain (ret into it)
+     [rsp+0x28]=0x100000419fba  AuxiliaryProcessMainCommon+0x7a  (ret right after
+                                 `call 0x4a8e00 <InitAuxiliaryProcess>`)
+     [rsp+0x48]=0x10000041c303  CheckpointerMain+0x23 (ret after call AuxProcMainCommon)
+   Chain: CheckpointerMain -> AuxiliaryProcessMainCommon -> InitAuxiliaryProcess,
+   exactly the "InitAux shmem read OK" path.  There is NO indirect branch in this
+   straight-line code — proving the transfer to 0x4b0000 is NOT a jmp*/call*
+   through a data pointer, but a corrupted INSTRUCTION STREAM.
+
+4. Hardware exec breakpoints reveal the child's .text is partially GONE:
+     - hbreak *0x10000004a8e6d (InitAux+0x6d, the instruction right after the
+       "InitAux shmem read OK" fprintf) NEVER fires, even though the child prints
+       that message.  The instruction at that VA is not being executed as itself.
+     - reading VA 0x10000004a8e00 (InitAux entry) from the child's AS at the wild
+       branch returns "Cannot access memory" on some runs — the page is not even
+       mapped.
+
+5. qemu-monitor gva2gpa on the child's page table (CR3=0x9354000) shows the
+   .text is backed by TWO different physical regions:
+     VA 0x4b0000  -> GPA 0x926f000  (~147 MB: a COW clone of the parent's .text) OK
+     VA 0x41c2e0  -> GPA 0x93582e0  (~147 MB: COW clone) OK
+     VA 0x4a9000  -> GPA 0x100126000 (>4 GB: a FRESH ANON page) CORRUPT
+     VA 0x4af000  -> GPA 0x100120000 (>4 GB: FRESH ANON page)  CORRUPT
+     VA 0x4a8e00  -> Unmapped (on some runs)
+   `monitor xp` of the physical pages:
+     GPA 0x926f000 / 0x93582e0 -> real PG code (74ed8548..., 56415741 push r15/r14)
+     GPA 0x100120000 / 0x100126000 -> ALL ZEROS.
+   Cross-check vs on-disk postgres: file offset 0x4a9000 = e8 3b 61 fe ff (a real
+   `call`), file 0x4af000 = 03 83 c0 01 (real code).  The child holds ZEROS where
+   the binary holds code.  The correct pages match the disk byte-for-byte.
+
+6. Direct capture of the fatal fault (hbreak on mmu::vm_fault, condition in the
+   KVM stub on the faulting addr range — this WORKS under KVM, unlike TCG):
+     TEXTFAULT addr=0x1000004a9000
+       #3 0x00001000004a9000   <-- faulting instruction pointer IS the .text page
+       #4 0x000010000041c2e0   <-- caller = CheckpointerMain  => this is the CHILD
+       ef=0x4000bfe05088       <-- child exception stack (parent faults use
+                                    ef=0x400009290088)
+   i.e. the child tried to FETCH-EXECUTE at 0x4a9000, the PTE was absent, the
+   page fault handler ran, found the child's vma for that VA, and populated a
+   fresh zero page.  The child then executes zeros -> runs off into 0x4b0000.
+
+7. Why a zero page and not the file bytes — the actual defect:
+   PG's PT_LOAD segments (incl. .text) are FILE-BACKED.  ELF loader path:
+     core/elf.cc:423  mmu::map_file(_base+vstart, filesz, mmap_fixed, perm, _f, off)
+     core/mmu.cc:1981 f->mmap(range, flags|mmap_file, perm, off)  -> file_vma
+     fs/vfs/vfs_fops.cc:213 default_file_mmap -> new file_vma(...map_file_page_read)
+   So in the PARENT, the .text vma is a file_vma; a fault there runs
+   file_vma::fault -> reads the file -> correct code.  (Verified live: a parent
+   .text fault at 0x4b0e20 dispatched to mmu::file_vma::fault.)
+   In the CHILD, clone_address_space rebuilds the vma list from a snapshot that
+   only records {start,end,perm,flags} and news up an anon_vma for EACH entry:
+     core/mmu.cc:495   struct vma_snap { uintptr_t start, end; unsigned perm, flags; };
+     core/mmu.cc:593   snap.push_back({v.start(), v.end(), v.perm(), v.flags()});
+     core/mmu.cc:611   for (auto &s : snap) {
+     core/mmu.cc:612       auto *nv = new anon_vma(addr_range(s.start, s.end), s.perm, s.flags);
+   The snapshot DROPS the dynamic type (file_vma -> anon_vma) and the file_vma's
+   fileref + file offset + page_allocator (map_file_page_read).  Even though
+   s.flags still carries the mmap_file bit, anon_vma has no file to read and
+   uses the base vma::fault -> populate_vma with page_allocator_init -> a ZERO
+   page.  That is the "corrupting store": the kernel's own fault handler
+   installing a demand-zero page over an executable VA in the child.
+
+================================================================================
+WHY IT LOOKS LIKE A PREEMPTION RACE (and why single-stepping "never reproduced")
+================================================================================
+The COW page-table clone (clone_pt_level0) shares the parent's .text physical
+pages read-only into the child (correct).  So whichever .text pages the child
+touches while their PTEs are still present execute fine.  The bug only bites a
+.text page whose PTE is ABSENT in the child at the moment the child needs it —
+which happens for pages that were not present in the parent's page tables at
+fork time (still lazily file-mapped, not yet demand-faulted in the parent), or
+that get invalidated.  Which pages those are depends on timing/scheduling, so
+the exact failing VA and the exact wild landing vary run-to-run — the classic
+"race" signature.  It is not the context switch corrupting registers
+(tst-fork-preempt proved that sound); it is a structural type error in the VMA
+clone that only manifests on a demand fault, and demand faults on .text are
+timing-dependent.  Under TCG single-step the prior investigator likely never
+hit an absent-.text-page demand fault in the child before other divergence.
+
+================================================================================
+SCOPED FIX DIRECTION (for the fork/mmu owner — I did NOT implement it)
+================================================================================
+Fix is in clone_address_space's child-vma rebuild (core/mmu.cc ~495/593/611):
+preserve each parent vma's TYPE and, for file_vma, its fileref + offset +
+page-allocator, instead of collapsing everything to anon_vma.  Options:
+
+  (A) Preferred: give vma a virtual clone_for_child() (or extend the existing
+      f->mmap / default_file_mmap path) so file_vma clones as a file_vma bound
+      to the same fileref/offset (new map_file_page_read(file, offset)), and
+      anon_vma clones as anon_vma.  Widen vma_snap to carry enough to rebuild:
+      for a file_vma, the fileref (bump its refcount for the child) + f_offset;
+      for anon, nothing extra.  Then in the rebuild loop dispatch on type.
+      Note: the fileref must be ref-held for the child's lifetime and released on
+      destroy_address_space (teardown already frees child vmas).
+
+  (B) Minimal: in the rebuild loop, if (v.flags() & mmap_file) and the source
+      vma is a file_vma, reconstruct via the file's mmap() (the same call
+      map_file uses) at the same range/perm/offset; else new anon_vma as today.
+      This reuses default_file_mmap/map_file_page_read verbatim.
+
+  Watch-outs while fixing:
+   - Do the fileref refcount bump + any allocation OUTSIDE the vmas_mutex write
+     region (the file already documents the malloc-during-fork deadlock; the
+     snapshot/rebuild split exists precisely for that — keep new file_vma
+     construction in the post-lock rebuild loop, as anon_vma is today).
+   - Preserve perms EXACTLY (the .text vma is perm_read|perm_exec, no write); the
+     child file_vma must keep perm_exec so access_fault() allows the insn fetch.
+   - This is orthogonal to the W-mmap AS-threading (7c217c854) and to the
+     signal-waiters heap fix (99a21295b); it lives entirely in the fork clone.
+   - Gate under CONF_fork (clone_address_space is already CONF_fork-only).
+
+  A one-file regression test that would have caught this: fork a child, then in
+  the child call a function on a .text page that the PARENT never touched before
+  fork (so it is only lazily file-mapped) and verify it runs (not zeros).  The
+  existing tst-fork* tests all touch small, already-resident code, so they miss
+  it; PG hits it because it forks early and the checkpointer runs a large,
+  mostly-cold code path (InitAuxiliaryProcess/InitLWLockAccess/BackendInitialize
+  region) whose .text pages were never demand-faulted in the postmaster.
+
+================================================================================
+STATUS / HONESTY
+================================================================================
+PG still does NOT reach "ready to accept connections"; NO psql rows served.
+This report is DIAGNOSTIC only — no code changed/committed on the shared branch.
+The wild branch is fully root-caused: file-backed .text -> anon_vma in the fork
+child -> demand-zero over executable pages -> wild rip.  Distinct from W-mmap.
+
+REPRO of the evidence (KVM + gdb):
+  # build (own worktree, mmap fix applied):
+  cd /b/.local/worktrees/wbranch-wt
+  git checkout 7c217c854 -- core/mmu.cc include/osv/mmu.hh   # W-mmap fix
+  CONF_fork=y ./scripts/build -j$(nproc) conf_fork=1 fs=ramfs image=pg18-fork
+  # run paused under KVM with gdbstub:
+  qemu-system-x86_64 -enable-kvm -cpu host -m 4G -smp 1 -nographic \
+    -kernel build/last/loader.elf \
+    -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+    -drive file=build/last/usr.img,if=virtio,cache=none \
+    -netdev user,id=un0,hostfwd=tcp::15432-:5432 -device virtio-net-pci,netdev=un0 \
+    -s -S
+  # in gdb (build/last/loader.elf), target remote :1234, then:
+  hbreak *0x1000004b0000        # catch the wild branch
+  continue
+  monitor gva2gpa 0x1000004a9000   # -> a >4GB anon GPA (zeros)  = the bug
+  monitor gva2gpa 0x1000004b0000   # -> a ~147MB COW GPA (real code)
+  # and to catch the fatal child fault directly:
+  hbreak mmu::vm_fault if $rdi >= 0x100000100000 && $rdi < 0x100000640000
+  # (KVM evaluates the range condition in-stub; the last hit before crash is the
+  #  child fetch-fault on a .text page, caller 0x41c2e0 = CheckpointerMain)
+
+Diagnostic gdb scripts left in /tmp: wbranch-inspect.gdb, wbranch-deep.gdb,
+wbranch-pte.gdb, wbranch-phys.gdb, wbranch-alltext.gdb, wbranch-final.gdb,
+launch helper /tmp/qstart.sh (+ /tmp/launch-qemu.sh).
+================================================================================

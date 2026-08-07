@@ -1,0 +1,111 @@
+=== APPLES-TO-APPLES A/B on REAL KVM (OSv+PG18 vs Linux+PG18, same bare-metal host) ===
+=== agent re-run: fix the 3 TCG-cut caveats. Date 2026-08-03. ===
+
+BOXES (both TERMINATED + all EBS deleted at end):
+  DB host  i-0b4fc70a1d5d310e6  osv-abkvm-db   c5n.metal   (72 vCPU x86-64 Intel Xeon 8124M @3.0GHz, 188G) us-east-2/2b  gp3 400G root (deleted)
+  Driver   i-0659ad8382ac2f083  osv-abkvm-drv  m5d.xlarge  (4 vCPU) us-east-2/2b  gp3 60G root (deleted)
+
+*** KVM CONFIRMED: YES ***  (the #1 fix vs the prior TCG cut)
+  /dev/kvm present (crw-rw-rw- root kvm), VT-x, 72 vCPU. qemu 8.2.9 in a fedora container with
+  --device /dev/kvm --privileged --network host. Boots: OSv "Booted up in ~430 ms" (TCG would be seconds).
+  qemu launched with `-machine pc -accel kvm -cpu host`. Verified KVM engaged (no silent TCG fallback):
+  the zfs_builder image-assembly VM AND the guest boots both ran under -enable-kvm.
+
+WHY c5n.metal not m5d.metal: the On-Demand Standard (A,C,D,H,I,M,R,T,Z) vCPU limit is LIVE-ENFORCED
+  at ~96 despite Service Quotas REPORTING 192 (verified empirically: 18 vCPU already locked by two
+  pre-existing untouchable boxes + 64 = 82 total LAUNCHES; 18+80=98 and 18+96=114 both fail
+  VcpuLimitExceeded; dry-run misleadingly passes). m5d.metal=96 vCPU needs headroom the enforced
+  ceiling won't give while the 18 vCPU are locked. c5n.metal (72 vCPU, Intel Nitro bare metal) is the
+  LARGEST x86-64 .metal that fits (18+72=90 <= ~96) AND exposes /dev/kvm for nested KVM. Parity is
+  preserved: BOTH guests run on the SAME c5n.metal host, identical qemu cmdline except OS. The prior
+  agent's "m5d.metal launch succeeded" was under 0 other running instances (96<=96); it does not now.
+
+MATCHED CONFIG (identical A and B):
+  -smp 8, guest RAM 8G, -machine pc, -accel kvm, -cpu host, virtio-net-pci over tap0+vhost on br0,
+  virtio-blk-pci data disk (80G raw) on the SAME NVMe/EBS scratch, huge_pages=off.
+  PG18.4 both sides. shared_buffers=1GB, effective_cache_size=4GB, work_mem=16MB,
+  maintenance_work_mem=256MB, max_connections=256, max_wal_size=8GB, min_wal_size=2GB,
+  synchronous_commit=on, shared_preload_libraries=plpgsql, C locale (builtin), UTF8.
+  Storage: OSv=OpenZFS (ashift=12, lz4, atime=off, recordsize=8k). Linux=ext4 (see caveat: ZFS-on-Linux
+  via DKMS would not build a loadable module against the cloud kernel in-budget -> fell back to ext4,
+  the task-sanctioned fallback. ZFS-vs-ZFS remains the target but is moot until OSv PG serves; see below).
+
+TOPOLOGY (real NIC, not slirp - carried over from the validated harness):
+  Linux bridge br0 (host 192.168.100.1/24) + tap0 (vhost=on) enslaved to br0. Guest static 192.168.100.2/24.
+  iptables DNAT host-ENI enp126s0(172.31.30.29):5432 -> 192.168.100.2:5432, MASQUERADE guest egress.
+  Driver hits DB-host private 172.31.30.29:5432 (intra-SG) -> DNAT -> guest. inet_server_addr()=192.168.100.2
+  on the Linux side proves a REAL virtio-net path (NOT loopback).
+
+------------------------------------------------------------------------------------------
+THE HONEST RESULT: OSv PostgreSQL DOES NOT SERVE QUERIES on real KVM at fork-stack tip #1458 (6dd041b).
+------------------------------------------------------------------------------------------
+OSv boots cleanly under KVM (~430ms), imports+mounts the OpenZFS pgdata pool, the postmaster starts,
+loads plpgsql, registers the "logical replication launcher" background worker -- then HANGS at its FIRST
+fork() and NEVER reaches "ready to accept connections". Port 5432 never opens. Reproduced under BOTH
+-accel kvm AND -accel tcg,thread=multi, at -smp 1 and -smp 8, with io_method=sync, autovacuum=off,
+min workers, shared_buffers 128MB..1GB, with and without plpgsql preload. pg_controldata reads the data
+dir fine (binary+datadir are compatible), so it is specifically the postmaster fork path.
+
+This is the DOCUMENTED OSv fork-per-backend wall (ROADMAP lines 830-889, pg18-osv-result.txt):
+OSv is a single-address-space unikernel; fork() gives the child a PRIVATE STACK but a SHARED heap /
+globals / dynamic-linker state. Stock multi-process PostgreSQL forks a backend per connection expecting
+COW-private address space; on OSv the first forked child hangs (shared-TLS/linker-lock, historically the
+getenv() hang). This is a known-open OSv research problem (the reason a multithreaded PG19 port exists),
+NOT a config or a KVM issue, and NOT fixable in this session. The fork-stack branch integ/pg-fork-zfs
+@6dd041b advanced the fork mechanism (eager bind-now, fork-coherent PLT/GOT) but still does not carry
+a multi-backend postmaster.
+
+RECONCILING WITH THE PRIOR "TCG cut showed OSv tps": that RESULT-ab.txt reported OSv RW/RO tps, but this
+re-run shows the freshly-built #1458-tip image does NOT serve under TCG either. Either the prior image
+was a different/luckier build state, or its numbers came from a path this tip has regressed. Under
+apples-to-apples matched conditions with the current tip, OSv+PG does not reach ready-to-accept.
+
+------------------------------------------------------------------------------------------
+PARITY-VALID pgbench -- LINUX BASELINE (the only side that serves). scale=100, 30s/level, 0 failed:
+  From driver, IDENTICAL invocation. shared_buffers=1GB confirmed, inet_server_addr=192.168.100.2.
+                    c1      c8      c16     c32     c64
+  Linux RW (tps)    392.7   2408    4439    7679    10957
+  Linux RW lat(ms)  2.55    3.32    3.60    4.16    5.83
+  Linux RO (tps)    6022    44303   62949   95106   94272
+  Linux RO lat(ms)  0.166   0.180   0.253   0.335   0.676
+  (RW=TPC-B default, RO=-S select-only. KVM numbers ~4-19x the prior TCG cut -> confirms KVM is engaged.)
+
+  OSv RW/RO: N/A -- server never reached ready-to-accept (fork wall). No pgbench possible OSv-side.
+
+HammerDB TPROC-C: NOT reached. Requires a serving PG on BOTH sides; only Linux serves. Correctly not
+  attempted OSv-side (no server to drive), and a Linux-only NOPM would not be a parity number.
+
+------------------------------------------------------------------------------------------
+THE HONEST GAP (where OSv trails, mapped to the known lever):
+  OSv trails by INFINITY at every cell (RW and RO, c1..c64): it cannot serve a single query, because the
+  gating blocker is upstream of throughput -- it is CORRECTNESS of fork-per-backend, M1-gap item #2
+  (the two fork faults) elevated to a total block on the multi-backend postmaster in single-address-space.
+  The concurrency-ceiling / write-path / tuning levers (gap items #3/#4/#5) are all DOWNSTREAM and
+  unmeasurable until PG serves. The single lever that matters here: a working private-per-child address
+  space for fork (COW page-table contexts), OR the multithreaded PG port (apps/postgres, PG19). Until one
+  of those lands, there is no OSv-vs-Linux PG number to compare -- the honest parity ratio is undefined.
+
+NEW OSv FAULT UNDER KVM: not a crash/backtrace -- a HANG (postmaster first-fork never returns; no panic,
+  no abort). Last log line: DEBUG "loaded library plpgsql" then "registering background worker logical
+  replication launcher", then silence. Distinct from the M1-gap reaper NULL-deref (that was under sustained
+  churn); this is the very first fork at startup, under both KVM and TCG.
+
+HARNESS DELTAS (new KVM scripts saved to the box /mnt/nvme/harness/ and here):
+  00-net-bridge.sh   : HOST_ENI enp126s0, HOST_IP 172.31.30.29 (was ens5/172.31.5.69), tap owner root.
+  10k-boot-osv.sh    : NEW. -accel kvm -cpu host (was tcg,thread=multi/-cpu max); --rootfs=zfs (the
+                       #1458 image is fs=zfs, app on the ZFS root, not ramfs); import+mount pgdata pool.
+  11k-boot-linux.sh  : NEW. -accel kvm -cpu host; same qemu cmdline as OSv except qcow2 root + seed.iso.
+  20k-osv-mkpool-initdb.sh / 22k-osv-seed.sh : NEW KVM variants. initdb-in-OSv hits popen() stub ->
+                       used the cpiod seed path (host-initdb PG18.4 C-locale cluster -> cpiod-stream into
+                       the OSv OpenZFS pgdata pool). Built cpiod.so into the image (module.py mapping).
+  21-pg-config.env   : shared_buffers=1GB (was 256MB OSv / 1GB Linux mismatch) -> now matched both sides.
+  linux-user-data    : shared_buffers 1GB (was 8GB) -> matched; ZFS attempted then ext4 fallback.
+  OSv image built fresh on the box: git clone gburd/osv-1 @ integ/pg-fork-zfs (6dd041b) + local
+    apps/pg18-fork/module.py + .local/pg18/install (musl PG18.4 PIE), scripts/build image=zfs-tools,pg18-fork
+    fs=zfs conf_zfs=openzfs conf_fork=1. Build gotcha: musl symlink must -> musl_1.2.1 (not musl_0.9.12);
+    /b/.local symlink so the module's /b/.local/pg18/install path resolves; zfs_builder needs /dev/kvm in
+    the build container or it crawls under TCG.
+
+SECURITY AUDIT: SG ingress = SSH from 73.4.58.126/32 + intra-SG only. NO 0.0.0.0/0 ingress. Only default
+  0.0.0.0/0 EGRESS (normal). No public bucket/AMI/snapshot. Images moved github->box (public fork clone) +
+  local scp; no public artifacts created. Both boxes + all EBS terminated. Untouched: osv-prmaint4, solnix-beef-boot.

@@ -1,0 +1,267 @@
+================================================================================
+[W-sustained] PostgreSQL-on-OSv: the FORK+REAP SUSTAINED-SERVING wall --
+ROOT-CAUSED (the per-app application_runtime object + its shared_ptr control
+block landed in the COW fork arena, so after fork/reap cycles the fork()'ing
+thread read a DIVERGENT arena copy whose `app` reference was garbage ->
+get_current()->get_shared() GP-faulted in the new-thread ctor) + FIXED, plus
+one further wall it uncovered (virtio-net TX net_req in the arena).  ****  STOCK
+PostgreSQL 18.4 NOW SERVES SUSTAINED CONNECTIONS ON OSv: 100/100 sequential,
+40/40 concurrent, 12/12 create/insert/select rounds -- real output pasted.  ****
+================================================================================
+Date:    2026-07-25   Host: floki (local, KVM)   Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena  (mounted /b)
+Branch:   integ/pg-fork-arena   HEAD at start: e35d04172
+Author:   Greg Burd
+Method:   boot image=pg18-fork (conf_fork=1, fs=ramfs) under KVM -m 4G -smp 2,
+          fire psql from the container to the guest hostfwd :5432, catch the
+          fork/reap wall (GP fault -> "exception nested too deeply"), attach gdb
+          to the qemu -s stub, break on general_protection, inspect the corrupt
+          _app_runtime -> route the offending fork-shared structure onto the
+          identity kernel heap -> re-measure.  New regression test
+          tst-fork-serial (sustained overlapping fork/work/exit/reap loop).
+
+================================================================================
+VERDICT (one line)
+================================================================================
+The sustained-serving wall is candidate (c) as predicted: the application_
+runtime shared_ptr (object + control block) lived in COW/arena memory (VA
+0x3000..) exactly like the DSM registry nodes did.  gdb proved it directly.
+The fix is the SAME proven pattern -- force the fork-shared kernel structure
+onto the identity kernel heap (fork_arena::kernel_heap_scope) so it is byte-
+identical in every address space, never a COW-private arena copy.  A second
+structure (virtio-net's TX net_req, alloc'd in a backend AS but free'd cross-AS
+by txq::gc) needed the same treatment; with both, PG serves sustained
+connections.  A THIRD, DISTINCT wall (shared-buffer/ramfs write coherence under
+a heavy pgbench -i bulk load) is precisely symbolized but NOT fixed here -- it
+is a storage-coherence wall, separate from the fork/reap lifecycle this report
+closes, and it does NOT block sustained connection serving.
+
+================================================================================
+THE gdb FINDING (which cause -- proven, not inferred)
+================================================================================
+Reproduction: boot pg18-fork, then sequential psql in a loop.  PG served the
+1st..6th connection with real rows, then the 7th tripped:
+
+  general protection fault  ...  "exception nested too deeply"
+
+gdb (break general_protection on the qemu -s stub, fire psql to trip it):
+
+  #2  std::__shared_count<..>::__shared_count (__r=..., this=0x200000200018)
+  #3  std::__shared_ptr<osv::application,..>::__shared_ptr (this=0x200000200010)
+  #4  std::shared_ptr<osv::application>::shared_ptr
+        (__r=<error reading variable: Cannot access memory at address
+              0x202000ad0c00218>, this=0x200000200010)
+  #5  std::enable_shared_from_this<osv::application>::shared_from_this
+        (this=0x202000ad0c00210)
+  #6  osv::application::get_shared (this=0x202000ad0c00210) at app.hh:214
+  #7  osv::application::get_current () at core/app.cc:103
+  #8  sched::thread::thread (...) at core/sched.cc:1156   ; _app_runtime = app->runtime()
+  #9  sched::thread::make<fork_thread(..)::<lambda()>,..>
+  #10 fork_thread (..) at arch/x64/fork.cc:72
+  #11 fork () at libc/process/fork.cc:482
+
+Inspecting the fork()'ing thread's _app_runtime at the fault:
+
+  (gdb) p sched::thread::current()->_app_runtime._M_ptr
+    $ = 0x3000000004a0                       <- IN THE FORK ARENA (arena_base 0x300000000000)
+  (gdb) p *sched::thread::current()->_app_runtime._M_ptr
+    $ = {app = @0x202000ae4bc0210}           <- `app` reference is WILD GARBAGE
+  (gdb) p &(runtime._M_ptr->app)
+    $ = (osv::application *) 0x202000ae4bc0210
+  (gdb) p/x _app_runtime._M_refcount._M_pi
+    $ = 0x3000000004e0                        <- control block ALSO in the arena
+
+Two runs showed the `app` reference as 0x202000ad0c00210 and 0x202000ae4bc0210 --
+it VARIED run-to-run: the signature of a COW-divergent read of the SAME arena VA,
+not a fixed dangling pointer.
+
+MECHANISM (candidate c, confirmed): PostgreSQL runs as ONE osv::application (the
+postmaster, launched from the kernel loader path).  Its application_runtime is
+created once in the application ctor: `_runtime(new application_runtime(*this))`.
+That `new` (and the shared_ptr control block) was executed on an APP thread, so
+std_malloc routed it into the COW fork arena (VA 0x3000..).  Every forked
+backend thread's _app_runtime points at that arena object (thread ctor:
+`_app_runtime = app->runtime()`).  clone_address_space() COW-clones the whole
+arena per fork.  Across many fork/reap cycles (with overlapping live backends)
+the arena page backing the runtime diverges, so the fork()'ing thread eventually
+reads a runtime copy whose `app` reference field holds garbage.  get_current()
+then does runtime->app.get_shared() -> enable_shared_from_this::shared_from_this
+reads _M_weak_this at (garbage application*)+8 -> inaccessible -> GP fault, which
+KVM escalates to "exception nested too deeply".
+
+This is exactly the rule from the DSM milestone (pg-dsm-fix.txt): any kernel
+structure a forked child / RX-IRQ thread / reaper reads must live on the
+identity kernel heap, never the COW fork arena.
+
+================================================================================
+THE FIXES (minimal, correct, #if CONF_fork; non-fork byte-identical)
+================================================================================
+1. core/app.cc -- THE SUSTAINED-SERVING FIX.
+   Allocate the application_runtime AND its shared_ptr control block on the
+   identity kernel heap via make_shared under fork_arena::kernel_heap_scope
+   (make_shared co-allocates object + control block in ONE block, so one scope
+   covers both).  The ctor's member-init list calls a small helper
+   make_identity_heap_runtime(*this) under CONF_fork; the non-fork build keeps
+   the exact original `_runtime(new application_runtime(*this))`.
+
+2. drivers/virtio-net.cc -- THE NET-TX net_req FIX (uncovered after fix 1).
+   Once PG served past ~50 connections, a NEW wall appeared:
+     Assertion failed: h->magic == chunk_magic (core/fork_arena.cc recover:257)
+       fork_arena::free(void*)+72
+       virtio::net::txq::gc()+88            ; delete req
+       virtio::net::txq::try_xmit_one_locked
+       osv::xmitter<..>::xmit(mbuf*)
+       ether_output / ip_output
+   net::txq::xmit_prep() does `net_req* req = new net_req(m_head)` on the TX
+   submit path -- run by an app-thread backend sending its query response, so
+   the net_req landed in the arena.  txq::gc() later delete's it from a
+   DIFFERENT thread/AS as the host completes the send; free()-by-address then
+   read a divergent/garbage arena chunk header (magic mismatch) in the reaping
+   AS -> assert.  Fix: wrap the `new net_req` in kernel_heap_scope so it lands
+   on the identity heap; delete (which dispatches by address) then frees it
+   correctly from any AS.  Same rule as mbufs / thread stacks / the app runtime.
+
+Both changes vanish in the conf_fork=0 build (the guards compile away; the
+app.cc #else restores the byte-identical original).
+
+================================================================================
+THE REGRESSION TEST -- tests/tst-fork-serial.cc (author Greg Burd)
+================================================================================
+Registered in modules/tests/Makefile.  Mirrors PG's postmaster: keep a rolling
+window of overlapping live children while continuously fork()ing new backends
+and reaping the oldest, 30 iterations.  Each child does a little real work
+(heap alloc+write, a .data COW write, a getpid syscall, heap churn) and exit()s
+with a distinct code the parent waitpid-verifies; the postmaster churns its own
+arena heap between forks.  Every new-thread ctor runs application::get_current()
+-- the faulting path.
+
+HONEST NOTE (in the test's header too): the DEFINITIVE reproducer of the GP
+fault is PostgreSQL itself (~6-7 sequential connections; the gdb backtrace
+above).  This synthetic loop does NOT by itself corrupt the arena runtime,
+because the arena bump allocator hands application_runtime a stable low VA that
+is never recycled, and COW divergence only touches pages a process actually
+WRITES -- and nothing in the synthetic loop writes the runtime's page.  The PG
+corruption additionally involves the network/DSM/signal write patterns a real
+postmaster exercises across its address space.  tst-fork-serial is therefore
+the fast, PG-free OS-level GUARD for the fixed code path (sustained overlapping
+fork/work/exit/reap with get_current() on every new-thread ctor); it must stay
+green.  It PASSES with the fix; it guards against any change that reintroduces a
+get_current() fault on the common fork path.
+
+  KVM -smp 2, tests image, final:
+    PASS: 30/30 overlapping fork/work/exit/reap iterations succeeded -- no
+          corrupt _app_runtime GP fault (sustained-serving wall)
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+CONF_fork=1, fs=rofs, image=tests, KVM -smp 2:
+  tst-fork-serial           PASS: 30/30 (NEW)
+  tst-fork                  done: 0 failures
+  tst-fork-cow              PASS (all)
+  tst-fork-deep             done: 0 failures
+  tst-fork-preempt          PASS (all)
+  tst-fork-arena-freelist   done: 0 failures
+  tst-fork-irq-cow          PASS (all)
+  tst-fork-conn-socket      PASS (inherited connection socket)
+  tst-fork-socket           PASS (child close only dropped a ref)
+  tst-fork-posix-shm        PASS (attach-by-name + MAP_SHARED coherence)
+  tst-pgfork                done: 0 failures
+  tst-execve                done: 0 failures
+
+Non-fork sanity (conf_fork=1 image; exercises the virtio-net TX path I touched):
+  tst-bsd-tcp1              *** No errors detected
+
+conf_fork=0 (all new code is #if CONF_fork; app.cc #else restores original):
+  ./scripts/build conf_fork=0 fs=rofs image=tests -> CONF_fork==0 header,
+  loader.elf links, changed .o (app.o, virtio-net.o) compile.  (Switching
+  conf_fork needs clearing build/*/.config + gen/include/osv/kernel_config_
+  fork.h so kconfig regenerates, per prior reports.)
+
+PG image rebuilt: ./scripts/build conf_fork=1 fs=ramfs image=pg18-fork -> ok.
+
+================================================================================
+****  THE PAYOFF -- SUSTAINED SERVING (real output, KVM -m 4G -smp 2)  ****
+================================================================================
+Before the fix: PG served 6 sequential connections, the 7th tripped the GP
+fault ("exception nested too deeply").  After the fix (fixed pg18-fork image):
+
+  --- Part 1: 100 SEQUENTIAL connections (select i) ---
+  >>> SEQUENTIAL RESULT: 100/100 returned the correct value
+  >>> GUEST HEALTHY
+
+  --- Part 2: 5 CONCURRENT BATCHES x 8 backends = 40 concurrent ---
+  batch 1: 8/8 backends correct -> 1002 1004 1001 1003 1005 1008 1007 1006
+  batch 2: 8/8 backends correct -> 2004 2001 2007 2002 2005 2003 2006 2008
+  batch 3: 8/8 backends correct -> 3004 3006 3001 3005 3003 3008 3007 3002
+  batch 4: 8/8 backends correct -> 4003 4001 4006 4005 4008 4002 4007 4004
+  batch 5: 8/8 backends correct -> 5003 5004 5008 5002 5001 5005 5007 5006
+  >>> CONCURRENT RESULT: 40/40 correct
+
+  --- Part 3: 12 rounds create/insert/select DML (md5 + generate_series) ---
+  >>> DML RESULT: 12/12 rounds correct
+  >>> GUEST HEALTHY
+
+(An earlier run on the same fixed image served 160 sequential + 24 concurrent +
+10 DML rounds before I switched to this cleaner scripted demo -- same result.)
+
+THIS CLOSES THE FORK+REAP SUSTAINED-SERVING WALL: stock PostgreSQL 18.4 (musl
+PIE) now serves many sequential connections, overlapping concurrent backends,
+and repeated real DML on OSv -- the gate to a HammerDB load run.
+
+================================================================================
+NEXT WALL (distinct, precisely symbolized, NOT fixed here -- honest)
+================================================================================
+HEAVY BULK-LOAD / STORAGE-COHERENCE, under `pgbench -i` (scale 5), NOT a
+fork/reap fault:
+
+  (a) parallel index build reported "invalid page in block N of relation ...";
+      a parallel worker (PID 404) exited code 1.  (Parallel workers share
+      buffers via DSM; a buffer/page-coherence issue under the parallel build.)
+  (b) then a checkpoint / large ramfs write faulted:
+      page fault outside application, addr: 0x0000200014359000
+      RIP: memcpy_repmov_ssse3+74
+        RDI(dest)=0x200014359040 (an app-slot MAP_SHARED/mmap region, UNMAPPED
+        in the writing backend's AS), RSI(src)=0x30001ade4000 (arena)
+        pwrite64 -> sys_write -> vfs_file::write -> (ramfs write) -> memcpy
+      i.e. a ramfs write memcpy'd into a shared-buffer mmap region that is not
+      present in the current backend's page tables.
+
+This is a STORAGE / shared-buffer mmap coherence wall (a MAP_SHARED region not
+mapped in a forked backend's AS during a large write / checkpoint), separate
+from the fork/reap lifecycle this report closes.  It does NOT block sustained
+CONNECTION serving (100 sequential + 40 concurrent + 12 DML rounds all pass);
+it surfaces only under the heavy pgbench -i bulk load + parallel workers +
+checkpoint.  It is the next investigation for a full HammerDB run.
+
+Do NOT read this as "PG is production-ready on OSv": pgbench -i heavy bulk load
+trips the storage-coherence wall.  But the milestone asked for here -- SUSTAINED
+serving of many sequential + concurrent connections -- IS achieved, with the
+verbatim output above.
+
+================================================================================
+FILES CHANGED (to be committed on integ/pg-fork-arena, author Greg Burd)
+================================================================================
+  core/app.cc                 application_runtime + shared_ptr control block
+                              -> identity heap (make_identity_heap_runtime under
+                              kernel_heap_scope).  THE SUSTAINED-SERVING FIX.
+                              #if CONF_fork; #else keeps the original.
+  drivers/virtio-net.cc        net::txq::xmit_prep's `new net_req` -> identity
+                              heap (net-TX net_req cross-AS free fix). #if CONF_fork.
+  tests/tst-fork-serial.cc     new regression test (author Greg Burd).
+  modules/tests/Makefile       register tst-fork-serial.so.
+
+SHIPPING-PR RELEVANCE: PR #1455 (fork COW / cross-AS coherence).  Both fixes are
+the SAME rule as the shipped struct-file / signal-table / thread-object / arena-
+freelist / DSM-registry / mbuf / thread-stack fixes: any kernel structure a
+forked child, an RX/IRQ/GC thread, or the reaper reads must live on the identity
+kernel heap, never the COW fork arena.  The per-application application_runtime
+(dereferenced by application::get_current() in EVERY new-thread ctor, i.e. on
+every fork) and the virtio-net TX net_req (alloc'd in a backend AS, free'd by
+txq::gc in another) are two more instances -- exactly what stock PostgreSQL's
+postmaster<->backend fork/reap model exercises under sustained load.
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+arena-dev: left UP, image=pg18-fork rebuilt with the fix, PG re-verified serving
+100 sequential + 40 concurrent + 12 DML rounds.  On floki (KVM, no EC2).
+================================================================================

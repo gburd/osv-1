@@ -1,0 +1,55 @@
+LOST-WAKEUP / STARTUP WALL investigation -- ROOT CAUSE #A (mount-time ZIL-replay crash)
+Author: Greg Burd
+Box: osv-cor-a (ec2-user@3.16.46.123), container osv-build, /b @ branch corruptor-fix @ 14667a8d
+Date: 2026-07-29
+
+================================================================================
+FINDING A: intermittent ABORT during zfs_mount (ZIL replay of a TRUNCATE record)
+================================================================================
+On the combined fork+ZFS image, booting `/zpool.so import -f -N pgdata ;
+/zfs.so mount pgdata ; postgres -D /data` aborts on ~2/3 of boots (single-file
+8k lz4 pool, -smp 8, 32G, KVM) with a page fault in handle_mmap_fault during
+mount -- BEFORE postgres even starts (fault is in run_main / AS0, no fork yet):
+
+  [ZFS] Pool 'pgdata' is up-to-date at version 5000
+  Aborted
+  #.. osv::handle_mmap_fault  <- mmu::vm_fault <- page_fault
+  #.. zfs_space              (module/os/osv/zfs/zfs_vnops_os.c:674)
+  #.. zfs_replay_truncate    (module/zfs/zfs_replay.c:950)
+  #.. zil_replay_log_record  (module/zfs/zil.c:4762)
+  #.. zil_parse / zil_replay (module/zfs/zil.c)
+  #.. zfsvfs_setup / zfs_domount / zfs_osv_mount (module/os/osv/zfs/zfs_vfsops.c)
+  #.. sys_mount <- mount <- zfs_mount_at <- zfs_mount <- run_main
+
+ROOT CAUSE (unambiguous, from source):
+  zfs_replay_truncate() loads the znode via zfs_zget(). On OSv, zfs_znode_alloc()
+  (module/os/osv/zfs/zfs_znode_os.c) kmem_zalloc's the znode and sets up the SA
+  handle + locks but NEVER attaches an OSv vnode -- so zp->z_vnode == NULL and
+  ZTOV(zp) == NULL for any znode loaded outside the VFS vget() path (exactly the
+  ZIL-replay-at-mount case). This is a KNOWN OSv-ZFS invariant, already guarded
+  elsewhere (zfs_dir.c:480 uses S_ISDIR(z_mode) instead of ZTOV(zp)->v_type,
+  with a comment naming the z_vnode==NULL case).
+
+  zfs_space -> zfs_freesp -> zfs_trunc / zfs_free_range / zfs_extend then call
+    vnode_pager_setsize(ZTOV(zp), ...)
+  which is `static inline { vp->v_size = size; }` (include/osv/vnode.h:247).
+  With ZTOV(zp)==NULL this writes NULL->v_size (offset ~56) -> wild write /
+  page fault -> Aborted. INTERMITTENT because it only fires when the ZIL has an
+  un-synced TRUNCATE record to replay at import (timing of the seed's export).
+
+  This path is reachable because patch 0029 (commit 520a29ca) implemented
+  zfs_space for ZIL replay of TX_TRUNCATE (previously an ENOTSUP stub that just
+  dropped the record); implementing it exposed the NULL-vnode deref.
+
+THE FIX (module/os/osv/zfs/zfs_znode_os.c, 3 call sites in zfs_extend /
+zfs_free_range / zfs_trunc): guard each vnode_pager_setsize() with
+  if (ZTOV(zp) != NULL) ...
+matching the existing OSv-ZFS z_vnode==NULL guard pattern. vnode_pager_setsize
+only updates the page-cache size hint; a replay znode has no vnode/page cache to
+size, and z_size + the SA update are already authoritative. Not fork-gated (this
+is a pure ZFS-on-OSv mount bug). Classification: [#1423 / OpenZFS].
+
+STATUS: fix applied, rebuilding + qualifying (boot-loop for 0 mount aborts).
+This mount crash is UPSTREAM of the bgworker startup lost-wakeup: it must be
+cleared first to reliably reach the bgworker/serve stage. The bgworker
+lost-wakeup (SetLatch/self-pipe cross-AS handoff) is the next target.

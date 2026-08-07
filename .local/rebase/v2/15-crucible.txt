@@ -1,0 +1,62 @@
+drivers: add Crucible distributed block storage driver
+
+Add an OSv-native Crucible upstairs client: a network block device
+driver that speaks the Oxide Computer Crucible V13 protocol to
+three independent downstairs replicas, providing crash-consistent
+block storage with 2-of-3 read quorum and 2-of-3 write quorum
+(3-of-3 for snapshots).
+
+Architecture:
+  - drivers/crucible-client.{cc,hh}: UpsairsClient orchestrates
+    handshake (HereIAm / YesItsMe / PromoteToActive / RegionInfo /
+    ExtentVersionsPlease), per-job request lifecycle, hash-verified
+    reads, and concurrent writes.
+  - drivers/crucible-connection.{cc,hh}: per-downstairs TCP socket
+    with separate send/recv mutexes; a send_exact_with_data() helper
+    that takes the send mutex across both header and data halves of
+    a Write or ReadResponse frame so concurrent ZFS TXG-sync writes
+    do not interleave on the wire.
+  - drivers/crucible-bincode.hh: minimal bincode 1.x encoder/decoder
+    matching upstream Rust serde wire layout.
+  - drivers/crucible-messages.hh, crucible-types.hh: protocol
+    structs aligned byte-for-byte with the upstream Crucible Rust
+    enum and bincode encoding.
+  - drivers/crucible-blk.{cc,hh}: OSv block-device shim, exposes
+    /dev/crucible0 to the VFS.  Validates I/O alignment and length,
+    maps requests to UpsairsClient::{read,write,flush}_sync(), and
+    threads through BIO_DISCARD as ENOTSUP (V13 has no Discard).
+  - drivers/crucible-hash.{cc,hh}: xxh3-128 helper for ReadBlockType
+    integrity verification.
+
+Integration:
+  - Multi-volume support: multiple --crucible= command lines bind
+    /dev/crucible0, /dev/crucible1, etc.
+  - Opt-in via conf/profiles/x64/crucible.mk so the driver isn't
+    pulled into the default kernel image.
+  - Boot-time CLI flags wired into loader.cc.
+  - Removed the early-prototype Rust scaffolding (osv-sys, crucible-
+    osv crates, build.rs); the driver is now pure C++.
+
+V13 protocol fixes (relative to early prototype):
+  - HereIAm carries Vec<u32> alternate_versions, not bool.
+  - YesItsMe layout is {version, repair_addr}.
+  - Result tag is u32, not u8.
+  - Write / ReadResponse / Flush layouts and Option<u32> /
+    Option<String> field encodings match upstream bincode.
+  - RegionDefinition struct order matches upstream Rust.
+
+Production logging: removed per-I/O kprintfs that would spam under
+load; only error paths and a single connection-state line per
+downstairs remain.
+
+Tests:
+  - tst-crucible-blk: direct /dev/crucible0 round-trip at multiple
+    offsets and sizes (BLKGETSIZE64, pwrite, fsync, pread).
+  - tst-crucible-zfs: end-to-end zpool_create / dataset / mount /
+    write / fsync / read / verify on a 3-replica Crucible volume
+    over the libzfs API (avoids the userspace zpool binary).
+
+Driver runs against a real 27-downstairs Crucible cluster (9
+volumes, ports 4001-4083) and a single 3-replica volume; passes all
+tests modulo a separately-tracked OSv kernel TCP issue with
+sustained 1 MiB+ transfers under the QEMU usermode network stack.

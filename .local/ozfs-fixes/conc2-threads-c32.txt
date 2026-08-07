@@ -1,0 +1,165 @@
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /home/ec2-user/osv/build/release.x64/loader.elf.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+Python Exception <class 'AttributeError'>: '_Fake' object has no attribute 'pretty_printers'
+Python Exception <class 'gdb.error'>: Error occurred in Python: '_Fake' object has no attribute 'pretty_printers'
+Error occurred in Python: Error occurred in Python: '_Fake' object has no attribute 'pretty_printers'
+sched::cpu::do_idle (this=this@entry=0x400000086040) at core/sched.cc:540
+540	        handle_incoming_wakeups();
+  id  address             name            cpu  status         vruntime  total_cpu_time location
+   1 (0x400000017040) reclaimer       cpu0 waiting     5.55762e-24           10000 condvar::wait(lockfree::mutex*, sched::timer*) at core/condvar.cc:62
+   2 (0x400100394040) kvm_wall_clock_ cpu0 waiting     9.61375e-24         1021722 std::_Function_handler<void(), kvmclock::kvmclock()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+   3 (0x4001003bb040) pagecache-wb    cpu0 waiting     3.05345e+09          121871 std::_Function_handler<void(), pagecache::pagecache_start_writeback()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+   4 (0x4001003d6040) page_pool_l2    cpu0 waiting     1.89429e-06       297813628 memory::page_pool::l2::fill_thread() at core/mempool.cc:1616
+   5 (0x4001003f9040) itimer-real     cpu1 waiting     1.11673e-15          698768 condvar::wait(lockfree::mutex*, sched::timer*) at core/condvar.cc:62
+   6 (0x400100410040) itimer-virt     cpu? unstarted             0               0 ?? at arch/x64/entry.S:160
+   7 (0x40010044b040) balancer0       cpu0 waiting     2.31425e-23         4943868 ?? at arch/x64/entry.S:161
+   8 (0x400100462040) rcu0            cpu0 waiting      1.2157e-22          114747 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+   9 (0x40010047c040) page_pool_l1_0  cpu0 waiting     1.29503e-22        13905316 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  10 (0x400100494040) percpu0         cpu0 waiting     5.47502e-23        21416817 workman::call_of_duty() at core/percpu-worker.cc:92
+  11 (0x4001004ad040) async_worker0   cpu0 waiting     2.70433e-23         1956664 async::async_worker::run() at core/async.cc:190
+  12 (0x4001004c5040) idle0           cpu0 running             inf    111389872447 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  13 (0x4001004dd040) idle1           cpu1 running             inf    114513611244 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  14 (0x400100511040) idle2           cpu2 queued              inf    142484776118 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  15 (0x400100545040) idle3           cpu3 running             inf    152974385206 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  16 (0x400100579040) idle4           cpu4 running             inf    154955664252 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  17 (0x4001005ad040) idle5           cpu5 running             inf    157029620510 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  18 (0x4001005e1040) idle6           cpu6 running             inf    157029242855 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  19 (0x400100600040) rcu1            cpu1 waiting     1.64273e-23           17526 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  20 (0x40010062d040) idle7           cpu7 running             inf    157028942626 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  21 (0x40010064d040) page_pool_l1_1  cpu1 waiting     3.71713e-15        10627424 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  22 (0x40010067b040) percpu1         cpu1 waiting     1.17426e-15       159093075 workman::call_of_duty() at core/percpu-worker.cc:92
+  23 (0x400100693040) idle8           cpu8 running             inf    157027901859 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  24 (0x40010069a040) async_worker1   cpu1 waiting     3.65403e-16         1489424 async::async_worker::run() at core/async.cc:190
+  25 (0x4001006e0040) idle9           cpu9 running             inf    156869168243 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  26 (0x400100714040) idle10          cpu10 running             inf    156870188805 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  27 (0x400100748040) idle11          cpu11 running             inf    157029176685 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  28 (0x40010074e040) rcu2            cpu2 waiting     1.36097e-23           13536 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  29 (0x400100796040) page_pool_l1_2  cpu2 waiting      5.4353e-23         3951784 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  30 (0x40010079d040) idle12          cpu12 running             inf    156970646177 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  31 (0x4001007b5040) percpu2         cpu2 waiting     1.52738e+15         5670579 workman::call_of_duty() at core/percpu-worker.cc:92
+  32 (0x4001007fb040) async_worker2   cpu2 waiting      1.0656e+15          966369 async::async_worker::run() at core/async.cc:190
+  33 (0x400100801040) idle13          cpu13 running             inf    157029018572 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  34 (0x400100847040) idle14          cpu14 running             inf    157028778611 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  35 (0x40010087b040) idle15          cpu15 running             inf    157028982803 std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  36 (0x4001008af040) rcu3            cpu3 waiting       1.339e-23           13254 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  37 (0x4001008c9040) page_pool_l1_3  cpu3 waiting     1.01798e+15          796103 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  38 (0x4001008e1040) percpu3         cpu3 waiting     2.48455e+14         1540723 workman::call_of_duty() at core/percpu-worker.cc:92
+  39 (0x4001008fa040) async_worker3   cpu3 waiting     2.22582e+14          735450 async::async_worker::run() at core/async.cc:190
+  40 (0x400100912040) rcu4            cpu4 waiting     1.34158e-23           13300 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  41 (0x40010092c040) page_pool_l1_4  cpu4 waiting     1.31878e+15         2814004 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  42 (0x400100944040) percpu4         cpu4 waiting     2.63338e+16        41250674 workman::call_of_duty() at core/percpu-worker.cc:92
+  43 (0x40010095d040) async_worker4   cpu4 waiting        0.924927          335328 async::async_worker::run() at core/async.cc:190
+  44 (0x400100975040) rcu5            cpu5 waiting     1.32349e-23           13007 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  45 (0x40010098f040) page_pool_l1_5  cpu5 waiting     1.11152e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  46 (0x4001009a7040) percpu5         cpu5 waiting     1.11152e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  47 (0x4001009c0040) async_worker5   cpu5 waiting     1.11023e-23           10000 async::async_worker::run() at core/async.cc:190
+  48 (0x4001009d8040) rcu9            cpu9 waiting     1.32349e-23           13004 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  49 (0x4001009f2040) page_pool_l1_9  cpu9 waiting      8.6871e-11           74745 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  50 (0x400100a0a040) percpu9         cpu9 waiting     9.80993e-12           83443 workman::call_of_duty() at core/percpu-worker.cc:92
+  51 (0x400100a23040) async_worker9   cpu9 waiting     4.19575e-11           49351 async::async_worker::run() at core/async.cc:190
+  52 (0x400100a3b040) rcu6            cpu6 waiting     1.34675e-23           13349 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  53 (0x400100a55040) page_pool_l1_6  cpu6 waiting     1.11152e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  54 (0x400100a6d040) percpu6         cpu6 waiting     1.11152e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  55 (0x400100a86040) async_worker6   cpu6 waiting     1.11023e-23           10000 async::async_worker::run() at core/async.cc:190
+  56 (0x400100a9e040) rcu7            cpu7 waiting     1.31961e-23           12959 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  57 (0x400100ab8040) page_pool_l1_7  cpu7 waiting     1.11152e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  58 (0x400100ad0040) percpu7         cpu7 waiting     1.11152e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  59 (0x400100ae9040) async_worker7   cpu7 waiting     1.11023e-23           10000 async::async_worker::run() at core/async.cc:190
+  60 (0x400100b01040) >init           cpu0 waiting      1.1154e-23           10000 osv::acpi_interrupt::process_interrupts() at drivers/acpi.cc:250
+  61 (0x400100b19040) rcu8            cpu8 waiting     1.38036e-23           13821 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  62 (0x400100b33040) page_pool_l1_8  cpu8 waiting     1.11152e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  63 (0x400100b4b040) percpu8         cpu8 waiting     1.11152e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  64 (0x400100b64040) async_worker8   cpu8 waiting     1.11152e-23           10000 async::async_worker::run() at core/async.cc:190
+  65 (0x400100b7c040) rcu10           cpu10 waiting     1.34029e-23           13245 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  66 (0x400100b96040) page_pool_l1_10 cpu10 waiting     8.52879e-10           40046 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  67 (0x400100bae040) percpu10        cpu10 waiting     1.02975e-11           59292 workman::call_of_duty() at core/percpu-worker.cc:92
+  68 (0x400100bc7040) async_worker10  cpu10 waiting       4.095e-10           42510 async::async_worker::run() at core/async.cc:190
+  69 (0x400100bdf040) rcu11           cpu11 waiting     1.34934e-23           13336 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  70 (0x400100bf9040) page_pool_l1_11 cpu11 waiting     1.11152e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  71 (0x400100c11040) percpu11        cpu11 waiting     1.11152e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  72 (0x400100c2a040) async_worker11  cpu11 waiting     1.11152e-23           10000 async::async_worker::run() at core/async.cc:190
+  73 (0x400100c47040) rcu12           cpu12 waiting     2.22305e-23           25862 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  74 (0x400100c62040) page_pool_l1_12 cpu12 waiting     1.74534e-13           29820 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  75 (0x400100c7b040) percpu12        cpu12 waiting     1.82514e-13           52179 workman::call_of_duty() at core/percpu-worker.cc:92
+  76 (0x400100c94040) async_worker12  cpu12 waiting     8.81795e-14           27350 async::async_worker::run() at core/async.cc:190
+  77 (0x400100cad040) rcu13           cpu13 waiting     1.67246e-23           17976 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  78 (0x400100cc8040) page_pool_l1_13 cpu13 waiting     1.11023e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  79 (0x400100ce1040) percpu13        cpu13 waiting     1.11023e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  80 (0x400100cf9040) async_worker13  cpu13 waiting     1.11282e-23           10000 async::async_worker::run() at core/async.cc:190
+  81 (0x400100d14040) rcu14           cpu14 waiting       1.339e-23           13245 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  82 (0x400100d2d040) page_pool_l1_14 cpu14 waiting     1.11152e-23           10000 memory::page_pool::l1::fill_thread() at core/mempool.cc:1498
+  83 (0x400100d45040) percpu14        cpu14 waiting     1.11152e-23           10000 workman::call_of_duty() at core/percpu-worker.cc:92
+  84 (0x400100d5e040) async_worker14  cpu14 waiting     1.11023e-23           10000 async::async_worker::run() at core/async.cc:190
+  85 (0x400100d76040) rcu15           cpu15 waiting     1.19683e-23            9734 osv::rcu::cpu_quiescent_state_thread::do_work() at core/rcu.cc:185
+  86 (0x400100d90040) page_pool_l1_15 cpu15 waiting     2.80556e-22          482980 memory::page_pool::l1::fill_thread() at core/mempool.cc:1501
+  87 (0x400100da8040) percpu15        cpu15 waiting     5.72564e-24             287 workman::call_of_duty() at core/percpu-worker.cc:92
+  88 (0x400100f1f040) async_worker15  cpu15 waiting     5.75149e-24             307 async::async_worker::run() at core/async.cc:190
+  89 (0x400101fb6040) >init           cpu0 waiting     1.17965e+08       237468392 std::_Function_handler<void(), sched::thread::reaper::reaper()::<lambda()> >::_M_invoke(const std::_Any_data &) at /usr/include/c++/11/bits/std_function.h:290
+  90 (0x400101fcd040) thread taskq    cpu0 waiting     7.71604e-24            3501 synch_port::_msleep(void*, mtx*, int, char const*, int) at bsd/porting/synch.cc:102
+  91 (0x400102014040) callout         cpu0 waiting     2.10834e-23         5553673 _callout_thread() at bsd/porting/callout.cc:138
+  92 (0x40010211b040) netisr          cpu0 waiting     3.43409e-23           11928 netisr_osv_thread_wrapper(void (*)(void*), void*) at bsd/sys/net/netisr1.cc:26
+  93 (0x4001032a9040) >init           cpu1 waiting     3.88159e-19       354595824 sched::thread::join() at core/sched.cc:1800
+	joining on <optimized out>
+  94 (0x4001032c3040) virtio-net-rx   cpu4 waiting     4.02415e+12      3608820823 virtio::virtio_driver::wait_for_queue(virtio::vring*, bool (virtio::vring::*)() const) at drivers/virtio.cc:159
+  95 (0x4001032eb040) virtio-tx-0     cpu0 waiting     7.38168e-27        48036581 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+  96 (0x400103313040) virtio-tx-1     cpu1 waiting     2.85784e-19       115574880 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running() at include/osv/percpu_xmit.hh:564
+  97 (0x40010333b040) virtio-tx-2     cpu2 waiting     1.91284e-27        32462423 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+  98 (0x400103363040) virtio-tx-3     cpu3 waiting     3.41127e+11        19022723 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+  99 (0x40010338b040) virtio-tx-4     cpu4 waiting     0.000179857         8009170 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 100 (0x4001033b3040) virtio-tx-5     cpu5 waiting     2.89537e-29            1407 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 101 (0x4001033db040) virtio-tx-6     cpu6 waiting     2.97302e-29            1424 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 102 (0x400103403040) virtio-tx-7     cpu7 waiting     3.07594e-29            1489 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 103 (0x40010342b040) virtio-tx-8     cpu8 waiting     3.12771e-29            1537 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 104 (0x400103453040) virtio-tx-9     cpu9 waiting     1.02724e-14         1271622 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running() at include/osv/percpu_xmit.hh:564
+ 105 (0x40010347b040) virtio-tx-10    cpu10 waiting     2.39919e-13         1123730 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 106 (0x4001034a3040) virtio-tx-11    cpu11 waiting     4.08359e-29            1991 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 107 (0x4001034cb040) virtio-tx-12    cpu12 waiting     1.01524e-16         1415777 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 108 (0x4001034f3040) virtio-tx-13    cpu13 waiting     3.41244e-29            1648 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 109 (0x40010351b040) virtio-tx-14    cpu14 waiting     2.94714e-29            1420 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 110 (0x400103543040) virtio-tx-15    cpu15 waiting     2.86948e-29            1386 osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until() at include/osv/percpu_xmit.hh:401
+ 111 (0x40010359a040) virtio-blk      cpu1 waiting     3.31906e-23            4845 virtio::blk::req_done() at drivers/virtio-blk.cc:375
+ 112 (0x4001035e1040) virtio-rng      cpu0 waiting     2.05862e-23        10038515 condvar::wait(lockfree::mutex*, sched::timer*) at core/condvar.cc:62
+ 113 (0x4001035fb040) isa-serial-inpu cpu1 waiting     4.24964e-23            8435 console::LineDiscipline::read_poll(console::console_driver*) at drivers/line-discipline.cc:86
+ 114 (0x400103612040) kbd-input       cpu1 waiting     4.19277e-23            8188 console::LineDiscipline::read_poll(console::console_driver*) at drivers/line-discipline.cc:86
+ 115 (0x4001036ca040) rand_harvestq   cpu1 waiting     1.09111e-13      1430127243 synch_port::_msleep(void*, mtx*, int, char const*, int) at bsd/porting/synch.cc:102
+ 116 (0x4000bfe00040) /b/.local/pg18/ cpu0 waiting     1.86218e-05      5039530305 ??
+ 117 (0x4000bfe08040) >/b/.local/pg18 cpu1 waiting     7.77822e-12        13993987 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 118 (0x40000b1ca040) >/b/.local/pg18 cpu1 waiting     1.78852e-21        49882136 printf_core at libc/stdio/vfprintf.c:470
+ 121 (0x40000d818040) >/b/.local/pg18 cpu0 waiting     9.63447e+14        68081516 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 122 (0x40000ce42040) >/b/.local/pg18 cpu1 waiting     1.07459e-06         9163576 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 123 (0x40000e5a1040) >/b/.local/pg18 cpu1 waiting     1.63813e-16          608901 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 250 (0x400176ec9040) >/b/.local/pg18 cpu0 waiting     8.64822e-21       478689569 sn_write at libc/stdio/vsnprintf.c:19
+ 251 (0x40016aec5040) >/b/.local/pg18 cpu1 waiting     3.93346e-13       464088194 sn_write at libc/stdio/vsnprintf.c:19
+ 252 (0x40016af6b040) >/b/.local/pg18 cpu2 waiting     5.34283e-21       492603855 sn_write at libc/stdio/vsnprintf.c:19
+ 253 (0x40016255e040) >/b/.local/pg18 cpu0 waiting     8.84891e-21       472643357 sn_write at libc/stdio/vsnprintf.c:19
+ 254 (0x40016a071040) >/b/.local/pg18 cpu2 running     2.28391e-21       467705149 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 255 (0x400165ae5040) >/b/.local/pg18 cpu2 queued      5.55499e-21       485108363 sn_write at libc/stdio/vsnprintf.c:19
+ 256 (0x400179aa0040) >/b/.local/pg18 cpu2 waiting     5.34195e-21       474635348 sn_write at libc/stdio/vsnprintf.c:19
+ 257 (0x40015bc54040) >/b/.local/pg18 cpu2 waiting     5.33549e-21       451637678 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 258 (0x4008b2fb6040) >/b/.local/pg18 cpu1 waiting     4.03459e-13       468888841 sn_write at libc/stdio/vsnprintf.c:19
+ 259 (0x40016c23a040) >/b/.local/pg18 cpu0 waiting     7.82405e-21       457894032 sn_write at libc/stdio/vsnprintf.c:19
+ 260 (0x40015d03b040) >/b/.local/pg18 cpu1 waiting     4.02742e-13       475856212 sn_write at libc/stdio/vsnprintf.c:19
+ 261 (0x40015a2bf040) >/b/.local/pg18 cpu1 waiting     4.03286e-13       454274542 sn_write at libc/stdio/vsnprintf.c:19
+ 262 (0x4008b3b0b040) >/b/.local/pg18 cpu3 waiting     3.20516e+17       447943542 sn_write at libc/stdio/vsnprintf.c:19
+ 263 (0x4001741ac040) >/b/.local/pg18 cpu2 waiting     5.35345e-21       491341084 sched::thread::switch_to() at arch/x64/arch-switch.hh:175
+ 264 (0x40014810b040) >/b/.local/pg18 cpu0 waiting     9.02675e-21       465957884 sn_write at libc/stdio/vsnprintf.c:19
+ 265 (0x40017465a040) >/b/.local/pg18 cpu2 waiting     5.33875e-21       460304094 sn_write at libc/stdio/vsnprintf.c:19
+ 266 (0x40015ef32040) >/b/.local/pg18 cpu0 waiting     8.38828e-21       449847421 sn_write at libc/stdio/vsnprintf.c:19
+ 267 (0x40016b44b040) >/b/.local/pg18 cpu1 waiting     3.89719e-13       475092110 sn_write at libc/stdio/vsnprintf.c:19
+ 268 (0x400158bd7040) >/b/.local/pg18 cpu1 waiting      3.9346e-13       467586580 sn_write at libc/stdio/vsnprintf.c:19
+ 269 (0x40015bfbb040) >/b/.local/pg18 cpu0 waiting     7.82469e-21       463174893 sn_write at libc/stdio/vsnprintf.c:19
+ 270 (0x40016d4f2040) >/b/.local/pg18 cpu0 waiting     8.60096e-21       472740803 sn_write at libc/stdio/vsnprintf.c:19
+ 271 (0x400167744040) >/b/.local/pg18 cpu1 waiting     3.95114e-13       464873926 sn_write at libc/stdio/vsnprintf.c:19
+ 272 (0x40015fe1d040) >/b/.local/pg18 cpu0 waiting     7.82477e-21       474691785 sn_write at libc/stdio/vsnprintf.c:19
+ 273 (0x400170df6040) >/b/.local/pg18 cpu3 waiting     3.10795e+17       459621323 sn_write at libc/stdio/vsnprintf.c:19
+ 274 (0x40016e19b040) >/b/.local/pg18 cpu0 waiting     7.81685e-21       450767235 sn_write at libc/stdio/vsnprintf.c:19
+ 275 (0x400147c20040) >/b/.local/pg18 cpu0 waiting     8.89085e-21       467642171 sn_write at libc/stdio/vsnprintf.c:19
+ 276 (0x400166a1e040) >/b/.local/pg18 cpu0 waiting     8.38784e-21       467313849 sn_write at libc/stdio/vsnprintf.c:19
+ 277 (0x400172984040) >/b/.local/pg18 cpu2 waiting     5.34038e-21       490915004 sn_write at libc/stdio/vsnprintf.c:19
+ 278 (0x400169438040) >/b/.local/pg18 cpu1 waiting     3.92115e-13       452789557 sn_write at libc/stdio/vsnprintf.c:19
+ 279 (0x400164604040) >/b/.local/pg18 cpu0 waiting     7.82504e-21       455984963 sn_write at libc/stdio/vsnprintf.c:19
+ 280 (0x40015b3c2040) >/b/.local/pg18 cpu1 waiting     3.91477e-13       455014363 sn_write at libc/stdio/vsnprintf.c:19
+ 281 (0x4008b4ae2040) >/b/.local/pg18 cpu0 waiting     7.82635e-21       455193927 sn_write at libc/stdio/vsnprintf.c:19
+Number of threads: 153
+[Inferior 1 (process 1) detached]

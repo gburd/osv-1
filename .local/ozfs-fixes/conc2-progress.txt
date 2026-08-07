@@ -1,0 +1,34 @@
+CONCURRENCY ROOT-CAUSE v2 -- progress log (banked incrementally)
+================================================================
+GOAL: root-cause the OSv+PG heavy-concurrency ceiling. Net-queue theory REFUTED
+by prior A/B. PRIMARY TARGET: RO pgbench -S regresses past c16 in BOTH single-
+and multi-queue configs = a per-connection CPU/scheduler contention ceiling.
+PROFILE-FIRST: name the lock/backtrace/%time BEFORE implementing.
+
+BOX: i-0cb172435eba1734f  m5d.metal 96 vCPU 377G  us-east-2
+     pub 18.188.78.103  priv 172.31.35.99
+     EBS root+4x200G gp3: vol-04d4e14d79b195d68 vol-0db8354e6c1d9f993
+       vol-0c733f77d7c832ce7 vol-08cb6ba09b94f68d9 vol-03d8370cf11471439
+     4x 838G local NVMe instance store (nvme0-3) for fast ZFS pool.
+     *** MUST TERMINATE + DELETE EBS WHEN DONE ***
+
+BUILD: gh-fork/integ/pg-fork-zfs @ 9cdfec86 (#1458 tip).
+  - AL2023 GCC 11.5 builds the kernel + objects directly (per brief).
+  - openzfs submodule had to be `git submodule update --init` (was uninit).
+  - qemu NOT in AL2023 repos -> built osv-qemu:39 container (fedora:39 + qemu-
+    system-x86 qemu-img nbd make gcc-c++ libstdc++-static boost-static).
+  - image assembly (qemu-nbd/mkfs/cpiod) run in --privileged container w/ /b,
+    /dev bind-mounted, nbd module loaded on host.
+  - IMAGE BUILT rc=0: build/last/{loader.img 5.5M, usr.img 63M}
+    conf_zfs=openzfs conf_fork=1 image=zfs-tools,pg18-fork fs=zfs
+  - CAVEAT: loader.elf relinked in-container w/ GCC13 libstdc++.a against host
+    GCC11 objects. MUST smoke-boot before trusting numbers.
+
+NEXT: create ZFS pgdata pool on local NVMe, seed pgbench -s300, boot guest at
+  -smp 16, verify PG ready + external reachability, then profile RO c8/16/32/64.
+
+=== RO CEILING REPRODUCED (ramfs, -smp16, host->guest over tap, ZERO ZFS) ===
+  c1=12816 c4=41899 c8=61640(PEAK) c16=26953 c24=25621 c32=17104 c48=14569 c64=collapse
+  MATCHES the A/B signal: peak ~c8-16 then hard regression. Pure CPU/sched/net
+  contention, no ZFS (ramfs). This IS the primary target ceiling.
+NEXT: profile c8(peak) vs c32(regressed) with OSv sampler + gdb thread bt.

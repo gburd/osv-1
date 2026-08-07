@@ -1,0 +1,79 @@
+=== MATCHED OSv-vs-Linux PostgreSQL A/B (both OSes, both legs, 0-failed everywhere) ===
+Box i-068192a84954ff2ac m5d.metal (96 vCPU, 4x838G LOCAL NVMe) us-east-2 beef acct 840154381708.
+Both guests: SAME m5d.metal host, SAME qemu (-machine pc -accel kvm -cpu host), virtio-net vhost tap0
+(non-loopback, inet_server_addr=192.168.100.2 BOTH sides), -smp 48, 48G RAM, PG18 (shared_buffers=8G,
+max_connections=300, huge_pages=off), ZFS raidz1-8k over the SAME 4 LOCAL NVMe (nvme0-3, NO EBS in data path).
+OSv = committed #1458 integ/pg-fork-zfs 6b71c76385 (all 5 fixes), PG18.0 musl-PIE, DEFAULT mmap.
+Linux = Ubuntu 24.04 guest VM, in-kernel OpenZFS 2.2.2, PG18.4 (PGDG).
+pgbench -i -s300, c1/8/16/32/48/64, 60s each, fresh pool per level, IDENTICAL invocation OSv THEN Linux.
+
+RO (-S select-only), tps / lat_ms, 0-failed EVERY cell BOTH sides:
+ conn      OSv tps  OSv lat    Linux tps  Linux lat   ratio OSv/Lx
+ c1          9507    0.105       12505     0.080         0.76x
+ c8         47938    0.167       87547     0.091         0.55x   <- OSv RO peak (c8)
+ c16        16956    0.944      147107     0.109         0.12x
+ c32        13518    2.367      193653     0.165         0.07x   <- Linux RO peak (c32)
+ c48        12590    3.812      192293     0.250         0.07x
+ c64        11840    5.405      191033     0.335         0.06x
+
+RW (TPC-B default), tps / lat_ms, 0-failed EVERY cell BOTH sides:
+ conn      OSv tps  OSv lat    Linux tps  Linux lat   ratio OSv/Lx
+ c1           843    1.186         383     2.610         2.20x   <- OSv LEADS 2.2x (single writer)
+ c8          1879    4.258        1991     4.017         0.94x
+ c16         2076    7.707        2468     6.483         0.84x
+ c32         2077   15.403        2709    11.812         0.77x
+ c48         2061   23.292        2757    17.410         0.75x
+ c64         2099   30.488        2827    22.635         0.74x
+
+CURVE SHAPE:
+ - OSv RO: rises to a c8 PEAK (47938), then holds a FLAT ~12-13k PLATEAU c16-c64 (NO collapse - the shard fix works).
+ - Linux RO: climbs to a c32 PEAK (193653), holds flat ~190k to c64.
+ - OSv RW: rises to a ~2077 plateau by c16, holds flat to c64 (RW COMPLETES 0-failed - the corruptor fix works;
+   was WEDGED entirely at c>=8 pre-fix).
+ - Linux RW: climbs to ~2827 by c64.
+ - OSv LEADS at single-connection RW (2.2x) and is within 0.74-0.94x of Linux across all RW concurrency
+   (the ZFS write path bounds both similarly). The RO plateau is the big gap: 0.06-0.12x at scale.
+
+HONEST BOTTOM LINE: OSv+PG serves the FULL concurrent read+write workload at c1-c64 with ZERO failures,
+from committed code, on ZFS-over-local-NVMe. RW is near-parity (and faster at c1). RO trails badly at scale
+(flat ~13k plateau vs Linux's ~190k) - a THROUGHPUT-SCALING gap, not a correctness wall. Root cause below.
+
+=== GOAL 2: the plateau bottleneck, NAMED with evidence (profiled under RO c32) ===
+EVIDENCE 1 (host CPU accounting): during RO c32 the qemu process (48-vCPU guest) uses ~206-246% of 4800%
+  = ~2-2.5 of 48 vCPUs busy; host reports 97% IDLE. If OSv were scaling across 32 connections it would use
+  ~32 cores. It uses ~2.5. => plateau is NOT CPU-bound, NOT storage-bound.
+EVIDENCE 2 (per-vCPU-thread top -H of qemu): only 6-7 vCPU threads >5% CPU (2 pegged at 100%, then a sharp
+  taper 86/66/60/40%); the other ~42 vCPU threads at 0.0% (idle).
+EVIDENCE 3 (gdb `osv info threads`, 1379 threads, under RO c32):
+  - virtio-net-rx threads = 1  (a SINGLE receiver thread, id 254, PINNED on cpu1, blocked in
+    virtio_driver::wait_for_queue at drivers/virtio.cc:159)
+  - virtio-tx-* threads   = 48 (one TX per vCPU - TX is per-CPU, RX is NOT)
+  - netisr threads        = 1
+  - 41 PG backends cluster on just 5 CPUs: cpu1=15, cpu0=11, cpu2=10, cpu3=4, cpu4=1  (43 vCPUs never used)
+  - backend states: 36 waiting (in sched::thread::switch_to, i.e. blocked awaiting wakeup), 3 running, 2 queued
+
+NAMED SERIALIZED RESOURCE: the SINGLE virtio-net RX receiver thread + wake-to-waker-CPU scheduler placement.
+  All inbound pgbench packets funnel through ONE rx thread on cpu1. It wakes the target backend; OSv has NO
+  wake-time idle-CPU steering (thread::wake_impl re-queues a woken thread onto its last/home CPU, and the
+  only rebalancer is a lazy 100ms/1-thread load_balance), so every woken backend lands on/near the waker's
+  CPU. Work packs onto ~5 CPUs adjacent to the single RX thread; 43 vCPUs idle. Aggregate throughput is capped
+  by what ~2-3 CPUs can push through the single-RX + wake-round-trip path, independent of vCPU count - exactly
+  a flat-but-low plateau. This CONFIRMS (does not refute) the prior "RX-receiver-placement / wake-round-trip
+  latency residual" hypothesis, now with direct thread-placement + single-RX-thread + idle-CPU evidence.
+
+CONCRETE NEXT WORK (the one lever, higher-leverage first):
+  (1) WAKE-TIME IDLE-CPU STEERING in core/sched.cc thread::wake_impl: when waking an unpinned thread whose
+      home CPU is loaded and an idle CPU exists, place it on the idle CPU (a Linux select_task_rq analog).
+      This is the OS-general, highest-leverage fix - it directly disperses the backend clump the single RX
+      thread creates, letting the 43 idle vCPUs absorb work. (Prior #1464 shortened load_balance but did NOT
+      add wake-placement; the clump persists - proven here.)
+  (2) MULTI-QUEUE RX with per-queue receiver threads pinned across CPUs (spread the single RX). #1463 MQ ALONE
+      did NOT help in prior A/Bs precisely because it doesn't fix wake placement - woken backends still return
+      to their clumped home CPU. (1) and (2) are complementary; (1) is the prerequisite that makes (2) pay off.
+  => Recommendation: implement (1) wake-time idle-CPU steering FIRST; re-measure the RO curve; then add (2) MQ.
+
+No resurfaced fault: RO 100% clean 0-failed all cells; RW 100% clean 0-failed all cells; no panic/abort/EIO
+during either A/B run. (The only wall hit + solved during setup: PG dynamic_shared_memory_type must be left at
+OSv default mmap - NOT sysv - or the stats DSA faults on first connect; and virtio-net vectors must be capped
+mq=off,vectors=3 or the fork-tip MSI-X vector budget aborts at boot at -smp48 with 5 blk devices. Both are
+harness/config, not the fixed kernel.)

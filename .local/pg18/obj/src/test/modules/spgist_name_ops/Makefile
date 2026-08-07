@@ -1,0 +1,1 @@
+/b/.local/pg18/src/src/test/modules/spgist_name_ops/Makefile

@@ -1,0 +1,85 @@
+================================================================================
+BATCH-WAKEUP LATENCY RESIDUAL - RESULT (box i-074aba3451e482f30, m5d.metal, us-east-2)
+Base: OSv master ae077860c + #1464 sched load-balance (4bb2531d0)
+================================================================================
+
+THE NAMED PER-REQUEST LATENCY COST (profile evidence):
+  In-tree, at core/net_channel.cc classifier::post_packet():
+      if (!nc->push(m)) return false;
+      // FIXME: find a way to batch wakes      <-- the residual lever, verbatim
+      nc->wake();
+  post_packet() runs ONCE PER PACKET inside virtio::net::receiver()'s drain
+  loop. Each nc->wake() = a full thread::wake_impl() (RCU-locked traversal +
+  poller walk) and, when the woken connection last ran on another CPU, a
+  cross-CPU wakeup IPI (cpu::send_wakeup_ipi). So the receiver drains N packets
+  per pass but issues N separate wakes = up to N cross-CPU IPIs per pass, all
+  serialized on the single receiver thread. wake_impl() already coalesces IPIs
+  per (source,target) CPU via incoming_wakeups_mask, but the per-packet nc->wake()
+  defeats it: each wake can be drained before the next arrives, so nothing
+  coalesces. This is the round-trip serialization the conc2 report named
+  (tps=concurrency/latency, latency grows with concurrency, guest ~90% idle).
+
+PROFILE (reqrep.so: thread-per-conn blocking recv->send echo; ramfs; host<->guest tap):
+  SMP1 (NO cross-CPU IPI possible; receiver+conns on one CPU, wake=local resched):
+    STABLE, tps scales up, tps=conc/lat holds exactly:
+      c1=34k/0.029ms c8=123k/0.065 c16=165k/0.097 c32=176k/0.182 c64=179k/0.357 c96=179k/0.531
+  SMP4: tps+lat track SMP1 almost identically (c16=164k/0.097 c32=188k/0.170 c64=192k/0.332)
+  => for this lightweight echo the cross-CPU wake cost does NOT surface as extra
+     latency; the reqrep testbed does NOT reproduce the PG residual's latency-
+     growth signature (PG: 0.57->3.0ms c16->c64, tps FALLS). The PG residual
+     needs PG's block-in-recv + real query-work pattern; the echo reply is too
+     cheap to expose the wake round-trip as the bottleneck. HONEST GAP.
+
+THE FIX (standalone, master-based, conf_fork-neutral):
+  branch pr/net-batch-wakeup, commit 794fe0f0e, base ae077860c, Author Greg Burd,
+  Signed-off-by, leak-clean, no em-dash. 4 files +128/-2:
+    net_channel.hh/.cc: net_channel_wake_batch (dedup, 16 inline + heap spill) +
+      classifier::post_packet(m, batch) that records instead of waking.
+    virtio-net.cc/.hh: receiver holds ONE rcu_read_lock across the drain pass,
+      records every touched channel, flushes (one wake per distinct channel) at
+      end-of-pass so wake_impl() coalesces the IPIs per destination CPU.
+    Runtime toggle OSV_NET_BATCH_WAKE=0 restores the exact per-packet path
+      (A/B on one image); defaults on. Non-batched path byte-unchanged.
+  Bundle: .local/ozfs-fixes/net-batch-wakeup.bundle (ae077860c..794fe0f0e)
+
+MEASURED A/B (same image, OSV_NET_BATCH_WAKE off vs on, smp1):
+      c        OFF (tps/lat)     ON (tps/lat)      delta
+      1        33874/0.029       34244/0.029       ~0
+      8        123098/0.065      121836/0.066      -1% (noise)
+      16       165078/0.097      156674/0.102      -5% (noise, repeat run ON=166k>OFF=156k)
+      32       176109/0.182      168755/0.190      -4% (noise)
+      64       179065/0.357      180975/0.353      ~0
+      96       179013/0.531      178028/0.535      ~0
+  => at smp1 (no IPI to coalesce, ~1 pkt/drain-pass for echo) the fix is a no-op
+     within run-to-run noise = NO single-connection / single-CPU REGRESSION.
+     Correctness: 16 conns x 500 distinct payloads, all echoes exact with ON
+     (batched wakes deliver to the right channels, no lost/misrouted wakeup).
+
+WHY NO SMP>1 PAYOFF NUMBER (the honest blocker):
+  The cross-CPU IPI-coalescing payoff can only appear at smp>1, but at smp>=2
+  the guest INTERMITTENTLY-to-DETERMINISTICALLY WEDGES under concurrent load:
+  virtio-net receiver stops being woken (all vCPUs idle in do_idle, RX
+  interrupt/wakeup lost), guest stops answering TCP+ARP. smp1 NEVER wedges.
+  Reproduces with the fix OFF (OSV_NET_BATCH_WAKE=0 = the stock per-packet path,
+  byte-identical to upstream at runtime), so it is NOT introduced by this change.
+  Reproduces on plain-tap AND vhost=on, and on BOTH clean master+#1464 and the
+  #1458 fork tip. => a pre-existing OSv virtio-net SMP RX interrupt/wakeup race
+  (same class as ROADMAP F2b wake_impl-on-stale-thread / lost-interrupt-under-
+  migration). This is the environment's dominant instability and it blocked a
+  clean smp16 A/B on this box (qemu 8.1.3 in-container, --net=host tap).
+
+VERDICT:
+  - The residual lever is REAL and now IMPLEMENTED as a clean, safe, general,
+    conf_fork-neutral master change that closes the in-tree "batch wakes" FIXME.
+  - The fix is proven CORRECT (integrity) and REGRESSION-FREE at smp1.
+  - The cross-CPU throughput/latency PAYOFF could NOT be measured here because
+    (a) the reqrep echo testbed does not reproduce the PG latency-growth, and
+    (b) an independent, pre-existing OSv virtio-net SMP RX-wakeup wedge blocks
+    all smp>1 load on this box. Landing the fix is justified on mechanism +
+    safety; the smp>1 payoff (and the PG residual drop) needs a stable-under-
+    concurrency virtio-net path first (fix the SMP RX-wakeup wedge) OR a real
+    pgbench -S run on a box where OSv smp>1 net is stable (the conc2 box was).
+
+ROUTING: STANDALONE master PR (pr/net-batch-wakeup, base ae077860c). Re-sign
+  794fe0f0e + open as a new master PR. Does NOT depend on fork bits.
+================================================================================

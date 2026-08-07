@@ -1,0 +1,197 @@
+================================================================================
+SCHED2 -- fork boot LOST-WAKEUP (corrected, aggregate) + fix#1 landed
+================================================================================
+Author: Greg Burd  [fork-stack]
+Box:  osv-sched2  i-035d5a575d1b68724  m5d.metal  us-east-2  3.144.121.193
+Base: 86a7d3b37  (waiters allocator-recursion already fixed; c8f9c82b lineage)
+Fix#1 committed: 537babc4  (switch_to CR3-swap FPU hardening; bundle
+      /tmp/sched2-fix1.bundle = 86a7d3b37..537babc4)
+
+--------------------------------------------------------------------------------
+0. HEADLINE (read first)
+--------------------------------------------------------------------------------
+The boot regression is a LOST WAKEUP of a forked PostgreSQL backend blocked in
+epoll_file::wait, NOT a page fault / mmu.cc:38 abort. It is layout/timing
+fragile: dormant when kill() compiles like c8f9c82b, near-certain when kill()'s
+compiled form shifts (the K1 self-signal perturbation). kill() is NOT called
+during the wedged startup (instrumented: 0 KILLTRACE lines). It reproduces at
+-smp1, so it is a SAME-CPU lost wakeup, not a cross-CPU IPI race.
+
+Fix#1 (switch_to post-CR3-swap %rbp reload) is a REAL latent COW-fault/#GP bug
+and is committed, but it is NOT this lost-wakeup and does NOT fix the boot hang.
+
+--------------------------------------------------------------------------------
+1. VALID HARNESS (this corrects the earlier baked-image noise)
+--------------------------------------------------------------------------------
+The pg18-fork image BAKES /data into the ROOT zfs. Booting that baked pool is
+FLAKY on its own (a marginal txg state sitting on the timing edge) -> K0 itself
+went 3/3 then 10/10-hang across runs. That baked-boot method is INVALID for A/B.
+
+VALID method = the reports' fresh-8k-pool-per-boot:
+  seed2.sh  : boot image, `/zpool.so create -f -o ashift=12 -O recordsize=8k
+              -m /pgpool pgdata /dev/vblk1`, `/tools/cpiod.so` receive the
+              cluster from host cpio_push.py, `/zpool.so export pgdata`.
+              (mount at /pgpool, NOT /data, because /data is baked in root.)
+  boot8k.sh : FRESH per-boot copy of BOTH usr.img and the 8G data raw, then
+              `/zpool.so import -f -N pgdata ; /zfs.so mount pgdata ;
+               postgres -D /pgpool`.
+  Image built with cpiod.so + zfs-tools added to the manifest:
+    ./scripts/build image=zfs-tools,pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1
+    (apps/pg18-fork/usr.manifest also gets /tools/cpiod.so:
+     /b/build/release.x64/tools/cpiod/cpiod.so)
+
+DECISIVE A/B on the valid harness (fresh 8k pool each boot, -smp4):
+  PURE K0 (kill == c8f9c82b)                          10/10 READY
+  PURE K1 (else if(pid==getpid()) current-AS route)    0/10 HANG
+  FIX#1 + K1 (switch_to hardening)                     0/10 HANG   (fix#1 insufficient)
+  K1 at -smp1                                          0/3  HANG   (same-CPU!)
+  K0 at -smp1                                          (K0 boots)
+loader sizes: K0 73,102,776 ; K1 73,102,976 (+200B layout shift) ; fix#1 shifts a few B.
+
+--------------------------------------------------------------------------------
+2. THE WEDGE (gdb, valid K1 build, fresh 8k pool)
+--------------------------------------------------------------------------------
+Console: PG logs "starting", "listening on 5432", "database system was shut
+down", then NEVER "ready to accept connections". All 4 vCPUs HALTED in
+sched::cpu::do_idle (core/sched.cc:540). __assert_fail / abort NOT hit.
+
+osv info threads (only 3 PG threads):
+  596 /b/.local/pg18/  (postmaster) waiting  epoll_file::wait   current_as=kernel_as  <- idle/correct
+  598 >/b/.local/pg18  (backend)    waiting  epoll_file::wait   current_as=0x...(COW child)
+  599 >/b/.local/pg18  (backend)    waiting  epoll_file::wait   current_as=0x...(COW child)
+Both backends: _timers_parked=true, NOT on any runqueue (rbtree parent/left/right=0),
+incoming_wakeups_mask=0 on EVERY cpu -> no pending wakeup anywhere.
+
+REAL backtrace (walked each backend's stack via ITS OWN CR3 -- child stacks are
+at rsp=0x2000... = mmap COW slot, so AS0 reads garbage; the "0x6000..." seen
+early was gdb misreading through AS0; 0x6000... is mem_area::mempool where the
+address_space OBJECTS live):
+  reschedule_from_interrupt +917
+  sched::thread::wait() +35
+  epoll_file::wait(epoll_event*,int,int) +1358
+  epoll_wait +113
+  <PG app frames 0x1000...>  ...  osv::application::run_main
+=> the forked backend is blocked in its epoll/latch wait during startup and its
+   wakeup never arrives. It has a _parked_deadline set (fork timer-park) --
+   e.g. 34.9s and 300.6s on two captured backends -- yet it is stuck > those.
+
+--------------------------------------------------------------------------------
+3. WHAT WAS RULED OUT
+--------------------------------------------------------------------------------
+* NOT kill()/signal delivery: KILLTRACE (debug_ll in kill() handler dispatch)
+  prints ZERO lines before the wedge. kill() is not on the path.
+* NOT a page fault: conditional bp at mmu.cc:38 for cr2 in mempool range OR
+  !preemptable never fired; __assert_fail/abort never hit.
+* NOT switch_to FPU/switch_as (fix#1): committed, K1 still 0/10.
+* NOT the fork timer-park being the sole cause: bisected park_timers to a no-op
+  + always resume_timers -> K1 still 0/6.
+* NOT cross-CPU: -smp1 reproduces 0/3. Same-CPU lost wakeup.
+
+--------------------------------------------------------------------------------
+4. THE DECISIVE LEAD (for the next session)
+--------------------------------------------------------------------------------
+On -smp1 a backend blocked in epoll with a timeout can be woken ONLY by its
+timeout TIMER firing (timer IRQ -> preemption -> scheduler). It is stuck forever
+with a _parked_deadline that never triggers. So EITHER:
+  (a) the guest clock / timer IRQ has STOPPED at the wedge (a layout-fragile
+      APIC/clockevent re-arm bug under fork) -> root is timer-IRQ delivery; or
+  (b) the clock advances but the parked thread's deadline is wrong/never-checked
+      -> root is fork park-timer deadline handling (park_wakeup_timer not armed
+      to the earliest _parked_deadline, or park_timer_fired not running).
+Next step: sample guest uptime twice a few seconds apart at the wedge; check
+whether cpu[0].preemption_timer / park_wakeup_timer are armed and whether the
+timer IRQ is still being taken. Nail (a) vs (b). (Attempts this session to read
+uptime via gdb failed on inlined-function/async-stop; use a non-inlined reader,
+e.g. read the kvmclock/pvclock memory directly, or a maint packet / qemu 'info
+registers'/monitor over two stops.)
+
+--------------------------------------------------------------------------------
+5. MEMORY LAYOUT REFERENCE (86a7d3b37)
+--------------------------------------------------------------------------------
+  ELF/PIE app slot32 0x100000000000 (COW) ; mmap slot64 0x200000000000 (COW) ;
+  fork arena slot96 0x300000000000 (COW) ; mem_area::main 0x400000000000 ;
+  mem_area::page 0x500000000000 ; mem_area::mempool 0x600000000000 (heap;
+  address_space objects live here) ; debug 0x700000000000. Identity slots
+  128..511 shared verbatim into each child by clone_address_space.
+
+--------------------------------------------------------------------------------
+6. DELIVERABLES THIS SESSION
+--------------------------------------------------------------------------------
+  Fix#1 commit 537babc4 (on 86a7d3b37); bundle /tmp/sched2-fix1.bundle (floki+box).
+  This report /tmp/sched2-fault.txt (floki+box).
+  DROP DATABASE self-signal routing: NOT re-added (blocked on the lost-wakeup;
+  re-add the K1 form only after the lost-wakeup root is fixed).
+================================================================================
+-- Greg Burd
+
+================================================================================
+7. TIMER-FIRING ANSWER (the decisive lead resolved) -- it is option (b)
+================================================================================
+The guest clock and timer IRQ are ALIVE at the wedge. Sampling cpu1's
+park_wakeup_timer at ~4s wall intervals during the hang:
+   sample0  armed @ 30.101s
+   sample1  armed @ 34.104s   (+4.0s)
+   sample2  armed @ 38.107s   (+4.0s)
+=> park_wakeup_timer FIRES and RE-ARMS every few seconds. park_timer_fired() IS
+   running in the timer IRQ. (cpu2 pwt stuck armed@60.9s; cpu0 free.)
+
+So it is NOT a stopped clock / dead timer IRQ (rules out option a). It is
+option (b): the timer fires, park_timer_fired() calls wake_with_irq_disabled()
+on the due parked forked backend and bumps its _parked_deadline to max, BUT the
+woken backend NEVER RUNS -- the wake is LOST. All CPUs stay idle,
+incoming_wakeups_mask=0, the backend stays status=waiting.
+
+ROOT (for the fix): the wake of a PARKED, cross-AS (COW-child) forked backend
+issued from park_timer_fired() in timer-IRQ context (wake_with_irq_disabled ->
+wake_impl: CAS waiting->waking, enqueue on tcpu->incoming_wakeups, set mask,
+need_reschedule/IPI) does not result in the thread being run. Candidate
+mechanisms to check next:
+  * wake_impl runs in the timer IRQ under whatever AS the cpu holds; the enqueue
+    touches tcpu->incoming_wakeups (identity) + the thread's _wakeup_link
+    (in the thread object, identity) -- should be AS-safe, but verify the
+    detached_state CAS and _wakeup_link are not in COW memory.
+  * the woken thread is enqueued but on switch-in unpark_timers()/resume_timers()
+    or the fork park state (_timers_parked still true) drops it, or
+    handle_incoming_wakeups skips it.
+  * park_timer_fired bumps _parked_deadline=max BEFORE the wake is guaranteed
+    delivered; if the wake CAS races the thread's own re-park, it is lost.
+Confirm by watching one backend's detached_state.st and _parked_deadline across
+two park_timer_fired cycles: if st goes waiting->waking but never queued->running,
+the loss is in the wake->enqueue->switch-in handshake for a parked cross-AS thread.
+
+================================================================================
+8. FINAL PRECISION -- the wake is NOT lost in the scheduler; the EVENT is missing
+================================================================================
+Watched both backends' detached_state.st + _parked_deadline across 5 park cycles
+(~3s apart) at the wedge:
+  tid 598: st=waiting parked=true deadline=300.788s  (CONSTANT -- never advances)
+  tid 599: st=waiting parked=true deadline=30.06 -> 33.06 -> 36.07 -> 39.07 -> 42.07s
+           (advances ~+3s each cycle, tracking `now`)
+  incoming_wakeups_mask = [0,0,0,0] at every sample.
+
+Interpretation:
+  * park_timer_fired() does NOT set 599's deadline to max; instead 599's deadline
+    is recomputed fresh (= now + its WaitLatch timeout) each cycle. => 599 IS
+    being woken + switched in, runs briefly, finds NO epoll event, re-arms its
+    timeout timer and re-blocks (re-parked with a new earliest_active_deadline).
+    It loops on its own WaitLatch timeout making ZERO progress.
+  * 598 sits with a fixed far-future deadline (300s): it is waiting for an EVENT
+    (not a short timeout) that never arrives.
+=> The scheduler wake path is NOT dropping wakeups. The forked backend(s) are
+   waiting on an inter-process EVENT (a latch set / socket-ready / pipe write
+   from the postmaster or a sibling backend) that is NEVER DELIVERED across the
+   fork COW boundary during startup. PG startup handshake deadlocks: the process
+   that should SetLatch/write-the-pipe to advance startup either never runs or
+   its write lands in the wrong AS's copy of the fd/latch state.
+
+This reframes the ROOT away from the scheduler timer/wake path (which is healthy:
+clock advances, park timer fires, short-timeout waiter re-runs) and back toward
+the FORK COW COHERENCE of the latch/epoll self-pipe / cross-process fd state --
+the same family as the DROP DATABASE self-signal issue, but at startup. The
+missing wakeup is an inter-backend latch/pipe notification not crossing the COW
+AS boundary; find which fd/latch write is not seen by the waiting backend's AS.
+NEXT: identify WHICH PG process should wake 598 and WHY its notification (self-
+pipe write / socket / SetLatch shared-memory flag) is invisible in 598's COW AS.
+The layout (K1) sensitivity is because the fork/first-switch ordering vs the
+postmaster's startup signals shifts, changing whether the notification races
+ahead of or behind the child establishing its COW mapping of the shared latch.

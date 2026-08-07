@@ -1,0 +1,38 @@
+signature-F LOST-WAKEUP -- BANK (a) WHO IS PARKED + ON WHAT
+==========================================================
+Author: Greg Burd   Class: [fork-stack]
+Base: corruptor-fix @ 6ccf4a92 (all 3 wild-write fixes + mount patch present)
+Repro: /b/sigF-gdbrepro.sh 4 32G -- WEDGED ON RUN 1 (heavy pgbench -i -s1000).
+
+STATE WHEN WEDGED (confirmed live):
+- console last line: "checkpoint starting: wal" [pid 590], then silence; disk grow=0, ~idle.
+- `select 1` returns 1 -> postmaster + a fresh backend still answer. Not a total hang.
+- CORRUPTOR SIGNATURE COUNT = 0 (no VERIFY/range_tree/preemptable/EIO/PANIC). Pure stall.
+
+GDB on the wedged guest (-gdb tcp::1234, loader.elf symbols):
+PG threads (OSv threads, `>` = fork child):
+  588  postmaster  epoll_file::wait  (ServerLoop; this is why select 1 answers)
+  590  CHECKPOINTER  parent_id=588, _app=true, status=waiting
+         top real frame on its COW stack (rsp=0x200000200180):
+           ... epoll_wait(int,epoll_event*,int,int)+113   <-- BLOCKED IN EPOLL
+         (the unwait_for_signal+246 frame above it is a stale return addr = ~lock_guard)
+  591/594/598  parked backends (switch_to)
+  595  a backend in sys_read (the COPY / a live client)
+
+CHECKPOINTER (590) latch wiring, read from its private per-child signal table:
+  g_child_sigtables[AS=0x600108f52a00] -> child_sigtable @ 0x40010ae6a040
+    SIGURG (idx22) handler = 0x100000b6d4a0  (latch_sigurg_handler -- INSTALLED, not SIG_DFL)
+    SIGCHLD(idx16) = SIG_DFL (0)  (checkpointer does not reap -- fine)
+  => kill(590, SIGURG) WOULD find a valid handler in the target table and route it.
+
+RULES OUT so far:
+  - (A-as-SIG_DFL): checkpointer's SIGURG disposition is NOT SIG_DFL -> kill() would not
+    take the "return 0 for default SIGURG" early-out.  The handler is installed.
+  - COW-diverged latch flags (is_set/maybe_sleeping): PG main shmem is anon MAP_SHARED,
+    made coherent by the shared_anon_registry (core/mmu.cc) -> shared is_set recheck works.
+
+REMAINING: (C) the SIGURG->handler->sendSelfPipeByte(write selfpipe)->epoll-wake chain,
+OR a lost-wakeup RACE between OSv's kill() (which runs the handler in a NEW async thread)
+and the checkpointer's epoll registration / the `waiting` flag window.  Intermittent
+(~1 in 4) == a race, not a categorical mis-wire.  Next: instrument the kill(SIGURG) ->
+sendSelfPipeByte -> pipe poll_wake -> epoll activity chain and re-run.

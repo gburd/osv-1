@@ -1,0 +1,286 @@
+================================================================================
+[W-connsock] PostgreSQL-on-OSv: the forked-client-backend connection-SOCKET
+inheritance wall -- ROOT-CAUSED (postmaster close() of the connection fd nulls
+the SHARED gfdt slot the forked backend still needs) + FIXED.  Stock PG18.4's
+forked backend now PASSES getsockname (0 getsockname errors across the run) and
+advances past the socket handoff.  The first query is still blocked by a
+SEPARATE POSIX-shm/DSM gap (+ a net-RX fault) -- NO ROWS SERVED YET (honest).
+================================================================================
+Date:    2026-07-24   Host: floki (local, KVM)   Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena  (mounted /b in container)
+Branch:   integ/pg-fork-arena   HEAD at start: 1041518e5   after: 4589e0325
+Author:   Greg Burd
+Method:   rebuild image=pg18-fork (conf_fork=1, fs=ramfs) -> KVM boot PG,
+          psql connect from container -> catch the getsockname failure in the
+          forked backend under gdb (KVM + HARDWARE breakpoint on
+          kern_getsockname, walking gfdt[fd]._ptr and its file->f_type in the
+          child) -> minimal correct fork fd-inheritance fix -> new regression
+          test (reproduce on HEAD, pass with fix) -> full fork + non-fork
+          socket/net suites -> rebuild PG, re-measure how far it now advances.
+
+================================================================================
+VERDICT (one line)
+================================================================================
+The wall is fork fd-inheritance over OSv's SINGLE GLOBAL fd table, cause (b) as
+handed off (with a concrete twist): the postmaster (the top-level OWNER, NOT a
+fork child) close()s the accepted connection fd right after forking the backend;
+the normal fdclose() NULLS the SHARED gfdt[N] slot -- so the forked backend,
+which finds the connection via that same shared slot, sees either gfdt[N]==NULL
+(getsockname=EBADF) or a fd re-used by the backend's own startup open() for a
+regular file (getsockname=ENOTSOCK).  The 0a874234f fix guarded a fork CHILD
+closing an inherited fd; it did NOT guard the reverse -- the OWNER closing an fd
+a LIVE child still needs.  The cure keeps the shared slot alive across the
+owner's close and hands it to the inheriting child(ren).
+
+NOT cause (a) (the socket object diverging in the COW arena) and NOT cause (c)
+(f_type/private-data mis-set): the `struct file`/`socket_file` is already on the
+identity kernel heap (make_file<> in fs/fs.hh wraps the alloc in a
+kernel_heap_scope), so f_type==DTYPE_SOCKET is coherent across address spaces.
+The problem was never the file object -- it was the shared gfdt SLOT being
+cleared out from under the child.
+
+================================================================================
+THE gdb FINDING (why ENOTSOCK/EBADF -- proven, not inferred)
+================================================================================
+PG's backend fails in libpq pqcomm.c pq_init():
+    if (getsockname(port->sock, ...) < 0)
+        ereport(FATAL, "getsockname() failed: %m");
+port->sock is client_sock->sock == the accepted connection fd inherited from
+the postmaster.
+
+getsockname -> linux_getsockname -> sys_getsockname -> kern_getsockname ->
+getsock_cap(fd) (bsd/sys/kern/uipc_syscalls.cc:95):
+    fget(fd, &fp);                         // reads the SHARED gfdt[fd]
+    if (file_type(fp) != DTYPE_SOCKET) return ENOTSOCK;   // fp->f_type
+
+KVM + hbreak kern_getsockname, walking gfdt[fd]._ptr._M_b._M_p and its
+file->f_type in the forked backend, caught the exact sequence (fd=31, the
+connection socket):
+
+    FDCLOSE fd=31 gfdt=0x600008b05800      <- postmaster close()s the conn fd
+    FDCLOSE fd=31 gfdt=0x600008b09c80      <- fd 31 REUSED (a new file at 31)
+    GETSOCKNAME fd=31 gfdt=0x600008b09c80 f_type=1 f_count=1   <- f_type=1 =
+                                                                   DTYPE_VNODE!
+
+At the failing getsockname, gfdt[31] no longer holds the socket -- the
+postmaster's close() nulled the shared slot, and the backend's own startup
+open() re-used fd 31 for a regular file (DTYPE_VNODE, f_type=1), so
+getsock_cap()'s file_type()!=DTYPE_SOCKET returned ENOTSOCK.  In a slightly
+different race the slot is still NULL at getsockname time -> fget()=EBADF
+(observed on one run: "FATAL: getsockname() failed: EBADF").  Both are the SAME
+root cause; the handed-off symbol was ENOTSOCK, and EBADF is its NULL-slot twin.
+
+A control getsockname that ran BEFORE the reuse showed the healthy state
+(gfdt[31]=0x600100eb1880 f_type=DTYPE_SOCKET f_count=2) -- proving the file
+object itself is a coherent, correctly-tagged socket across address spaces; only
+the shared gfdt SLOT was being lost.
+
+WHY the postmaster close nulls the slot (postmaster.c ServerLoop):
+    if (AcceptConnection(events[i].fd, &s) == STATUS_OK)
+        BackendStartup(&s);              // fork()s the backend
+    if (s.sock != PGINVALID_SOCKET)
+        closesocket(s.sock);             // "We no longer need it in this proc"
+OSv (fs/vfs/kern_descrip.cc):
+    fdclose(fd) { gfdt[fd].assign(nullptr); fdrop(fp); }   // clears shared slot
+The postmaster is the top-level app (not a fork child), so
+fork_child_close_inherited_fd() (0a874234f) returned false and the normal
+slot-nulling close ran -- destroying the child's only handle to the connection.
+
+================================================================================
+THE FIX (minimal, correct, #if CONF_fork; non-fork byte-identical) -- 4589e0325
+================================================================================
+libc/process/fork.cc + fs/vfs/kern_descrip.cc:
+
+  * fork_owner_close_inherited_fd(fd, fp) [new]: called by fdclose() from a
+    NON-child context.  If some LIVE fork child inherits THIS fd holding THIS
+    same file (checked against g_inherited_fds), fdclose() KEEPS the shared
+    gfdt slot pointing at the file (it still fdrop()s only the owner's
+    reference) and records (fd,fp) in g_owner_released_fds -- the owner has
+    relinquished the slot to the child(ren).  Returns false (normal
+    slot-nulling close) when no live child inherits the fd.  Because OSv has a
+    single shared fd table, the child finds its connection via gfdt[fd]; keeping
+    the slot is exactly what makes the child's getsockname()/getpeername()/
+    recv() resolve.
+
+  * fork_child_close_inherited_fd() [extended] and release_inherited_fds()
+    [extended]: the LAST inheriting child to close/teardown an OWNER-RELEASED fd
+    (in g_owner_released_fds, and no OTHER live child still inherits it) clears
+    the shared slot via fork_clear_gfdt_slot_if(fd, fp), so the fd is reusable.
+    A slot the owner still HOLDS (not in g_owner_released_fds) is NEVER cleared
+    by a child -- this preserves the 0a874234f invariant (a child's close of an
+    inherited listen fd must not disturb the parent's slot) and keeps
+    tst-fork-socket green.
+
+  * fork_clear_gfdt_slot_if(fd, fp) [new, fs/vfs/kern_descrip.cc]: nulls
+    gfdt[fd] iff it still holds fp (under gfdt_lock) -- so a slot already
+    reassigned to a different file is left alone.
+
+  * LOCK ORDER: fdclose() takes gfdt_lock then calls into fork (g_fd_lock).  The
+    fork side therefore NEVER nests gfdt_lock inside g_fd_lock: both the child
+    close and the teardown collect the fds to clear under g_fd_lock, release it,
+    THEN call fork_clear_gfdt_slot_if() (which takes gfdt_lock).  No deadlock.
+
+  REFCOUNT WALK (connection fd=N, the PG case):
+    accept+fdalloc:  gfdt[N]=fp, f_count=1
+    fork snapshot:   fhold -> f_count=2; g_inherited_fds[child][N]=fp
+    postmaster close(N): owner-close hook keeps slot, fdrop -> f_count=1;
+                         gfdt[N] STILL = fp (the socket); g_owner_released_fds
+    backend getsockname(N): gfdt[N]=fp, f_type=DTYPE_SOCKET -> SUCCESS
+    backend close(N)/teardown: last child of an owner-released fd -> clear slot,
+                         fdrop -> f_count=0 -> socket closed.  Balanced.
+
+  All new code is #if CONF_fork; libc/process/fork.o is only compiled when
+  conf_fork=1 (Makefile), and every kern_descrip.cc hook is #if CONF_fork.  The
+  non-fork build is byte-identical.
+
+================================================================================
+THE REGRESSION TEST -- tests/tst-fork-conn-socket.cc (author Greg Burd)
+================================================================================
+Registered in modules/tests/Makefile.  Mirrors PG's postmaster->backend handoff:
+parent listens, a connector thread connects, the parent accept()s a REAL
+loopback connection (a new connection fd), fork()s, and the PARENT then closes
+the connection fd (exactly like the postmaster's closesocket(s.sock)).  The
+forked CHILD -- the "backend" -- then calls getsockname(), getpeername() and
+recv() on the inherited connection fd (mirroring pq_init()); these must succeed
+(not ENOTSOCK/EBADF).  The child owns the PASS/FAIL verdict (it is the backend
+that succeeds or dies, exactly like a real PG backend), which also sidesteps
+OSv's fork exit-status/waitpid plumbing.
+
+  HEAD 1041518e5 (fix reverted, test present), KVM -smp 2:
+    parent listening on 127.0.0.1:44104 (listen fd=3)
+    parent accepted connection fd=5
+    FAIL: forked backend getsockname(conn fd=5) errno=9 (EBADF=9 ENOTSOCK=88)
+          -- inherited connection socket lost
+  With the fix (4589e0325), KVM -smp 2:
+    parent listening on 127.0.0.1:51719 (listen fd=3)
+    parent accepted connection fd=5
+    PASS: forked backend used the inherited connection socket
+          (getsockname family=2, getpeername family=2, recv 0x5a)
+
+Note: fork needs >=2 vCPUs on this build (-smp 1 hangs fork -- pre-existing,
+see the irq-cow report).  The test uses unbuffered stdout because OSv does not
+flush the shared stdio buffer at fork-child exit.
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+CONF_fork=1, fs=rofs, image=tests, -j8, KVM -smp 2:
+  tst-fork-conn-socket      reproduced on HEAD (getsockname EBADF/ENOTSOCK);
+                            PASS with fix                        <- NEW
+  tst-fork                  done: 0 failures
+  tst-fork-cow              done: 0 failures
+  tst-fork-deep             done: 0 failures
+  tst-fork-preempt          done: 0 failures
+  tst-fork-arena-freelist   done: 0 failures
+  tst-fork-irq-cow          done: 0 failures
+  tst-execve                done: 0 failures
+  tst-pgfork                done: 0 failures
+  tst-fork-socket           PASS (child's close only dropped a ref; parent
+                            socket survived)  <- unchanged: the fix preserves
+                            the 0a874234f child-close invariant
+
+Non-fork socket/net sanity (conf_fork=1 image, KVM -smp 2):
+  tst-bsd-tcp1              *** No errors detected (2 test cases)
+  tst-af-local             SUMMARY: 30 tests, 0 failures
+  tst-epoll-pwait2         epoll_pwait2 tests PASSED
+  tst-poll                 *** No errors detected (3 test cases)
+
+conf_fork=0 sanity (all new code is #if CONF_fork; process/fork.o not compiled):
+  ./scripts/build conf_fork=0 fs=rofs image=tests -> rc=0 (CONF_fork==0 header)
+  conf_fork=0: tst-bsd-tcp1 *** No errors detected; tst-af-local 30/0 failures.
+  (Note: switching conf_fork requires clearing build/*/.config +
+   gen/include/osv/kernel_config_fork.h so kconfig regenerates the header --
+   the same build-config caching quirk noted in prior reports.)
+
+PG image rebuilt: ./scripts/build conf_fork=1 fs=ramfs image=pg18-fork -> rc=0.
+
+================================================================================
+THE PAYOFF -- PostgreSQL status (HONEST -- getsockname WALL GONE, NO ROWS YET)
+================================================================================
+Boot: qemu -enable-kvm -cpu host -m 4G -smp 2 -nographic
+        -kernel build/last/loader.elf
+        -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data"
+        -drive .../usr.img,if=virtio,cache=none
+        -netdev user,id=un0,hostfwd=tcp::5432-:5432 -device virtio-net-pci,netdev=un0
+
+THE getsockname ENOTSOCK/EBADF WALL IS GONE.  Across the entire PG run (single
+and 3-concurrent psql connects) there are ZERO getsockname/ENOTSOCK/EBADF errors:
+  grep -ac 'getsockname\|ENOTSOCK\|EBADF'  /tmp/pg-*.log  = 0
+The forked client backend now advances PAST pq_init()'s getsockname -- the wall
+that previously closed the connection is fixed.
+
+Console (single connect):
+  LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+  LOG:  listening on IPv4 address "0.0.0.0", port 5432
+  LOG:  database system is ready to accept connections          <- PM_RUN
+  ERROR: could not open shared memory segment "/PostgreSQL.<n>": ENOENT  <- NEXT
+  (NO "getsockname() failed" anywhere)
+
+psql (from the container to the guest's hostfwd :5432):
+  $ psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -c 'select 1'
+  psql: error: connection to server ... failed: FATAL:  could not open shared
+  memory segment "/PostgreSQL.<n>": ENOENT
+  (or a timeout while the postmaster churns the bgworker DSM restart loop)
+
+psql ROWS: NOT YET.  I do NOT claim PG serves queries.  The specific wall handed
+off -- getsockname() failed: ENOTSOCK in the forked backend -- is root-caused
+and FIXED; the backend now passes the socket handoff.  The first query is
+blocked by two SEPARATE, DISTINCT next walls:
+
+NEXT WALL (precisely symbolized, DISTINCT from the connection-socket wall):
+  (1) POSIX SHARED MEMORY / PG DYNAMIC SHARED MEMORY (DSM):
+        FATAL/ERROR: could not open shared memory segment "/PostgreSQL.<n>":
+                     ENOENT
+      PG's DSM (src/backend/storage/ipc/dsm_impl.c dsm_impl_posix) uses
+      shm_open("/PostgreSQL.<handle>", ...).  OSv's shm_open (libc/shm.cc) keeps
+      named segments in a kernel-static registry `posix_shm_objects` (name ->
+      fileref).  A backend that shm_open()s the DSM control segment BY NAME
+      (without O_CREAT) does not find it -> ENOENT.  This is the DSM/POSIX-shm
+      coherence-across-fork gap the handoff predicted; it must be resolved for
+      the backend to finish InitPostgres (dsm_backend_startup attaches the DSM
+      control segment during EVERY backend's startup, not just parallel query).
+  (2) NET-RX-in-IRQ fault (seen once, on the connect path):
+        __assert_fail <- page_fault <- epoll_wake_in_rcu
+          <- net_channel::wake_pollers <- classifier::post_packet
+          <- virtio::net::receiver
+      A fault taken in the virtio-net RX path while waking epoll pollers.  This
+      is a DIFFERENT fault from the timer/console IRQ-COW wall (that one was in
+      timer_set::expire); it is on the inbound-packet delivery path and surfaces
+      under the bgworker DSM churn.  Symbolized here as the next wall to chase
+      after DSM; it is NOT the getsockname wall.
+
+Do NOT read this as "PG works": no rows served.  But the specific wall handed
+off -- FATAL: getsockname() failed: ENOTSOCK in the forked client backend -- is
+root-caused (postmaster close() nulling the shared gfdt slot the forked backend
+inherits) and FIXED, verified by a regression test (reproduces on HEAD, passes
+with the fix), zero getsockname errors in the live PG run, and the backend now
+advancing past the socket handoff to the DSM attach.
+
+================================================================================
+FILES CHANGED (committed on integ/pg-fork-arena, author Greg Burd, 4589e0325)
+================================================================================
+  libc/process/fork.cc              fork_owner_close_inherited_fd (owner keeps
+                                    the shared slot for a live inheriting child +
+                                    records it released); child-close and
+                                    teardown clear the slot only when the owner
+                                    released it AND no other child holds it;
+                                    g_owner_released_fds bookkeeping (identity
+                                    heap).  All #if CONF_fork.
+  fs/vfs/kern_descrip.cc            fdclose() consults fork_owner_close_
+                                    inherited_fd before nulling gfdt[fd];
+                                    fork_clear_gfdt_slot_if() helper.  #if CONF_fork.
+  modules/tests/Makefile            register tst-fork-conn-socket.so.
+  tests/tst-fork-conn-socket.cc     new regression test (author Greg Burd).
+
+SHIPPING-PR RELEVANCE: PR #1455 (fork fd/socket inheritance).  This is the
+companion to 0a874234f: 0a874234f handled the CHILD-close direction (keep the
+shared slot for the parent), this handles the OWNER-close direction (keep the
+shared slot for a live child).  Together they make OSv's single-global-fd-table
+fork faithfully preserve shared socket fds in both directions -- exactly what
+PostgreSQL's postmaster<->backend handoff requires.
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+        (/tmp/fork-arena-progress.bundle on host + in container; includes
+         4589e0325; verified).
+arena-dev: left UP.  On floki (KVM, no EC2).
+================================================================================

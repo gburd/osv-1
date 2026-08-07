@@ -1,0 +1,24 @@
+config	hugepages	mode	clients	metric	value	unit	status	notes
+osv-fc	off	init	1	pgbench-i-s1000	NA	NA	BLOCKED	CREATE TABLE ... timestamp -> type "pg_catalog.timestamp" does not exist (catalog index page reads zero); fork/COW shared-buffer coherence wall
+osv-fc	off	rw	1	tps	NA	NA	BLOCKED	pgbench -i never completes; no data to run -c against
+osv-fc	off	rw	4	tps	NA	NA	BLOCKED	same
+osv-fc	off	rw	8	tps	NA	NA	BLOCKED	same
+osv-fc	off	rw	16	tps	NA	NA	BLOCKED	same
+osv-fc	off	rw	32	tps	NA	NA	BLOCKED	same
+osv-fc	off	rw	64	tps	NA	NA	BLOCKED	same
+osv-fc	off	ro	1	tps	NA	NA	BLOCKED	same (RO sweep needs the same -i data)
+osv-fc	off	ro	8	tps	NA	NA	BLOCKED	same
+osv-fc	off	ro	16	tps	NA	NA	BLOCKED	same
+osv-fc	off	ro	32	tps	NA	NA	BLOCKED	same
+osv-fc	off	ro	64	tps	NA	NA	BLOCKED	same
+osv-fc	on	rw	1	tps	NA	NA	BLOCKED	same wall, huge-page-independent (config-independent: default & 8GB shared_buffers both fail)
+osv-fc	on	rw	4	tps	NA	NA	BLOCKED	same
+osv-fc	on	rw	8	tps	NA	NA	BLOCKED	same
+osv-fc	on	rw	16	tps	NA	NA	BLOCKED	same
+osv-fc	on	rw	32	tps	NA	NA	BLOCKED	same
+osv-fc	on	rw	64	tps	NA	NA	BLOCKED	same
+osv-fc	off	boot	NA	boot_ms	135	ms	OK	OSv boots under Firecracker v1.7.0, ZFS root mounts, eth0 up
+osv-fc	off	raidz	NA	scrub	0	errors	OK	raidz1(4xEBS)+SLOG+L2ARC ONLINE, scrub repaired 0B 0 errors
+osv-fc	off	net	NA	xinstance	1	ok	OK	external driver 172.31.47.227 -> DB host 172.31.47.153:5432 DNAT -> guest -> PG18.4 musl (real cross-instance TCP)
+osv-fc	off	singleconn	NA	sql	1	ok	OK	one persistent backend: pg_authid/pg_class/pg_statistic reads, CREATE/INSERT/SELECT/DROP (no timestamp) all OK
+osv-fc	off	concurrent	16	success	1	backends	FAIL	16 concurrent logins: OK=1 FAIL=15, pg_class_relname_nsp_index zero page (fork/COW wall)

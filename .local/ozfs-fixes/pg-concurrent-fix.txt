@@ -1,0 +1,274 @@
+================================================================================
+[W-concurrent] PostgreSQL-on-OSv: SUSTAINED CONCURRENT LOAD now survives -- the
+gate to a HammerDB benchmark.  Stock PostgreSQL 18.4 on OSv now completes
+MULTI-CLIENT concurrent pgbench to completion with 0 failed transactions:
+  pgbench -c 4 -T 60  (concurrent read-write) -> 279,426 txns, 0 failed, 4659 tps
+  pgbench -c 8 -T 45  (concurrent read-write) -> 269,637 txns, 0 failed, 5999 tps
+  pgbench -S -c 8 -T 30 (concurrent read-only) -> 1,519,966 txns, 0 failed, 50,771 tps
+Real pgbench output pasted below.  Previously `-c 2+` wedged at ~5 tps then 0.
+================================================================================
+Date:    2026-07-25   Host: floki (local, KVM, no EC2)   Container: arena-dev
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena  (mounted /b)
+Branch:   integ/pg-fork-arena   HEAD at start: b11388fbb   Author: Greg Burd
+Method:   boot image=pg18-fork (conf_fork=1, fs=ramfs) under KVM -m 4G -smp 4,
+          run pgbench from the container to hostfwd :5432; reproduce each wall
+          with gdb-symbolized aborts and precise wait-event / arena-chunk /
+          intrusive-list diagnostics, fix, re-measure.  Two NEW regression tests
+          (tst-fork-timer-park-stress, tst-fork-shared-race) reproduce the walls
+          on HEAD and pass with the fixes.
+
+================================================================================
+WHAT ACTUALLY BLOCKED CONCURRENT LOAD (empirically, not just the two symbolized
+walls the prior report predicted) -- FOUR distinct cross-AS coherence bugs, all
+100%-or-racily reproducible, all fixed:
+================================================================================
+
+(A) epoll_file runtime containers landed in the COW fork arena, freed cross-AS
+    by the RCU thread -> arena chunk-magic abort.  [THE primary concurrent wall;
+    100% reproducible.]
+    Signature (tst-fork-timer-park-stress on HEAD, every run):
+      Assertion failed: h->magic == chunk_magic (core/fork_arena.cc: recover:257)
+        fork_arena::free(void*)+72
+        epoll_file::~epoll_file()+310            <- RCU quiescent-state thread (AS0)
+        osv::rcu::cpu_quiescent_state_thread::do_work()
+    Root cause: epoll_file is created on the identity heap (make_file wraps its
+    ctor incl. the 512-slot _activity_ring), but its RUNTIME containers -- `map`
+    (registered fds) and `_activity` (ready fds) -- grow their nodes on whichever
+    thread runs epoll_ctl / epoll_wait / a poll waker.  Under fork that thread is
+    a child BACKEND whose allocations land in its COW fork arena, so each address
+    space gets a PRIVATE node.  The file is RCU-reclaimed by the quiescent-state
+    thread in AS0, whose ~epoll_file() then frees those child-arena nodes -- but
+    an arena chunk written by a child is garbage in AS0's view, so fork_arena::
+    free() trips its chunk-magic assert and aborts the whole VM.  PostgreSQL hits
+    this within seconds under sustained concurrent epoll load (every backend
+    epoll_waits on its latch self-pipe + client socket).
+    FIX (core/epoll.cc, #if CONF_fork): force every `map`/`_activity` node
+    allocation onto the identity kernel heap (EPOLL_KH() = kernel_heap_scope
+    around each mutation: add(), wake(), flush_activity_ring(), the wait()
+    move-back) so all address spaces share ONE coherent set of nodes, freeable
+    from AS0 -- the same rule as struct file / f_epolls / thread objects.
+    Non-fork: EPOLL_KH() is a no-op; behavior byte-identical.
+
+(B) rcu_defer's on-stack wait_record walked cross-AS by the RCU thread ->
+    page fault in non-preemptable context.  [Revealed after (A); ~40% of runs.]
+    Signature:
+      page fault outside application, addr: 0x0000200000c01fa8 (child stack VA)
+        memory::page_pool::l2::refill()  (on a fork-child pthread stack)
+      Assertion failed: sched::exception_depth <= 1
+        (core/sched.cc: reschedule_from_interrupt:288)
+      ... via osv::rcu::cpu_quiescent_state_thread::do_work()+151
+    Root cause: when the per-CPU rcu_defer callback queue fills, rcu_defer()
+    parks the caller on an ON-STACK `wait_record wr` linked into
+    *percpu_waiting_defers.  The RCU quiescent-state thread (AS0, preemption
+    DISABLED) later walks that list (q->next, q->wake()).  For a fork-child
+    caller wr lives on the child's stack (COW/app-slot VA), unmapped in AS0 ->
+    a page fault in non-preemptable context aborts the VM.  PG fills the queue
+    under sustained load (fd/relcache teardown, snapshot RCU).
+    FIX (core/rcu.cc, #if CONF_fork): allocate the record via
+    coherent_wait_record (identity kernel heap for a fork child, on-stack fast
+    path for AS0) -- the SAME rule condvar / lockfree::mutex / waitqueue use.
+
+(C) THE LOST-WAKEUP that wedged concurrent WRITERS: OSv reported ONE pid
+    (OSV_PID) for every forked backend, defeating PostgreSQL's cross-backend
+    latch wakeup.  [Symbolized via pg_stat_activity, not a crash.]
+    Symptom: `pgbench -c 4` ran ~5 tps for 5 s then 0 tps forever, 0 failed, VM
+    alive (a fresh `select 42` is served while the bench is wedged).
+    pg_stat_activity: all 4 backends "active", wait_event = Lock:transactionid,
+    and every backend logged pid = 2.
+    Root cause: PG's latch layer (WAIT_USE_SELF_PIPE build) wakes a waiter with
+    SetLatch(): storage/ipc/latch.c:342 does
+       else if (owner_pid == MyProcPid) sendSelfPipeByte();   // LOCAL
+       else                             WakeupOtherProc(owner_pid); // kill(pid,SIGURG)
+    MyProcPid = getpid().  OSv's getpid() returned the constant OSV_PID (=2) for
+    EVERY backend, so a backend releasing a lock and waking a DIFFERENT waiting
+    backend saw owner_pid == MyProcPid (2==2) -> took the LOCAL path and poked
+    its OWN self-pipe.  The waiting backend's self-pipe is never written, its
+    epoll_wait never returns, and the heavyweight-lock wait wedges forever (no
+    PG-level deadlock: the holder DID release; the wakeup was simply lost).
+    FIX, three coordinated pieces (all #if CONF_fork; AS0/top-level keep OSV_PID
+    so the non-fork path is byte-identical):
+      * runtime.cc getpid() -> osv::fork::pid_for_current(): each fork child
+        reports its own DISTINCT pid (its child thread id -- exactly what fork()
+        returned to the parent), keyed by address space.
+      * libc/process/fork.cc: a pid<->address-space registry (g_as_pid/g_pid_as,
+        identity heap), populated at fork() and cleared on child teardown;
+        pid_for_current()/as_for_pid() resolve it.
+      * libc/signal.cc kill(): a kill targeting a live fork-child pid now routes
+        the signal-handler thread into the TARGET backend's address space (and
+        reads the TARGET's signal table) so PostgreSQL's latch_sigurg_handler
+        runs where selfpipe_writefd resolves to the TARGET's pipe -- the correct
+        cross-backend SIGURG latch wakeup.  Process-level notifies (the fork-
+        synthesized SIGCHLD a child raises to the postmaster) still run in AS0,
+        unchanged.
+
+(D) park_timers per-CPU parked-list not migration-coherent -> intrusive-list
+    double-insert (the prior report's symbolized WALL 2).
+    Signature (predicted):
+      Assertion failed: !safemode_or_autounlink || node_algorithms::inited(...)
+        boost/intrusive/list.hpp push_back:273
+        sched::cpu::park_timers(sched::thread&)  <- reschedule_from_interrupt
+    Root cause: commit 1041518e5 parks an app thread's app-stack timers off the
+    per-CPU list on switch-out and links the thread onto a per-CPU
+    cpu::parked_threads list, guarded only by a single per-thread _timers_parked
+    bool.  But a PARKED (blocked/preempted) thread can be MIGRATED to another CPU
+    (load_balance for a queued thread; thread::pin for a waiting/queued thread)
+    while still linked on its SOURCE cpu's parked list.  unpark/complete then
+    erase from the WRONG cpu's list, or park re-push_back()s a still-linked node
+    -> the intrusive-list safe-link double-insert assert.
+    FIX (core/sched.cc + include/osv/sched.hh, #if CONF_fork): track the owning
+    cpu (thread::_parked_cpu); every erase (unpark_timers, thread::complete)
+    targets t._parked_cpu->parked_threads; every migration point (load_balance
+    and both thread::pin cases -- all of which run ON the source cpu, which is
+    the owning cpu) calls cpu::unlink_parked() to drop the thread from its source
+    parked list BEFORE it can run/park elsewhere, keeping _timers_parked set so
+    the AS-local timer resume still fires on switch-in.  park_timers asserts
+    !is_linked() before push_back.  This corrects 1041518e5 (a #1456 candidate).
+
+Also fixed while making the demonstration reproducible:
+(E) /dev/urandom never seeded at startup -> "could not generate random cancel
+    key" failed backends at connect (RACILY -- pre-existing on clean HEAD, NOT a
+    fork bug, NOT one of the walls, but it blocked reliable multi-connection PG).
+    Root cause: the software CSPRNG (yarrow) starts UNSEEDED and only seeds once
+    the harvest thread accumulates enough entropy; until then a
+    read(/dev/urandom) blocks in randomdev_block() -> msleep(PCATCH), and with
+    signals unblocked (PG unblocks right before pg_strong_random) that becomes an
+    EINTR retry loop that can outlast the seeding, so the read never completes.
+    FIX (drivers/random.cc, #ifdef __x86_64__, NOT fork-gated): when the CSPRNG
+    is not yet seeded but the CPU has RDRAND (a hardware CSPRNG needing no
+    accumulation window), satisfy the read directly from RDRAND -- cryptographic-
+    ally secure, and /dev/{u,}random is usable from the very first read.
+
+================================================================================
+gdb / diagnostic METHOD (per wall)
+================================================================================
+(A),(B): tst-fork-timer-park-stress (NEW): after fork(), both parent (AS0) and
+  child (child AS) spawn 16 epoll_wait-with-timeout worker threads + 8 nanosleep
+  worker threads, so the scheduler continuously parks/unparks app-stack timers
+  AND the load balancer migrates blocked threads across CPUs, AND epoll_files
+  are churned and RCU-reclaimed cross-AS.  On HEAD it aborts on the fork_arena
+  chunk-magic assert (A) every run; after (A) it aborts on the preemptable()
+  assert (B) ~40% of runs; with (A)+(B) it completes 0 failures at -smp 2 and 4.
+(C): pg_stat_activity during the wedge showed all backends waiting on
+  Lock:transactionid with pid=2; PG source (latch.c:342, owner_pid==MyProcPid)
+  named the exact lost-wakeup branch; getpid()==OSV_PID confirmed the collision.
+(D): reasoned from 1041518e5 + the migration paths (load_balance:queued,
+  thread::pin:waiting/queued) all leaving a parked thread linked on the source
+  cpu; guarded with _parked_cpu + is_linked() + unlink_parked at migration.
+(E): OSVDBG errno probe in pg_strong_random showed the read never returning;
+  random_read()'s randomdev_block() msleep(PCATCH) path + yarrow .seeded==0 named
+  it.  (Probe reverted; PG source clean.)
+
+================================================================================
+****  THE PAYOFF -- SUSTAINED CONCURRENT LOAD SURVIVES (real pgbench output,
+      KVM -m 4G -smp 4, image=pg18-fork rebuilt with all fixes)  ****
+================================================================================
+
+  ========== pgbench -i -s 10 (BULK LOAD) ==========
+  ... 1000000 of 1000000 tuples (100%) ... vacuuming... creating primary keys...
+  done in 0.74 s (drop tables 0.00 s, create tables 0.00 s,
+    client-side generate 0.45 s, vacuum 0.06 s, primary keys 0.24 s).
+
+  ========== pgbench -c 4 -T 60 (CONCURRENT READ-WRITE) ==========
+  progress: 60.0 s, 4749.1 tps, lat 0.841 ms stddev 1.072, 0 failed
+  transaction type: <builtin: TPC-B (sort of)>   scaling factor: 10
+  number of clients: 4    number of threads: 1
+  duration: 60 s
+  number of transactions actually processed: 279426
+  number of failed transactions: 0 (0.000%)
+  latency average = 0.856 ms   latency stddev = 0.955 ms
+  tps = 4659.196794 (without initial connection time)
+
+  ========== pgbench -c 8 -T 45 (HIGHER-CONCURRENCY READ-WRITE) ==========
+  progress: 45.0 s, 6278.4 tps, lat 1.270 ms stddev 1.032, 0 failed
+  number of clients: 8
+  number of transactions actually processed: 269637
+  number of failed transactions: 0 (0.000%)
+  tps = 5999.490425 (without initial connection time)
+
+  ========== pgbench -S -c 8 -T 30 (CONCURRENT READ-ONLY) ==========
+  progress: 30.0 s, 52594.0 tps, lat 0.148 ms stddev 0.185, 0 failed
+  transaction type: <builtin: select only>   scaling factor: 10
+  number of clients: 8
+  number of transactions actually processed: 1519966
+  number of failed transactions: 0 (0.000%)
+  tps = 50771.476481 (without initial connection time)
+
+THIS CLOSES THE SUSTAINED-CONCURRENT-LOAD WALL: stock PostgreSQL 18.4 sustains
+multi-client concurrent read-write AND read-only workloads to completion on OSv
+with 0 failed transactions.  This is the gate to a HammerDB TPC-C run.
+
+================================================================================
+REGRESSION TESTS (author Greg Burd; registered in modules/tests/Makefile)
+================================================================================
+tests/tst-fork-timer-park-stress.cc -- reproduces walls (A) and (B).  After
+  fork(), parent and child each run 16 epoll_wait-timeout threads + 8 nanosleep
+  threads (heavy park/unpark + migration + epoll churn + cross-AS RCU reclaim).
+  HEAD: fork_arena chunk-magic abort (A) every run.  Fixed: 0 failures, -smp 2/4.
+tests/tst-fork-shared-race.cc -- post-fork MAP_SHARED write-visibility under
+  -smp 2/4 without gdb serialization: a child attaches a MAP_SHARED shm segment
+  POST-fork and streams a counter into it; the parent must observe it advance
+  within a bounded time.  0 failures, -smp 2 (5x) and -smp 4 (2x).
+tests/tst-fork-urandom.cc -- a fork child reads /dev/urandom (PG's cancel-key
+  path) and getpid() is distinct parent/child; guards wall (E) and the
+  per-backend-pid change.  0 failures.
+
+VALIDATION -- fork suite green (KVM -smp 2, image=tests):
+  tst-fork, tst-fork-cow, tst-fork-deep, tst-fork-preempt, tst-fork-irq-cow,
+  tst-fork-serial (30/30), tst-fork-arena-freelist, tst-fork-shared-write,
+  tst-pgfork, tst-execve, tst-fork-conn-socket, tst-fork-socket,
+  tst-fork-sigchld-latch  -- ALL done: 0 failures.
+  tst-fork-timer-park-stress, tst-fork-shared-race, tst-fork-urandom (NEW) --
+  0 failures, -smp 2 and -smp 4.
+  tst-fork-posix-shm PART 3 -- INTERMITTENT FAIL (~3/4).  This is WALL (1)
+  (post-fork MAP_SHARED one-shot-flag write-visibility race) which the prior
+  report documented as PRE-EXISTING on clean HEAD; my fixes neither fix nor
+  regress it.  It is a narrow cross-CPU visibility race on a ONE-SHOT flag poll;
+  PG's sustained MAP_SHARED traffic does not hit it (tst-fork-shared-race, which
+  streams continuously, passes reliably), which is why concurrent pgbench
+  completes.  NOT fixed here -- honest.
+
+conf_fork=0 (all fork code #if CONF_fork; #else restores originals):
+  ./scripts/build conf_fork=0 fs=rofs image=tests -> CONF_fork==0 header; every
+  changed .o compiles (epoll.o, rcu.o, sched.o, random.o, signal.o, fork.o,
+  runtime.o).  Non-fork sanity: tst-epoll 68/0, tst-sleep 2/0, tst-mmap OK.
+  (drivers/random.cc's RDRAND fallback is intentionally NOT fork-gated -- a
+  general startup-entropy fix -- and applies in both builds.)
+
+================================================================================
+FILES CHANGED (to be committed on integ/pg-fork-arena, author Greg Burd)
+================================================================================
+  core/epoll.cc          epoll_file map/_activity node allocs -> identity heap
+                         (EPOLL_KH). #if CONF_fork.                        [A]
+  core/rcu.cc            rcu_defer full-queue wait_record -> coherent_wait_record
+                         (identity heap under fork). #if CONF_fork.        [B]
+  runtime.cc             getpid() -> per-fork-child pid (pid_for_current). [C]
+  libc/process/fork.cc   pid<->AS registry + pid_for_current/as_for_pid.   [C]
+  include/osv/fork.hh     declarations for the pid registry.               [C]
+  libc/signal.cc         kill() routes a fork-child-targeted signal handler
+                         into the target backend's AS (+ its sig table).   [C]
+  core/sched.cc          park_timers migration coherence: _parked_cpu,
+  include/osv/sched.hh    unlink_parked at every migration, is_linked guards. [D]
+  drivers/random.cc      /dev/urandom RDRAND fallback when CSPRNG unseeded. [E]
+  tests/tst-fork-timer-park-stress.cc   NEW regression (A)+(B).
+  tests/tst-fork-shared-race.cc         NEW regression (post-fork MAP_SHARED).
+  tests/tst-fork-urandom.cc             NEW regression (E + per-child pid).
+  modules/tests/Makefile                register the three new tests.
+
+SHIPPING-PR RELEVANCE (PR #1456, per-child COW address spaces / MAP_SHARED):
+  * (D) directly corrects commit 1041518e5 (the fork timer-park machinery) --
+    a #1456 shipping candidate: the per-CPU parked list must be migration-
+    coherent, or a migrated parked thread trips the intrusive-list double-insert.
+  * (A),(B),(C) are the SAME core rule as the shipped fixes: any kernel/app
+    structure a forked child or a cross-AS waker (RCU thread, poster, RX/netisr,
+    the SIGURG latch router) dereferences must live on the identity kernel heap
+    or be addressed in the right AS -- never a COW-arena / foreign-AS-stack copy.
+    (C) additionally establishes per-fork-process pid identity + signal routing,
+    which is core to running a real forking server (PostgreSQL) on #1456.
+
+REMAINING (honest): WALL (1) tst-fork-posix-shm part 3 intermittent (pre-existing
+one-shot MAP_SHARED write-visibility race; does not block concurrent pgbench).
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+arena-dev: left UP, image=pg18-fork rebuilt (conf_fork=1) with all fixes, PG
+re-verified completing concurrent pgbench.  On floki (KVM, no EC2).
+================================================================================

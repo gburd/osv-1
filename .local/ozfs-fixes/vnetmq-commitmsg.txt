@@ -1,0 +1,48 @@
+virtio-net: implement multiqueue (VIRTIO_NET_F_MQ)
+
+The virtio-net driver hardcoded a single Rx/Tx queue pair drained by one
+receive poll thread.  Every inbound packet for every connection funnelled
+through that one queue and one thread on one CPU, so receive-side network
+throughput could not scale past what a single core can drain, regardless of
+how many vCPUs the guest had.  A concurrency sweep of a network-bound server
+workload showed throughput saturating at a low connection count and then
+regressing as contention grew, with most vCPUs idle: the load was serialized
+on the single queue, not CPU-bound.
+
+Negotiate VIRTIO_NET_F_MQ (and VIRTIO_NET_F_CTRL_VQ, required to activate it)
+and drive N Rx/Tx queue pairs:
+
+  - Read max_virtqueue_pairs from config space and pick the pair count as
+    min(advertised pairs, number of vCPUs, MSI-X vector budget).
+  - Replace the single rxq/txq with vectors of queue pairs.  Each Rx queue has
+    its own poll thread, pinned to a distinct CPU so receivers run in parallel;
+    each Tx queue has its own xmitter.  Transmit selects a Tx queue by CPU id.
+  - Register one MSI-X vector per data virtqueue (entry = virtqueue index, per
+    the 1:1 mapping setup_queue() programs) so a completion on queue i wakes
+    that queue's thread.
+  - Send VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET on the control virtqueue to tell the
+    device how many pairs the guest will use.
+
+When the device does not offer VIRTIO_NET_F_MQ (or offers a single pair, as
+with the MMIO transport's shared interrupt) the driver uses exactly one queue
+pair and behaves as before.
+
+Also add a process-wide MSI-X vector budget shared by all virtio devices.  The
+x86-64 IDT has only 224 usable vectors (32..255), shared by every device.  A
+high-vCPU guest with several multiqueue virtio devices (for example a handful
+of multiqueue virtio-blk disks plus multiqueue virtio-net) could request more
+one-vector-per-queue bindings than there are vectors and abort during driver
+load, so the guest could not boot at high vCPU counts at all.  Now:
+
+  - register_interrupt_handler() returns 0 (an impossible MSI vector, since
+    0..31 are CPU exceptions) instead of aborting when the IDT is full, and
+    msix_vector construction / request_vectors() treat that as a soft failure;
+  - virtio_driver::reserve_msix_vectors() hands out vectors from a shared pool
+    so each multiqueue device caps its interrupt-bearing queue count and still
+    gets at least one vector.
+
+virtio-blk and virtio-net both consult the budget, so a guest with many vCPUs
+and several multiqueue virtio devices boots instead of crashing, and each
+device runs as many queues as the budget allows.
+
+Signed-off-by: Greg Burd <greg@burd.me>

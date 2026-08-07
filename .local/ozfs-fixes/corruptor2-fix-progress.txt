@@ -1,0 +1,78 @@
+CORRUPTOR #2 -- MECHANISM CONFIRMED (page-level UAF) + WORKING MITIGATION
+Author: Greg Burd
+Box: osv-cor-a ec2-user@3.16.46.123, container osv-build, /b
+Branch: corruptor-fix @ 41c360da + experimental free_page quarantine (CONF_fork)
+
+=== DECISIVE RESULT (RUN F, quarantine build) ===
+Added a bounded per-CPU QUARANTINE to memory::free_page() under CONF_fork: a freed page
+is parked in a per-CPU ring of 512 pages and only handed back to page_pool after 512
+subsequent frees (delaying reuse). Everything else stock.
+
+HEAVY REPRO (fresh 8k lz4 single-file pool, -smp4 -m32G KVM) -- the sequence that
+crashed/EIO'd on EVERY prior run this session:
+  pgbench -i -s1000  -> done in 120.39 s, rc=0, CLEAN (no EIO on vacuum/PK).
+  pgbench -c16 -j4 -T120 -> 285,491 tx, 0 FAILED, 2400 tps, rc=0.
+  NO range_tree VERIFY3U, NO migrate_disable/preemptable assert, NO EIO, guest alive.
+
+=> CORRUPTOR #2 IS A PAGE-LEVEL USE-AFTER-FREE.  A 4096B page-pool page (ABD scatter
+   chunk / range_tree btree leaf / TCB) is freed via free_page() while a STALE reference
+   (an in-flight zio/abd, or a cross-AS/COW reference under fork) still points into it;
+   immediate recycling let the stale write land on the next live occupant = the wild
+   write.  Delaying reuse (quarantine) lets the stale reference drain onto a not-yet-
+   reused page -> corruption stops.  This is the DIRECT page-path sibling of corruptor
+   #1 (which hardened the small-object pool -> page_pool boundary; #2 is the >1024B
+   objects that use alloc_page/free_page directly and bypass that boundary).
+   CLASSIFICATION: [fork-stack] (CONF_fork page-reclaim coherence, exactly like #1).
+
+The 512-page quarantine is a MITIGATION/PROOF, not the final fix.  NEXT: (a) NAME the
+writer -- shrink the quarantine window / watchpoint a quarantined page to catch the
+stale store's PC; (b) turn the proof into the minimal correct fix (defer page reclaim to
+a quiescent point, or hold pages until no reference remains), mirroring #1.
+
+=== WRITER FINGERPRINT CAPTURED (RUN G, quarantine poison/verify) ===
+The mkfs/cpiod image-build boot (a minimal ZFS workload) reproduces the stale write
+PROLIFICALLY (35+ hits in one boot). TWO distinct stale-write signatures on freed
+(quarantined) pages -- both are 0x500 mem_area::page ALIAS pointers:
+
+  (1) off=64,   val = <page> | page-area  (the page's OWN mem_area::page self-alias),
+      e.g. page=0x400009af0000 -> val=0x500009af0000.
+  (2) off=1128, val = <other page>|page-area + 0x428,
+      e.g. val=0x500004a00428.  <-- THIS IS CORRUPTOR #1's EXACT RUN-3 SIGNATURE
+      ("a 0x500 page-alias pointer stored at off 1128 of a freed 0x400 page").
+
+=> The writer is the SMALL-OBJECT POOL's lock-free MPSC garbage path writing
+   free_object::next links (mem_area::page aliases) INTO a page that was freed via the
+   PAGE path (free_page).  off=1128 and off=64 are free_object slots inside the page.
+   This is the SAME mechanism corruptor #1 named, but #1's fix only deferred the SMALL
+   pool's own page release (flush_empty_pages from collect_garbage).  A pool backing
+   page is still reaching page_pool / free_page with live MPSC links pointing into it,
+   OR a page freed via free_page is being treated by the pool's garbage consumer as a
+   pool object.  The 0x500 alias == std_malloc's page-branch return
+   (translate_mem_area(main,page,alloc_page())): the pool stores that returned pointer
+   as a free-list link.
+NEXT: gdb hardware watchpoint on a freshly-quarantined page (global pgq_last_poisoned,
++64) during the mkfs boot -> the writer PC + backtrace names the exact store.
+
+=== WRITER NAMED (source-level, corroborated by fingerprint) ===
+The stale write is free_object::next being stored by the small-object pool's lock-free
+MPSC garbage queue (include/lockfree/unordered-queue-mpsc.hh):
+  push(item):  item->next = old; CAS(_head, item)   // stores a 0x500 next-link into item
+  pop():       _poll_list = r->next                 // consumer look-ahead reads/advances
+free_object lives at offsets 64 / 1128 within a pool backing page (the observed victim
+offsets).  When that backing page has already been returned to page_pool via free_page(),
+the push()'s "item->next = old" (or a pop() look-ahead advance) writes/reads a 0x500
+page-alias into the RECYCLED page = the wild write.  Offset 1128 is corruptor #1's exact
+RUN-3 signature -> same subsystem, residual case #1's fix did not fully close.
+
+GAP vs corruptor #1's fix: #1 deferred the pool's OWN page release (flush_empty_pages)
+to collect_garbage AFTER draining every incoming sink on the CONSUMER cpu, arguing no
+MPSC link then references a pool object.  But a PRODUCER on another cpu executing
+free_different_cpu()->sink->free()->queue.push(obj) writes obj->next CONCURRENTLY with
+the consumer's drain+flush; and pop()'s _poll_list look-ahead dereferences r->next of an
+object whose backing page the consumer just flushed.  So a pool backing page can still
+reach free_page()/page_pool while an in-flight push/pop touches an object in it.
+
+WORKING FIX (proven): bounded per-CPU quarantine in free_page() (CONF_fork) delays page
+reuse so the in-flight push/pop store lands on a not-yet-reused page.  Heavy repro passes
+(pgbench -i -s1000 clean + -c16 -T120 285k tx 0 failed).  This is the page-path analog
+of #1's deferred reclaim.  REFINING to the minimal correct form next.

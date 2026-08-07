@@ -1,0 +1,1647 @@
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /home/ec2-user/osv/build/release.x64/loader.elf.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+Python Exception <class 'AttributeError'>: '_Fake' object has no attribute 'pretty_printers'
+Python Exception <class 'gdb.error'>: Error occurred in Python: '_Fake' object has no attribute 'pretty_printers'
+Error occurred in Python: Error occurred in Python: '_Fake' object has no attribute 'pretty_printers'
+0x000010000061140c in ?? ()
+thread 0x400000017040 reclaimer
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x488add90) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400000017040) at core/sched.cc:1505
+#4  0x0000000040355d0d in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, waiter::wait(sched::timer*) const::{lambda()#1}>(sched::thread::dummy_lock&, waiter::wait(sched::timer*) const::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<waiter::wait(sched::timer*) const::{lambda()#1}>(waiter::wait(sched::timer*) const::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  waiter::wait (tmr=0x0, this=0x50000001ee80) at include/osv/wait_record.hh:51
+#7  condvar::wait (this=this@entry=0x488f98d0 <memory::reclaimer_thread+16>, user_mutex=user_mutex@entry=0x488f9980 <memory::free_page_ranges_lock>, tmr=tmr@entry=0x0) at core/condvar.cc:62
+
+thread 0x400100394040 kvm_wall_clock_
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016df56040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100394040) at core/sched.cc:1505
+#4  0x0000000040385916 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, sched::thread::sleep_impl(sched::timer&)::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<sched::thread::sleep_impl(sched::timer&)::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  sched::thread::sleep_impl (t=...) at core/sched.cc:1860
+#7  0x00000000402fc44d in sched::thread::sleep<long, std::ratio<1l, 1l> > (duration=...) at include/osv/sched.hh:1566
+
+thread 0x4001003bb040 pagecache-wb
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004c5040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001003bb040) at core/sched.cc:1505
+#4  0x0000000040359985 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, pagecache::writeback_worker()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<pagecache::writeback_worker()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  pagecache::writeback_worker () at core/pagecache.cc:1093
+#7  operator() (__closure=<optimized out>) at core/pagecache.cc:1109
+
+thread 0x4001003d6040 page_pool_l2
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016972d040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001003d6040) at core/sched.cc:1505
+#4  0x000000004036b5ec in sched::thread::do_wait_for<sched::thread::dummy_lock, sched::wait_object<memory::page_pool::l2::fill_thread()::<lambda()> > > (mtx=<synthetic pointer>...) at include/osv/sched.hh:1504
+#5  sched::thread::wait_for<memory::page_pool::l2::fill_thread()::<lambda()> > () at include/osv/sched.hh:1528
+#6  memory::page_pool::l2::fill_thread (this=0x488f96c0 <memory::page_pool::global_l2>) at core/mempool.cc:1616
+#7  0x000000004036e50c in memory::page_pool::l2::l2()::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at core/mempool.cc:1390
+
+thread 0x4001003f9040 itimer-real
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40015cc14040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001003f9040) at core/sched.cc:1505
+#4  0x0000000040355d0d in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, waiter::wait(sched::timer*) const::{lambda()#1}>(sched::thread::dummy_lock&, waiter::wait(sched::timer*) const::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<waiter::wait(sched::timer*) const::{lambda()#1}>(waiter::wait(sched::timer*) const::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  waiter::wait (tmr=0x40010040ef90, this=0x600101a5f400) at include/osv/wait_record.hh:51
+#7  condvar::wait (this=this@entry=0x48930c88 <itimer_real+40>, user_mutex=user_mutex@entry=0x48930c60 <itimer_real>, tmr=tmr@entry=0x40010040ef90) at core/condvar.cc:62
+
+thread 0x400100410040 itimer-virt
+
+#0  thread_main () at arch/x64/entry.S:160
+
+thread 0x40010044b040 balancer0
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004c5040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=<optimized out>) at core/sched.cc:1505
+#4  0x000000004038527d in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, sched::cpu::load_balance()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<sched::cpu::load_balance()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  sched::cpu::load_balance (this=0x400000086040) at core/sched.cc:868
+#7  0x0000000040384b4a in sched::thread::main (this=0x40010044b040) at core/sched.cc:1499
+
+thread 0x400100462040 rcu0
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x488add90) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100462040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x60010044aad0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x40010047c040 page_pool_l1_0
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400159865040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010047c040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100494040 percpu0
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004c5040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100494040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x4001004ad040 async_worker0
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004c5040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001004ad040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x6001004ac040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x4001004ad040) at core/sched.cc:1499
+
+thread 0x4001004c5040 idle0
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40015c243040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040384df4 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::cpu::idle (this=0x400000086040) at core/sched.cc:563
+#4  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#5  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#6  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#7  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+
+thread 0x4001004dd040 idle1
+
+#0  sched::cpu::do_idle (this=this@entry=0x40000008a040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x40000008a040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x4001004dd040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x4001004dd040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100511040 idle2
+
+#0  sched::cpu::do_idle (this=this@entry=0x40000008e040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x40000008e040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100511040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100511040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100545040 idle3
+
+#0  sched::cpu::do_idle (this=this@entry=0x400000092040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x400000092040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100545040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100545040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100579040 idle4
+
+#0  sched::cpu::do_idle (this=this@entry=0x400000096040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x400000096040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100579040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100579040) at arch/x64/arch-switch.hh:512
+
+thread 0x4001005ad040 idle5
+
+#0  sched::cpu::do_idle (this=this@entry=0x40000009a040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x40000009a040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x4001005ad040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x4001005ad040) at arch/x64/arch-switch.hh:512
+
+thread 0x4001005e1040 idle6
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001c4040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001c4040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x4001005e1040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x4001005e1040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100600040 rcu1
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004dd040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100600040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x6001005ff9a0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x40010062d040 idle7
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001c8040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001c8040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x40010062d040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x40010062d040) at arch/x64/arch-switch.hh:512
+
+thread 0x40010064d040 page_pool_l1_1
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016f5fd040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010064d040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x40010067b040 percpu1
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016f5fd040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010067b040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100693040 idle8
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001cc040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001cc040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100693040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100693040) at arch/x64/arch-switch.hh:512
+
+thread 0x40010069a040 async_worker1
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x4001486ed040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010069a040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100699040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x40010069a040) at core/sched.cc:1499
+
+thread 0x4001006e0040 idle9
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001d0040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001d0040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x4001006e0040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x4001006e0040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100714040 idle10
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001d4040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001d4040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100714040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100714040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100748040 idle11
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001d8040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001d8040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100748040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100748040) at arch/x64/arch-switch.hh:512
+
+thread 0x40010074e040 rcu2
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100511040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008e040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010074e040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x6001007329b0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100796040 page_pool_l1_2
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400170124040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008e040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100796040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x40010079d040 idle12
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001dc040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001dc040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x40010079d040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x40010079d040) at arch/x64/arch-switch.hh:512
+
+thread 0x4001007b5040 percpu2
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100511040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008e040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001007b5040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x4001007fb040 async_worker2
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100511040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008e040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001007fb040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x6001007fa040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x4001007fb040) at core/sched.cc:1499
+
+thread 0x400100801040 idle13
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001e0040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001e0040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100801040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100801040) at arch/x64/arch-switch.hh:512
+
+thread 0x400100847040 idle14
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001e4040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001e4040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x400100847040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x400100847040) at arch/x64/arch-switch.hh:512
+
+thread 0x40010087b040 idle15
+
+#0  sched::cpu::do_idle (this=this@entry=0x4000001e8040) at core/sched.cc:540
+#1  0x0000000040384de0 in sched::cpu::idle (this=0x4000001e8040) at core/sched.cc:561
+#2  0x0000000040384e1c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:193
+#3  std::__invoke_impl<void, sched::cpu::init_idle_thread()::<lambda()>&> (__f=...) at /usr/include/c++/11/bits/invoke.h:61
+#4  std::__invoke_r<void, sched::cpu::init_idle_thread()::<lambda()>&> (__fn=...) at /usr/include/c++/11/bits/invoke.h:154
+#5  std::_Function_handler<void(), sched::cpu::init_idle_thread()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...) at /usr/include/c++/11/bits/std_function.h:290
+#6  0x0000000040384b4a in sched::thread::main (this=0x40010087b040) at core/sched.cc:1499
+#7  sched::thread_main_c (t=0x40010087b040) at arch/x64/arch-switch.hh:512
+
+thread 0x4001008af040 rcu3
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100545040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000092040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001008af040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x6001008999b0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x4001008c9040 page_pool_l1_3
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100545040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000092040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001008c9040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x4001008e1040 percpu3
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100545040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000092040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001008e1040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x4001008fa040 async_worker3
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100545040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000092040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001008fa040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x6001008f9040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x4001008fa040) at core/sched.cc:1499
+
+thread 0x400100912040 rcu4
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100579040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000096040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100912040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x6001009009d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x40010092c040 page_pool_l1_4
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40015c243040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000096040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010092c040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100944040 percpu4
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100579040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000096040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100944040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x40010095d040 async_worker4
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100579040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000096040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010095d040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x60010095c040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x40010095d040) at core/sched.cc:1499
+
+thread 0x400100975040 rcu5
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005ad040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000009a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100975040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x6001009639d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x40010098f040 page_pool_l1_5
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016f5fd040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000009a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010098f040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x4001009a7040 percpu5
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005ad040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000009a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001009a7040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x4001009c0040 async_worker5
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005ad040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000009a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001009c0040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x6001009bf040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x4001009c0040) at core/sched.cc:1499
+
+thread 0x4001009d8040 rcu9
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001006e0040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001009d8040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x6001009c69d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x4001009f2040 page_pool_l1_9
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016263f040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001009f2040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100a0a040 percpu9
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001006e0040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a0a040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100a23040 async_worker9
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001006e0040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a23040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100a22040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100a23040) at core/sched.cc:1499
+
+thread 0x400100a3b040 rcu6
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005e1040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a3b040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100a299d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100a55040 page_pool_l1_6
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005f9040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a55040) at core/sched.cc:1505
+#4  0x000000004036b390 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1498
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100a6d040 percpu6
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005f9040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a6d040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100a86040 async_worker6
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005f9040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a86040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100a85040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100a86040) at core/sched.cc:1499
+
+thread 0x400100a9e040 rcu7
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010062d040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100a9e040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100a8c9d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100ab8040 page_pool_l1_7
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100645040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100ab8040) at core/sched.cc:1505
+#4  0x000000004036b390 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1498
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100ad0040 percpu7
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100645040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100ad0040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100ae9040 async_worker7
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100645040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100ae9040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100ae8040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100ae9040) at core/sched.cc:1499
+
+thread 0x400100b01040 >init
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x488add90) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b01040) at core/sched.cc:1505
+#4  0x00000000402fdbb0 in sched::thread::do_wait_for<sched::thread::dummy_lock, sched::wait_object<osv::acpi_interrupt::process_interrupts()::{lambda()#1}>, sched::wait_object<osv::acpi_interrupt::process_interrupts()::{lambda()#2}> >(sched::thread::dummy_lock&, sched::wait_object<osv::acpi_interrupt::process_interrupts()::{lambda()#1}>&&, sched::wait_object<osv::acpi_interrupt::process_interrupts()::{lambda()#2}>&&) (mtx=<synthetic pointer>...) at include/osv/sched.hh:1504
+#5  sched::thread::wait_for<osv::acpi_interrupt::process_interrupts()::{lambda()#1}, osv::acpi_interrupt::process_interrupts()::{lambda()#2}>(osv::acpi_interrupt::process_interrupts()::{lambda()#1}&&, osv::acpi_interrupt::process_interrupts()::{lambda()#2}&&) () at include/osv/sched.hh:1528
+#6  osv::acpi_interrupt::process_interrupts (this=0x600100aefa00) at drivers/acpi.cc:250
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100b01040) at core/sched.cc:1499
+
+thread 0x400100b19040 rcu8
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100693040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001cc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b19040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100b07eb0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100b33040 page_pool_l1_8
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001006b2040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001cc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b33040) at core/sched.cc:1505
+#4  0x000000004036b390 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1498
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100b4b040 percpu8
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001006b2040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001cc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b4b040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100b64040 async_worker8
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001006b2040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001cc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b64040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100b63040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100b64040) at core/sched.cc:1499
+
+thread 0x400100b7c040 rcu10
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100714040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b7c040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100b6a9d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100b96040 page_pool_l1_10
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x4008b4ae2040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100b96040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100bae040 percpu10
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100714040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100bae040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100bc7040 async_worker10
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100714040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100bc7040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100bc6040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100bc7040) at core/sched.cc:1499
+
+thread 0x400100bdf040 rcu11
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100748040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100bdf040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100bcd9d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100bf9040 page_pool_l1_11
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100766040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100bf9040) at core/sched.cc:1505
+#4  0x000000004036b390 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1498
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100c11040 percpu11
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100766040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100c11040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100c2a040 async_worker11
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100766040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100c2a040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100c29040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100c2a040) at core/sched.cc:1499
+
+thread 0x400100c47040 rcu12
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010079d040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001dc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100c47040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100c46410) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100c62040 page_pool_l1_12
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400147c20040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001dc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100c62040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100c7b040 percpu12
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010079d040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001dc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100c7b040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100c94040 async_worker12
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010079d040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001dc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100c94040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100c81880) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100c94040) at core/sched.cc:1499
+
+thread 0x400100cad040 rcu13
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100801040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100cad040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100cacfd0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100cc8040 page_pool_l1_13
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010082b040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100cc8040) at core/sched.cc:1505
+#4  0x000000004036b390 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1498
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100ce1040 percpu13
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010082b040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100ce1040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100cf9040 async_worker13
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010082b040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100cf9040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100cf8040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100cf9040) at core/sched.cc:1499
+
+thread 0x400100d14040 rcu14
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100847040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100d14040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100d134f0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100d2d040 page_pool_l1_14
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010085f040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100d2d040) at core/sched.cc:1505
+#4  0x000000004036b390 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1498
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100d45040 percpu14
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010085f040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100d45040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100d5e040 async_worker14
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010085f040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100d5e040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x600100d5d040) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100d5e040) at core/sched.cc:1499
+
+thread 0x400100d76040 rcu15
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010087b040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100d76040) at core/sched.cc:1505
+#4  0x0000000040357b3e in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::rcu::cpu_quiescent_state_thread::do_work()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  osv::rcu::cpu_quiescent_state_thread::do_work (this=0x600100d649d0) at core/rcu.cc:185
+#7  0x0000000040357eb9 in osv::rcu::cpu_quiescent_state_thread::work (this=<optimized out>) at core/rcu.cc:117
+
+thread 0x400100d90040 page_pool_l1_15
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010087b040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100d90040) at core/sched.cc:1505
+#4  0x000000004036b441 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, memory::page_pool::l1::fill_thread()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<memory::page_pool::l1::fill_thread()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  memory::page_pool::l1::fill_thread () at core/mempool.cc:1501
+#7  0x000000004036e4f9 in memory::page_pool::l1::l1(sched::cpu*)::{lambda()#1}::operator()() const (__closure=<optimized out>) at core/mempool.cc:1307
+
+thread 0x400100da8040 percpu15
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100893040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100da8040) at core/sched.cc:1505
+#4  0x00000000403968cf in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, workman::call_of_duty()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<workman::call_of_duty()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  workman::call_of_duty () at core/percpu-worker.cc:92
+#7  0x0000000040396a79 in operator() (__closure=<optimized out>) at core/percpu-worker.cc:124
+
+thread 0x400100f1f040 async_worker15
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100893040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400100f1f040) at core/sched.cc:1505
+#4  0x00000000403a04d4 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, async::async_worker::run()::{lambda()#1}>(sched::thread::dummy_lock&, async::async_worker::run()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<async::async_worker::run()::{lambda()#1}>(async::async_worker::run()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  async::async_worker::run (this=0x500100e0a000) at core/async.cc:190
+#7  0x0000000040384b4a in sched::thread::main (this=0x400100f1f040) at core/sched.cc:1499
+
+thread 0x400101fb6040 >init
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40001080f040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400101fb6040) at core/sched.cc:1505
+#4  0x0000000040385cf0 in sched::thread::do_wait_until<sched::noninterruptible, lockfree::mutex, sched::thread::reaper::reap()::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<sched::thread::reaper::reap()::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1384
+#6  sched::thread::reaper::reap (this=0x600101fb5080) at core/sched.cc:2095
+#7  0x0000000040385d7c in operator() (__closure=<optimized out>, __closure=<optimized out>) at core/sched.cc:2086
+
+thread 0x400101fcd040 thread taskq
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x488add90) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400101fcd040) at core/sched.cc:1505
+#4  0x000000004025b8b4 in sched::thread::do_wait_until<sched::interruptible, sched::thread::dummy_lock, synch_port::_msleep(void*, mtx*, int, char const*, int)::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until_interruptible<synch_port::_msleep(void*, mtx*, int, char const*, int)::<lambda()> > (pred=...) at include/osv/sched.hh:1399
+#6  synch_port::_msleep (this=<optimized out>, chan=<optimized out>, mtx=0x600101fb51b0, priority=<optimized out>, wmesg=<optimized out>, timo_hz=0) at bsd/porting/synch.cc:102
+#7  0x000000004025ba87 in _msleep (chan=<optimized out>, mtx=<optimized out>, priority=<optimized out>, wmesg=<optimized out>, timo=<optimized out>) at bsd/porting/synch.cc:174
+
+thread 0x400102014040 callout
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016df56040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400102014040) at core/sched.cc:1505
+#4  0x000000004025a8af in sched::thread::do_wait_until<sched::noninterruptible, lockfree::mutex, _callout_thread()::<lambda()> > (mtx=..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<_callout_thread()::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1384
+#6  _callout_thread () at bsd/porting/callout.cc:138
+#7  0x0000000040384b4a in sched::thread::main (this=0x400102014040) at core/sched.cc:1499
+
+thread 0x40010211b040 netisr
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004c5040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010211b040) at core/sched.cc:1505
+#4  0x000000004026a9da in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, netisr_osv_thread_wrapper(netisr_osv_handler_t, void*)::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<netisr_osv_thread_wrapper(netisr_osv_handler_t, void*)::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  netisr_osv_thread_wrapper (handler=0x40269660 <swi_net(void*)>, arg=0x488b53c0 <main_nws>) at bsd/sys/net/netisr1.cc:26
+#7  0x000000004026aa70 in operator() (__closure=<optimized out>, __closure=<optimized out>) at bsd/sys/net/netisr1.cc:39
+
+thread 0x4001032a9040 >init
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4000bfe00040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001032a9040) at core/sched.cc:1505
+#4  0x0000000040385b5f in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, sched::thread::join()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<sched::thread::join()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  sched::thread::join (this=<optimized out>) at core/sched.cc:1800
+#7  0x00000000403dca36 in pthread_private::pthread::join (retval=0x0, this=0x300000009520) at /usr/include/c++/11/bits/unique_ptr.h:173
+
+thread 0x4001032c3040 virtio-net-rx
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400148b8c040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000092040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001032c3040) at core/sched.cc:1505
+#4  0x00000000402e0341 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, virtio::virtio_driver::wait_for_queue(virtio::vring*, bool (virtio::vring::*)() const)::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<virtio::virtio_driver::wait_for_queue(virtio::vring*, bool (virtio::vring::*)() const)::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  virtio::virtio_driver::wait_for_queue (this=this@entry=0x500101b5d000, queue=queue@entry=0x600101b53300, pred=<optimized out>) at drivers/virtio.cc:159
+#7  0x00000000402e5822 in virtio::net::receiver (this=0x500101b5d000) at drivers/virtio-net.cc:477
+
+thread 0x4001032eb040 virtio-tx-0
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016f013040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001032eb040) at core/sched.cc:1505
+#4  0x00000000402e73d1 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:570
+#7  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:564
+
+thread 0x400103313040 virtio-tx-1
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400174d63040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400103313040) at core/sched.cc:1505
+#4  0x00000000402e73d1 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:570
+#7  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:564
+
+thread 0x40010333b040 virtio-tx-2
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40017ca76040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008e040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010333b040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x400103363040 virtio-tx-3
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400148b8c040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000092040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400103363040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x40010338b040 virtio-tx-4
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100591040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000096040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010338b040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x4001033b3040 virtio-tx-5
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016f5fd040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000009a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001033b3040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x4001033db040 virtio-tx-6
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001005e1040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001033db040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x400103403040 virtio-tx-7
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010062d040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001c8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400103403040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x40010342b040 virtio-tx-8
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100693040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001cc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010342b040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x400103453040 virtio-tx-9
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x40016263f040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400103453040) at core/sched.cc:1505
+#4  0x00000000402e73d1 in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:570
+#7  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::lock_running (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:564
+
+thread 0x40010347b040 virtio-tx-10
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x4008b4ae2040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010347b040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x4001034a3040 virtio-tx-11
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100748040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001d8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001034a3040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x4001034cb040 virtio-tx-12
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x400147c20040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001dc040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001034cb040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x4001034f3040 virtio-tx-13
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100801040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e0040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001034f3040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x40010351b040 virtio-tx-14
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x400100847040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e4040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010351b040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x400103543040 virtio-tx-15
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x40010087b040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x4000001e8040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400103543040) at core/sched.cc:1505
+#4  0x00000000402e8a1b in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(sched::thread::dummy_lock&, osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}>(osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until()::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  osv::xmitter<virtio::net::txq, 4096u, std::function<bool()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::poll_until (this=0x500101b5d3c0) at include/osv/percpu_xmit.hh:401
+#7  0x00000000402e8b6c in osv::xmitter<virtio::net::txq, 4096u, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> > >::xmitter(virtio::net::txq*, std::function<bool ()>, boost::iterators::function_output_iterator<osv::xmitter_functor<virtio::net::txq> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::{lambda()#1}::operator()() const (__closure=<optimized out>, __closure=<optimized out>) at include/osv/percpu_xmit.hh:224
+
+thread 0x40010359a040 virtio-blk
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001032a9040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x40010359a040) at core/sched.cc:1505
+#4  0x00000000402ea58c in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, virtio::blk::req_done()::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<virtio::blk::req_done()::<lambda()> > (pred=...) at include/osv/sched.hh:1377
+#6  virtio::blk::req_done (this=0x600101b83800) at drivers/virtio-blk.cc:375
+#7  0x00000000402ea6bc in operator() (__closure=<optimized out>, __closure=<optimized out>) at drivers/virtio-blk.cc:165
+
+thread 0x4001035e1040 virtio-rng
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001004c5040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x400000086040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001035e1040) at core/sched.cc:1505
+#4  0x0000000040355d0d in sched::thread::do_wait_until<sched::noninterruptible, sched::thread::dummy_lock, waiter::wait(sched::timer*) const::{lambda()#1}>(sched::thread::dummy_lock&, waiter::wait(sched::timer*) const::{lambda()#1}) (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<waiter::wait(sched::timer*) const::{lambda()#1}>(waiter::wait(sched::timer*) const::{lambda()#1}) (pred=...) at include/osv/sched.hh:1377
+#6  waiter::wait (tmr=0x0, this=0x600010fc8680) at include/osv/wait_record.hh:51
+#7  condvar::wait (this=this@entry=0x6001019c2648, user_mutex=user_mutex@entry=0x6001019c26d0, tmr=tmr@entry=0x0) at core/condvar.cc:62
+
+thread 0x4001035fb040 isa-serial-inpu
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001032a9040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001035fb040) at core/sched.cc:1505
+#4  0x00000000402c5640 in sched::thread::do_wait_until<sched::noninterruptible, lockfree::mutex, console::LineDiscipline::read_poll(console::console_driver*)::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<console::LineDiscipline::read_poll(console::console_driver*)::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1384
+#6  console::LineDiscipline::read_poll (this=0x6001019d4a00, driver=0x488d8010 <console::arch_early_console>) at drivers/line-discipline.cc:86
+#7  0x0000000040384b4a in sched::thread::main (this=0x4001035fb040) at core/sched.cc:1499
+
+thread 0x400103612040 kbd-input
+
+#0  sched::thread::switch_to (this=0x30000000bab0, this@entry=0x4001032a9040) at arch/x64/arch-switch.hh:219
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x400103612040) at core/sched.cc:1505
+#4  0x00000000402c5640 in sched::thread::do_wait_until<sched::noninterruptible, lockfree::mutex, console::LineDiscipline::read_poll(console::console_driver*)::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until<console::LineDiscipline::read_poll(console::console_driver*)::<lambda()> > (pred=..., mtx=...) at include/osv/sched.hh:1384
+#6  console::LineDiscipline::read_poll (this=0x6001019d4a00, driver=0x4001032af040) at drivers/line-discipline.cc:86
+#7  0x0000000040384b4a in sched::thread::main (this=0x400103612040) at core/sched.cc:1499
+
+thread 0x4001036ca040 rand_harvestq
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00, this@entry=0x4001486ed040) at arch/x64/arch-switch.hh:175
+#1  0x0000000040383894 in sched::cpu::reschedule_from_interrupt (this=0x40000008a040, called_from_yield=<optimized out>, preempt_after=...) at core/sched.cc:450
+#2  0x0000000040383fb5 in sched::cpu::schedule () at include/osv/sched.hh:1632
+#3  sched::thread::wait (this=this@entry=0x4001036ca040) at core/sched.cc:1505
+#4  0x000000004025b8b4 in sched::thread::do_wait_until<sched::interruptible, sched::thread::dummy_lock, synch_port::_msleep(void*, mtx*, int, char const*, int)::<lambda()> > (mtx=<synthetic pointer>..., pred=...) at include/osv/sched.hh:1366
+#5  sched::thread::wait_until_interruptible<synch_port::_msleep(void*, mtx*, int, char const*, int)::<lambda()> > (pred=...) at include/osv/sched.hh:1399
+#6  synch_port::_msleep (this=<optimized out>, chan=<optimized out>, mtx=0x0, priority=<optimized out>, wmesg=<optimized out>, timo_hz=100) at bsd/porting/synch.cc:102
+#7  0x00000000402b3a2d in random_kthread (arg=0x402b3050 <random_process_event(harvest*)>) at bsd/sys/dev/random/random_harvestq.cc:112
+
+thread 0x4000bfe00040 /b/.local/pg18/
+
+#0  0x000010000061140c in ?? ()
+#1  0x00001000006116ad in ?? ()
+#2  0x0000300011cf98f0 in ?? ()
+#3  0x0000000000000000 in ?? ()
+
+thread 0x4000bfe08040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x000000000be47c1a in ?? ()
+#2  0x000000006a6e1dbf in ?? ()
+#3  0x000000002c9c3c93 in ?? ()
+#4  0x000000006a6e1dbf in ?? ()
+#5  0x000000002c9c3c93 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40000b1ca040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d6988 in ?? ()
+#2  0x00003000127d6288 in ?? ()
+#3  0x00001000003c0dbf in ?? ()
+#4  0x4011c2d0e560418a in ?? ()
+#5  0x4010000000000000 in ?? ()
+#6  0x0000300000013ce0 in ?? ()
+#7  0x00003000127d6288 in ?? ()
+
+thread 0x40000d818040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x000030000000bb00 in ?? ()
+#2  0x0000300011df5ee0 in ?? ()
+#3  0x0000000000000003 in ?? ()
+#4  0x0000000000000001 in ?? ()
+#5  0x0000000000000000 in ?? ()
+
+thread 0x40000ce42040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x000030000000bb00 in ?? ()
+#2  0x0000300011df5ee0 in ?? ()
+#3  0x0000000000000003 in ?? ()
+#4  0x0000000000000001 in ?? ()
+#5  0x0000000000000000 in ?? ()
+
+thread 0x40000e5a1040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x0000300011cf98f0 in ?? ()
+#2  0x0000300011df5ee0 in ?? ()
+#3  0x0000300012cb3120 in ?? ()
+#4  0x0000300012cb3120 in ?? ()
+#5  0x0000000000000000 in ?? ()
+
+thread 0x40017ca76040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x400170124040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00002000035d7640 in ?? ()
+#2  0x0000300012cb3650 in ?? ()
+#3  0x000010000047e0be in ?? ()
+#4  0x0000300012cb3218 in ?? ()
+#5  0x00001000001cbea9 in ?? ()
+#6  0x0000300012cb49f0 in ?? ()
+#7  0x0000300012cb4c08 in ?? ()
+
+thread 0x400148b8c040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40017a063040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x400178690040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40017bea1040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x4001781d7040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00002000035d7640 in ?? ()
+#2  0x0000300012cb3650 in ?? ()
+#3  0x000010000047e0be in ?? ()
+#4  0x0000300012cb3218 in ?? ()
+#5  0x00001000001cbea9 in ?? ()
+#6  0x0000300012cb49f0 in ?? ()
+#7  0x0000300012cb4c08 in ?? ()
+
+thread 0x400147fa6040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x4001657fc040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00002000035d7640 in ?? ()
+#2  0x0000300012cb3650 in ?? ()
+#3  0x000010000047e0be in ?? ()
+#4  0x0000300012cb3218 in ?? ()
+#5  0x00001000001cbea9 in ?? ()
+#6  0x0000300012cb49f0 in ?? ()
+#7  0x0000300012cb4c08 in ?? ()
+
+thread 0x40016df56040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00002000035d7640 in ?? ()
+#2  0x0000300012cb3650 in ?? ()
+#3  0x000010000047e0be in ?? ()
+#4  0x0000300012cb3218 in ?? ()
+#5  0x00001000001cbea9 in ?? ()
+#6  0x0000300012cb49f0 in ?? ()
+#7  0x0000300012cb4c08 in ?? ()
+
+thread 0x400162176040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016f5fd040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016c52d040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016607d040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x4008b4dbe040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40017478e040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x4001486ed040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x4001588fb040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016a4e2040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016f013040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40015cc14040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40001080f040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x4001719be040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00002000035d7640 in ?? ()
+#2  0x0000300012cb3650 in ?? ()
+#3  0x000010000047e0be in ?? ()
+#4  0x0000300012cb3218 in ?? ()
+#5  0x00001000001cbea9 in ?? ()
+#6  0x0000300012cb49f0 in ?? ()
+#7  0x0000300012cb4c08 in ?? ()
+
+thread 0x4001663b4040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x400174d63040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x400159865040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x400164a96040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40015d971040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40015c243040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00002000035d7640 in ?? ()
+#2  0x0000300012cb3650 in ?? ()
+#3  0x000010000047e0be in ?? ()
+#4  0x0000300012cb3218 in ?? ()
+#5  0x00001000001cbea9 in ?? ()
+#6  0x0000300012cb49f0 in ?? ()
+#7  0x0000300012cb4c08 in ?? ()
+
+thread 0x40016972d040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016407c040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+thread 0x40016da54040 >/b/.local/pg18
+
+#0  0x000000004037f9b2 in sched::thread::switch_to (this=0x30000000bb00) at arch/x64/arch-switch.hh:175
+#1  0x00003000127d7330 in ?? ()
+#2  0x0000300000013ce0 in ?? ()
+#3  0x00001000003c96ee in ?? ()
+#4  0x0000300000013ce0 in ?? ()
+#5  0x00002000001ff6a0 in ?? ()
+#6  0x0000000000000000 in ?? ()
+
+[Inferior 1 (process 1) detached]

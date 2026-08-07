@@ -1,0 +1,96 @@
+=== OSv+PostgreSQL RW (WRITE) CONCURRENCY-CEILING: PROFILE-FIRST INVESTIGATION ===
+Box i-0dfe38a566aee5df3  m5d.metal (96 vCPU, 4x838G LOCAL NVMe)  us-east-2  beef 840154381708.
+Build: committed #1458 tip 6b71c76385 (all 5 fixes), PG18.0 musl-PIE, DEFAULT mmap, conf_fork=1,
+OpenZFS (submodule 6330a45b). ZFS raidz1-8k over the 4 LOCAL NVMe (nvme0-3, NO EBS in data path).
+-smp 48, 48G RAM, shared_buffers=8G, max_connections=300, synchronous_commit=on, fsync=on,
+wal_sync_method=fdatasync. pgbench over tap0+vhost (non-loopback, inet_server_addr=192.168.100.2).
+
+------------------------------------------------------------------------------------------------
+STEP 1: RW PLATEAU REPRODUCED (DEFINITIVE methodology: fresh pgbench -i -s300 PER level, T60)
+------------------------------------------------------------------------------------------------
+  RW c1=1085  c8=2992  c16=2385  c32=2509  c48=2544  c64=2445 tps  (0-failed EVERY cell)
+  => FLAT ~2400-2500 plateau from c16, matching the DEFINITIVE matched-AB run (c16=2076 c32=2077
+     c48=2061 c64=2099). CONFIRMED: OSv RW plateaus, does not regress, does not wedge.
+
+  NOTE (methodology-sensitive): with a SINGLE warmed init reused across levels the curve instead
+  CLIMBS (c8=5487 c16=9447 c32=9580 peak, c48=7335, c64=2458). The flat ~2500 plateau is specific
+  to the fresh-cold-pool-per-level methodology (cold ARC + CoW-fragmented 4.5GB reload each level),
+  which is what the DEFINITIVE run used. Both are real; the plateau is the matched-methodology number.
+
+------------------------------------------------------------------------------------------------
+STEP 2/3: PROFILE AT THE PLATEAU (RW c32, sustained load) - three independent evidence sources
+------------------------------------------------------------------------------------------------
+EVIDENCE 1 - HOST CPU ACCOUNTING (sample-rw-c32.log):
+  host 94% IDLE; qemu aggregate ~360% of 9600% = ~3.6 of 96 host cores busy (~3.6 of 48 vCPUs).
+  Only ~10 vCPU threads >3% (5 pegged ~100%, sharp taper 98/97/96/93/87/33%); 51 of 57 qemu
+  threads <1%. => NOT CPU-bound, NOT storage-bound. Guest is mostly IDLE at the plateau.
+
+EVIDENCE 2 - gdb `osv info threads` under RW c32 (gdb-rw-c32.log, 1413 threads):
+  status: 1358 waiting / 48 running(=the per-CPU idle threads) / 2 waking / 2 queued.
+  The 72 PostgreSQL threads (postmaster + 32 forked backends + workers) CLUMP on ~4 CPUs:
+      cpu1=25  cpu0=20  cpu2=19  cpu3=6  cpu4=1  cpu5=1   => 43 of 48 vCPUs never touch a backend.
+  WHERE the 72 PG threads are blocked (location column):
+      53  sched::thread::switch_to  (arch/x64/arch-switch.hh:175)   <-- blocked awaiting a wakeup
+       9  poll_wake (core/poll.cc:162)                              <-- network poll wakeup path
+       8  memory::pool::free_same_cpu (mempool.cc:239)              <-- transient
+       2  reschedule_from_interrupt
+  ZFS WRITE-PATH threads are IDLE, NOT the funnel:
+      z_wr_iss_* (write-issue zio): all waiting in _msleep, cpu_time 997ns..123us (barely ran).
+      z_wr_int_*, z_rd_*, z_metaslab_*, z_vdev_file_*: idle in _msleep.
+      dp_sync_taskq_* (txg sync): active set did ~1.3s over the run but is idle-blocked in _msleep
+        at the sample - NOT spinning, NOT holding a contended lock.
+      zvol_tq-*: all idle on cpu1.
+  ZERO threads blocked in zil_commit / txg_wait / txg_quiesce / spa_sync / zio_wait / a ZFS write
+  lock / fsync. (grep of the full dump: 0 matches.)
+
+EVIDENCE 3 - LITTLE'S LAW (the decisive quantitative test): tps == concurrency / latency, EXACTLY:
+      c    tps      lat_ms   c/lat_s
+      1    1085     0.922    1085
+      8    2992     2.674    2992
+      16   2385     6.709    2385
+      32   2509     12.755   2509
+      48   2544     18.867   2544
+      64   2445     26.174   2445
+  Throughput is flat because per-request round-trip LATENCY rises LINEARLY with concurrency. A
+  saturating resource (disk IOPS / a lock / single txg-sync) would hold latency ~flat and cap tps
+  at the resource's service rate; instead latency grows linearly = a FIXED round-trip serialized
+  through a bottleneck of constant service time, time-shared across the ~4 clumped CPUs. That fixed
+  cost is the wake round-trip, NOT a write resource.
+
+------------------------------------------------------------------------------------------------
+VERDICT: (a) WAKE-BOUND. The RW plateau is the SAME wake-placement ceiling as RO, NOT a
+         write-specific serialization.
+------------------------------------------------------------------------------------------------
+  - Backends block in sched::thread::switch_to (idle-wait), clumped on ~4 CPUs, 43 vCPUs idle,
+    host 94% idle - identical signature to the RO plateau profile (RESULT-matched-AB.txt).
+  - The ZFS write path (ZIL commit, txg-sync/dp_sync_taskq, z_wr_iss/z_wr_int zio pipeline) is
+    NOT the bottleneck: those threads are idle-blocked with negligible cpu_time; NO backend waits
+    on them; no zil/txg/spa/zio_wait/lock appears in the blocked set. fsync-to-NVMe is not the cap
+    (Little's Law shows a fixed round-trip, not a saturated device).
+  - ROOT CAUSE (shared with RO): core/sched.cc thread::wake_impl re-queues a woken thread onto its
+    home/last CPU (st->_cpu -> tcpu->incoming_wakeups[c]); there is NO wake-time idle-CPU steering,
+    and the only rebalancer is the lazy 100ms/1-thread load_balance. A single virtio-net RX receiver
+    thread (pinned cpu1) wakes each backend; woken backends land on/near the waker's CPU -> the ~4-CPU
+    clump; aggregate throughput = what a handful of CPUs push through the wake round-trip, independent
+    of vCPU count -> a flat-but-low plateau. RW just adds per-txn fsync LATENCY on top (higher c1
+    latency), which is why the RW plateau (~2500) sits below where a pure-CPU workload would, but the
+    SHAPE and the CEILING mechanism are the wake-placement one.
+  - Contributing (secondary, not the cause): OSv BSD taskqueue creates ZFS zio/taskq worker threads
+    UNPINNED (bsd/sys/kern/subr_taskqueue.c taskqueue_start_threads: the sched_prio/sched_add/pin
+    block is #if 0), and they too clump (all zvol_tq/dp_sync on cpu1). This is downstream of the same
+    missing wake-placement; it does not itself serialize the plateau (those threads are idle here).
+
+=> DEFER TO WAKE-STEER (agent 1038401f, osv-wakesteer box). The wake-time idle-CPU steering fix in
+   thread::wake_impl that lifts the RO plateau is THE SAME fix that lifts the RW plateau. RW is NOT a
+   separate write-path bottleneck; there is nothing write-specific to fix here. No WAL/ZIL/txg/fsync
+   serialization exists on this path. Do NOT open a separate write-path PR.
+
+PR ROUTING: none write-specific. The fix is the general OSv scheduler wake-placement change already
+   owned by the wake-steer track (standalone master PR per the roadmap "NEXT LEVER"). When that lands,
+   re-measure the RW curve; it should lift toward Linux (c16 2468 c32 2709 c48 2757 c64 2827) along
+   with RO. If a residual write gap remains AFTER wake-steering disperses the clump, the next candidate
+   would be pinning the ZFS taskq threads (subr_taskqueue #if 0 block) - but that is downstream and
+   unmeasurable until the clump is gone.
+
+Artifacts banked: .local/writepath-results/{rw-repro.log, rw-perlevel.log, gdb-rw-c32.log,
+gdb-bt-c32.log, sample-rw-c32.log}.

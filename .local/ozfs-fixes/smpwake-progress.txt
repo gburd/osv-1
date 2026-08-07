@@ -1,0 +1,32 @@
+SMP RX-WAKEUP WEDGE HUNT - PROGRESS (banked at ouch-account-expiry)
+==================================================================
+OUCH box (terminating): i-0edd640875bdcc472 (m5d.metal us-east-2)
+
+REPRO RECIPE (working):
+- OSv upstream/master ae077860c, ramfs, apps/echo/echo.c (thread-per-conn blocking
+  recv->send TCP echo :7777). Build in fedora:39 docker builder (full dep list incl
+  gcc-c++ make binutils boost-static libstdc++-static glibc-static openssl-devel
+  genromfs qemu-system-x86 gdb gcc-c++-aarch64). NOTE: build needs mount tools built
+  explicitly: make build/release.x64/tools/mount/{mount-fs,umount}.so before scripts/build.
+- Run: scripts/run.py -c <smp> -m 8G -n -t osvtap --novnc inside
+  docker run --network host --privileged --device /dev/kvm builder.
+- Host tap: ip tuntap add osvtap mode tap user root; ip addr add 172.16.0.1/24; up.
+  Guest gets 172.16.0.2/30 via run.py auto-config.
+- Load: host Python threaded drivers (load3.py ramped-steady, load4.py burst,
+  churnrec.py, bursty.py). OSV_NET_BATCH_WAKE=0 = stock per-packet path.
+
+FINDINGS:
+- Steady/ramped/burst/16KB-msg at smp16 = SOLID (78k tps 90s 0 err, NO wedge).
+- CHURN "wedge" is a HOST ARTIFACT (ephemeral-port TIME_WAIT exhaustion): it
+  hard-wedges IDENTICALLY at smp1 and smp16, so it is NOT the smp>=2 target bug.
+  Discard all churn results.
+- Target smp>=2 wedge NOT yet reproduced with a clean (non-port-churning) trigger.
+
+HYPOTHESIS (code-read only, unconfirmed):
+- cpu::send_wakeup_ipi() core/sched.cc:461 reads target-cpu runqueue.size()<=1
+  cross-CPU unsynchronized and SKIPS IPI when target looks busy -> lost-wakeup
+  window if target then idles with incoming_wakeups_mask bit set.
+- net_channel arm/poll (wait_object<net_channel>) vs push/wake Dekker pair.
+
+NEXT: find steady trigger that wedges smp>=2 not smp1; ONE gdb capture of stuck
+receiver()+conn threads; then fix root cause. Likely pairs with pr/net-batch-wakeup.

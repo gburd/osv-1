@@ -1,0 +1,16 @@
+vfs: flush page cache before VOP_FSYNC in sys_fsync
+
+sys_fsync() called VOP_FSYNC directly without first flushing the
+OSv page cache.  Dirty pages held in the cache were never seen by
+the underlying filesystem's fsync hook, so a process could fsync()
+a file and have the data still resident in volatile memory.
+Reproducer: write 64 KiB, fsync, kill the VM, restart, see zeros.
+
+Walk the file's dirty pages, write them back via the filesystem's
+write op, then call VOP_FSYNC.  Holds the file's f_lock across the
+flush so concurrent writes can't slip in between the writeback and
+the VOP_FSYNC call.
+
+Verified by tst-zfs-direct-io and tst-zfs-multirec, which write,
+fsync, re-open, read, and memcmp.  Without this fix the multi-record
+ZFS test produces zero-filled tail records on uncached read.

@@ -1,0 +1,9 @@
+FORKSYM box status (final):
+- ouch box i-0b9306ce8531222c3 (m5d.metal us-east-2): TERMINATED + all 5 EBS deleted (verified NotFound). Zero orphan.
+- cracker: NO box launched by me (all RunInstances hit VcpuLimitExceeded - a
+  separate agent's orphaned 96-vCPU m5d.metal held the entire 96-vCPU limit,
+  still shutting-down at finalize). No cracker instance/volume orphan from me.
+- WORK COMPLETED LOCALLY (m5d workstation, qemu+KVM+fedora39 builder container):
+  fix built, A/B-proven, byte-verified, committed 5761ed02c, bundled.
+- Bundle: .local/ozfs-fixes/forksym-fix.bundle (base 8d775cc01 .. tip 5761ed02c)
+- Report: .local/ozfs-fixes/forksym-report.txt

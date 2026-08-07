@@ -1,0 +1,289 @@
+================================================================================
+[W-sigchld] PostgreSQL-on-OSv postmaster SIGCHLD + latch wakeup wall -- FIXED
+================================================================================
+Date: 2026-07-24  Host: floki (local, KVM + TCG/gdb)  Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena
+Branch:   integ/pg-fork-arena   Base HEAD at start: 0a874234f (W-socket fix in)
+Author:   Greg Burd
+Method:   reproduce the hang with a new regression test on HEAD -> gdb-isolate
+          the actual cause (thread map + fork registry + signal_actions dump on
+          the hung/aborted image) -> minimal correct fix -> re-run the full fork
+          + non-fork signal/epoll/waitpid suites -> rebuild stock PG18.4 and
+          measure how far it now advances.
+
+================================================================================
+THE WALL (as handed off, now reproduced deterministically)
+================================================================================
+After the startup process finishes crash recovery the POSTMASTER never
+transitions to PM_RUN.  gdb on the hung KVM image:
+  - postmaster (tid=31, AS0=0x488d1ba0, status=waiting):
+        sched::thread::switch_to <- reschedule_from_interrupt <- thread::wait()
+        <- epoll_file::wait() <- epoll_wait <- [PG ServerLoop WaitEventSetWait]
+  - two fork children (tid=32/33, each on its own private COW address space
+    0x600008ed7600 / 0x600008edb200), status=waiting, parked in switch_to.
+The postmaster waits for SIGCHLD (from the exiting startup process) + its latch
+so its reaper can launch checkpointer/bgwriter/walwriter and set PM_RUN.  It
+never wakes -- even past the 60 s epoll timeout PG does not advance.
+
+New regression test tst-fork-sigchld-latch reproduces the hang on HEAD:
+  === tst-fork-sigchld-latch ===
+  forked child pid=34; parent now waiting on the self-pipe via epoll ...
+  FAIL: epoll_wait returned 0 (errno=0) -- SIGCHLD did not wake the parent's
+        epoll (handler_ran=0).  This is the postmaster hang.
+
+================================================================================
+THE gdb / source FINDING (which of a/b/c/d -- and it turned out to be TWO bugs)
+================================================================================
+The handoff offered four candidate causes:
+  (a) child never exits/reaps -> no SIGCHLD;
+  (b) SIGCHLD raised but not delivered to the right thread / swallowed;
+  (c) SIGCHLD delivered + handler runs but the self-pipe write doesn't wake epoll;
+  (d) reaper's waitpid() doesn't see the cross-AS child.
+
+Ruled OUT (a) and (d) directly from the hung image:  dumping fork's child
+registry (osv::fork::g_children at 0x4891e5e0) on the hung KVM image showed:
+    g_children element_count=3
+      pid=34 parent=2 exited=1 status=0x0     <- startup process DID exit + record
+      pid=33 parent=2 exited=0                 (live)
+      pid=32 parent=2 exited=0                 (live)
+So the startup child exits, child_exited() records it, and getpid()==OSV_PID(2)
+for every thread means waitpid()'s parent-matching works.  (a)/(d) are not it.
+
+The cause is (b), and it is TWO distinct shared-global bugs -- proven by
+instrumenting the exit/kill path with debug_early (malloc-free) and by dumping
+osv::signal_actions on the running image:
+
+BUG 1 -- shared signal_actions[] clobbered by a fork child.
+  OSv keeps ONE global `signal_actions[nsignals]` (libc/signal.cc) for the whole
+  machine.  Signal dispositions are per-PROCESS in POSIX, but every fork
+  "process" shares this one array.  The trace showed:
+    [sig] sigaction(SIGCHLD) tid=32 (postmaster, AS0)  handler=0x10000063b4b0  <- PG reaper
+    [sig] sigaction(SIGCHLD) tid=33 (a fork child, COW AS) handler=0x0 (SIG_DFL)
+  PostgreSQL's startup process (a fork child) resets its inherited SIGCHLD
+  disposition to SIG_DFL during its own signal setup.  Because the table is
+  global and shared, that reset CLOBBERED the postmaster's reaper handler.
+  Confirmed on the hung image: signal_actions[SIGCHLD] = {handler=0x0,
+  flags=SA_RESTART|SA_NOCLDSTOP}.  With SIG_DFL installed, kill(getpid(),
+  SIGCHLD) takes the "default disposition" branch and (correctly, for SIGCHLD)
+  returns 0 -- the reaper handler is never run.  No self-pipe poke, no wakeup.
+
+BUG 2 -- kill() swallows a signal that was merely sigprocmask-BLOCKED.
+  Even with BUG 1 fixed, kill()'s process-signal path does:
+      if (wake_up_signal_waiters(sig)) return 0;   // skip the handler
+  OSv's `waiters[sig]` list is populated ONLY by sigprocmask(SIG_BLOCK)
+  (sigwait()/sigtimedwait() consume thread_pending_signal directly, never via
+  this list).  PostgreSQL's postmaster BLOCKS SIGCHLD with sigprocmask around
+  its epoll ServerLoop but is parked in epoll_wait, NOT sigwait().  The old code
+  treated "blocked" as "a waiter is consuming it", woke the postmaster's
+  thread_pending_signal (which epoll_wait does not consult), returned nonzero,
+  and SKIPPED the installed handler -- so again the latch/self-pipe was never
+  poked.  Per POSIX a blocked signal with a handler must have its HANDLER run;
+  OSv was suppressing it.
+
+  (There is also a latent address-space hazard: OSv delivers a caught signal by
+  spawning a fresh "signal_handler" thread, and a new thread inherits the
+  CREATING thread's address space.  The fork-synthesized SIGCHLD is raised from
+  the EXITING CHILD's context, so the handler thread would inherit the child's
+  dying COW AS and run the postmaster's handler against the wrong address space
+  -- its writes to the latch flag / self-pipe would land in the child's private
+  memory.  Fixed alongside; see FIX #3.)
+
+================================================================================
+THE FIX (three bounded pieces, all #if CONF_fork; non-fork path unchanged)
+================================================================================
+FIX #1 -- per-fork-child signal_actions[] (libc/process/fork.cc + libc/signal.cc)
+  Model per-process dispositions: give each fork-child address space its own
+  copy of signal_actions[], initialized from the parent's at fork time and only
+  mutated by that child's own sigaction() calls.  Keyed by address_space, on the
+  identity kernel heap -- exactly the discipline used for the inherited-fd set
+  and the signal-waiters list.
+    * fork.cc: g_child_sigtables[child_as] -> child_sigtable{ sigaction[nsignals] };
+      fork_init_child_signal_actions() (called from fork() after
+      clone_address_space, seeded from osv::signal_actions);
+      fork_child_signal_actions() (this child's table or nullptr);
+      fork_release_child_signal_actions() (child cleanup / execve).
+    * signal.cc: current_signal_actions() returns the child's private table if
+      the current thread is a fork child, else the global array.  sigaction()
+      and generate_signal() (synchronous SIGSEGV/SIGFPE to the current thread)
+      use current_signal_actions().  A child's sigaction() no longer touches the
+      postmaster's table.
+  kill()-to-process keeps reading the GLOBAL (top-level app / postmaster) table:
+  the fork-synthesized SIGCHLD a child raises on exit must run the POSTMASTER's
+  handler, not the exiting child's (which was reset).
+
+FIX #2 -- kill() must run the handler for a merely-BLOCKED signal (libc/signal.cc)
+  Distinguish a thread ACTIVELY consuming a signal via sigwait()/sigtimedwait()
+  from one that merely sigprocmask-BLOCKED it.  A new per-thread bitmask
+  `thread_sigwaiting` is set around sigwait()/sigtimedwait().
+  wake_up_signal_waiters() still WAKES every blocked waiter (unchanged, so a
+  real sigwait consumer returns from wait_until), but now returns a nonzero
+  "consumed" count ONLY for threads actually inside sigwait/sigtimedwait.  kill()
+  therefore skips the handler only when a genuine sigwait consumer exists (e.g.
+  tst-sigwait); for a sigprocmask-blocker with a handler (the postmaster) it
+  returns 0 and kill() falls through to run the installed handler that pokes the
+  latch.  This is more POSIX-correct and does not regress tst-sigwait/tst-kill.
+
+FIX #3 -- run a process-level signal handler in AS0 (libc/signal.cc, #if CONF_fork)
+  A handler thread inherits the creating thread's address space.  The
+  fork-synthesized SIGCHLD is raised from the exiting child's context, so force
+  the handler thread's address space to kernel_address_space() (AS0) where the
+  top-level app (postmaster) and its globals live.  No-op for the top-level app
+  and kernel (already AS0).
+
+  NOT changed: soclose / socket lifetime / fd table / the non-fork
+  close/socket/signal path.  All new code is #if CONF_fork except the
+  wake_up_signal_waiters/sigwait consumer-tracking refinement (FIX #2), which is
+  a strict correctness improvement validated green on both conf_fork=0 and 1.
+
+================================================================================
+THE REGRESSION TEST
+================================================================================
+tests/tst-fork-sigchld-latch.cc (registered in modules/tests/Makefile).  Author
+Greg Burd.  Mirrors exactly what PG's postmaster does:
+  - parent installs a real SIGCHLD handler that write()s a self-pipe (the latch);
+  - parent epoll_wait()s on the self-pipe read end (like WaitEventSetWait);
+  - parent fork()s a child that RESETS SIGCHLD to SIG_DFL (like PG's startup
+    process) and _exit(0)s;
+  - assert the child's exit -> SIGCHLD -> handler wrote the self-pipe -> epoll
+    woke, then waitpid() reaps the child.
+  On HEAD 0a874234f: FAIL -- epoll_wait returns 0 (timeout), handler_ran=0 (the
+  postmaster hang).  With the fix: PASS (epoll woke nfds=1, handler_ran=1,
+  waitpid reaped pid=34), reliably x3 on -smp 1 and -smp 2.
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+Build: CONF_fork=y, fs=rofs, image=tests, -j$(nproc).
+
+  tst-fork-sigchld-latch  PASS x3   (was reproducing the hang on HEAD)
+  tst-fork          done: 0 failures
+  tst-fork-cow      done: 0 failures
+  tst-fork-deep     done: 0 failures
+  tst-execve        done: 0 failures
+  tst-pgfork        done: 0 failures
+  tst-fork-preempt  done: 0 failures
+  tst-fork-socket   PASS (child's close only dropped a ref; parent socket survived)
+  tst-fork-file-mmap PASS
+
+Non-fork signal/epoll/waitpid tests (conf_fork=y image):
+  tst-sigwait       PASSED   (regressed transiently by an early over-broad FIX
+                              #2 draft; the sigwait-consumer discriminator fixes
+                              it -- now green)
+  tst-kill          SUMMARY: 55 tests, 0 failures
+  tst-signal-fills  signal-fills tests PASSED
+  tst-epoll         SUMMARY: 68, 0 failures
+  tst-epoll-pwait2  epoll_pwait2 tests PASSED
+  tst-pipe          SUMMARY: 87 tests, 0 failures
+
+conf_fork=0 sanity:
+  ./scripts/build -j conf_fork=0 fs=rofs image=tests -> rc=0 (clean; per-child
+  signal-table code is entirely #if CONF_fork).
+  conf_fork=0: tst-sigwait PASSED; tst-kill 55/0; tst-epoll 68/0; tst-signal-fills
+  PASSED -> non-fork signal/epoll path unchanged.
+
+PG image rebuilt:
+  ./scripts/build -j conf_fork=1 fs=ramfs image=pg18-fork -> rc=0
+
+================================================================================
+THE PAYOFF -- PostgreSQL status (HONEST)
+================================================================================
+Build: CONF_fork=y, fs=ramfs, image=pg18-fork.
+Boot:  qemu -enable-kvm -cpu host -m 4G -smp 2 -nographic \
+         -kernel build/last/loader.elf \
+         -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+         -drive .../usr.img,if=virtio,cache=none \
+         -netdev user,hostfwd=tcp::5432-:5432 -device virtio-net-pci
+
+THE SIGCHLD/LATCH WALL IS GONE.  PG now reaches PM_RUN and prints "ready to
+accept connections".  Reproducible on -smp 1 and -smp 2, KVM and TCG:
+
+  LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+  LOG:  listening on IPv4 address "0.0.0.0", port 5432
+  LOG:  database system was shut down at 2026-07-23 20:18:17 UTC
+  LOG:  database system is ready to accept connections     <-- PM_RUN reached!
+
+The instrumented trace confirmed the full working sequence:
+  [fork] child_exited pid=0x22       (startup process exited)
+  [sig] spawn handler sig=0x11       (SIGCHLD handler NOW runs -- FIX #1/#2/#3)
+  [fork] REAPED pid=0x22             (postmaster reaper waitpid'd the startup proc)
+  LOG:  database system is ready to accept connections
+
+psql ROWS: NOT YET.  I do NOT claim PG serves queries.  Immediately after
+"ready to accept connections", a forked AUXILIARY process (checkpointer /
+bgwriter) hits the PRE-EXISTING, SEPARATE wild-indirect-branch wall documented
+in /tmp/pg-preempt-fix.txt (WALL #1):
+
+  Aborted
+  [backtrace]
+    ... osv::handle_mmap_fault+28 <- mmu::vm_fault+1115 <- page_fault+139
+    <- 0x00000000000013ff    <- wild PC (the #PF after the wild branch's
+                                `mov $imm32,%esp` clobbers rsp; same signature as
+                                the prior report's 0x1000004b0000 -> mov $imm,%esp)
+
+This aborts within a few milliseconds of PM_RUN, before any backend can be
+served, so 40 tight-retry psql connects (connect_timeout=1, -smp 1 and -smp 2,
+from inside arena-dev via the hostfwd) all time out -- the aux process crashes
+the VM before the connection is accepted.  This is NOT the SIGCHLD wall (that is
+fixed) and NOT anything this fix touched: it is the COW/preemption wild indirect
+branch through a writable indirection table (PLT/GOT) that pg-preempt-fix.txt
+already root-caused and left as the open wall.  My fix cleared the wall right
+after recovery and advanced PG through the postmaster reaper to PM_RUN, exposing
+that next, deeper wall.
+
+NEXT WALL (precisely symbolized, DISTINCT from W-sigchld -- and pre-existing):
+  A fork auxiliary process (checkpointer/bgwriter), once launched by the now-
+  working reaper, takes a wild indirect branch under free-run preemption and
+  #PFs at a wild low address -> SIGSEGV -> abort, a few ms after PM_RUN.  This is
+  exactly pg-preempt-fix.txt WALL #1 (writable-indirection-table COW/preemption
+  hazard); its fix is the targeted GOT/indirection-table investigation (HW
+  watchpoint under KVM+hbreak) or the AS-aware-mmu refactor noted there, not a
+  signal/waitpid change.  Serving a real psql query is blocked ONLY on that.
+
+================================================================================
+RELEVANCE TO SHIPPING PRs
+================================================================================
+Arena-independent.  Uses only the fork address_space as the process
+discriminator plus a per-child copy of the signal table on the identity heap --
+no COW-arena assumptions for correctness (identity-heap placement follows the
+same "inherited kernel infrastructure off the COW arena" discipline as the fd
+and signal-waiter fixes).  Belongs in the fork signal-semantics PR:
+
+  * PR #1457 (SIGCHLD default-ignore / fork signal handling) -- YES, this is
+    that area.  #1457 made an unhandled SIGCHLD default-ignore instead of fatal;
+    this completes the story so a HANDLED SIGCHLD (a real reaper) is actually
+    delivered under fork: (1) a fork child's sigaction() must not clobber the
+    parent's disposition table (per-process signal_actions), (2) a
+    sigprocmask-blocked signal with a handler must run its handler (not be
+    swallowed as if sigwait-consumed), and (3) a process-level handler must run
+    in the top-level app's address space.  All #if CONF_fork except the
+    sigwait-consumer discriminator (a strict correctness fix, validated on
+    conf_fork=0).  Shippable as-is; non-fork path unchanged.
+  * PR #1455 (fork fd inheritance) / #1456 (per-child COW AS) -- orthogonal but
+    compose: #1456's per-child AS provides the address_space identity this fix
+    keys the per-child signal table on.
+
+A truly POSIX-clean version would give each fork child a full per-process signal
+state (dispositions + mask + pending) with pending-then-deliver-on-unblock
+semantics; that is a larger change to OSv's single-global signal model and is
+NOT required to clear this wall.  The per-child-table + sigwait-consumer +
+AS-in-AS0 fixes here are the minimal correct shape.  (ponytail: per-child
+signal_actions copy over the single global table + a sigwait-consumer bit;
+upgrade to full per-process signal state if/when OSv wants complete POSIX
+signal semantics under fork.)
+
+================================================================================
+FILES CHANGED (to be committed on integ/pg-fork-arena, author Greg Burd)
+================================================================================
+  libc/signal.cc            current_signal_actions() (per-child table selector);
+                            generate_signal()/sigaction() use it; thread_sigwaiting
+                            + wake_up_signal_waiters() consumer-tracking; sigwait()/
+                            osv_sigtimedwait() mark active; kill() runs handler for
+                            blocked-but-not-sigwaited; handler thread -> AS0 (#if CONF_fork)
+  libc/process/fork.cc      g_child_sigtables + fork_{init,release,child}_signal_actions;
+                            init on fork(), release in child cleanup (all #if CONF_fork TU)
+  modules/tests/Makefile    register tst-fork-sigchld-latch.so
+  tests/tst-fork-sigchld-latch.cc  new regression test (author Greg Burd)
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+arena-dev: left UP.  On floki (no EC2).
+================================================================================

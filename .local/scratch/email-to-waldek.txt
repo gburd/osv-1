@@ -1,0 +1,483 @@
+To: jwkozaczuk@gmail.com
+Subject: RFC: osv-improvements branch — OpenZFS 2.4.2, io_uring, Crucible block device, and related work
+
+Waldek,
+
+I have been working on a sizeable set of improvements to OSv and would
+very much like your feedback before trying to upstream any of it.  The
+branch is at:
+
+  Fork (OSv):      https://codeberg.org/gregburd/osv
+  Fork (osv-apps): https://codeberg.org/gregburd/osv-apps
+  Branch:          osv-improvements (both repos)
+  Compare URL:     https://codeberg.org/gregburd/osv/compare/master...osv-improvements
+
+The branch is rebased cleanly on current upstream master (a10da1f3).
+The osv-apps fork adds three new applications on the osv-improvements
+branch (described in section 13 below); the submodule pointer in the
+osv fork has been updated accordingly.  There are roughly 60 commits
+above master, grouped below by topic.  Individual features are also
+available on separate feat/* branches if you prefer to review them
+independently.
+
+I have tried to keep each commit atomic and the messages consistent
+with the project's style.  I would welcome any review, pushback on
+design decisions, or requests to split/reorganise further.
+
+---
+
+## 1. OpenZFS 2.4.2 integration (replaces the old BSD-ZFS)
+
+Several commits replace the existing BSD-derived ZFS with an in-tree
+port of OpenZFS 2.4.2.
+
+*Build system*
+- Added external/openzfs as a Git submodule pointing at 2.4.2.
+- bsd/sys/cddl/openzfs_sources.mk enumerates the kernel-module source
+  files selected for the OSv build; the ICP crypto assembly files
+  (sha256-x86_64.S, aes_amd64.S, aes_aesni.S, etc.) are enabled so
+  AES-NI and SHA hardware acceleration work.
+- scripts/apply-openzfs-patches.sh applies a small set of patches from
+  patches/openzfs/ to the submodule before building.
+
+*OSv porting layer*
+- bsd/sys/cddl/compat/opensolaris/openzfs_osv_compat.c provides the
+  Solaris kernel-API stubs OSv needs: random_get_pseudo_bytes, freemem,
+  zero_region, kmem_vasprintf, ddi_strtoll, and others.
+- opensolaris_taskq.c gained taskq_wait_id, taskq_wait_outstanding,
+  taskq_of_curthread, taskq_suspend, taskq_resume,
+  taskq_dispatch_delay, and taskq_dispatch_ent.
+- bsd/porting/cpu.cc adds get_curthread() as a macro alias so OpenZFS
+  thread-local lookups compile without modification.
+- The ICP assembly ASFLAGS rule uses = (not +=) to prevent the old
+  bsd/sys/cddl/contrib/opensolaris/uts/common/sys/asm_linkage.h from
+  shadowing the newer OpenZFS header.
+
+*VFS and boot integration*
+- zfs_vnops_os.c is the OSv-specific vnode operations file.  It
+  implements zfs_vop_cache() which is called by OSv's page-cache fault
+  handler: for each missing 4 KB page it calls zfs_read(), copies the
+  data into the page, and registers it with osv_pagecache_map_page().
+- ZFS_ID is intentionally not set in m_fsid (see pagecache topic below).
+- zfs_freesp, zfs_extend, zfs_free_range, and zfs_trunc are added to
+  support ftruncate() on ZFS file descriptors.
+- loader.cc initialises and mounts the ZFS root pool at boot.
+- Userspace tools: libzfs.so, zpool.so, and zfs.so are built from
+  OpenZFS 2.4.2 userspace sources with a small OSv-specific porting
+  shim for the crypto layer (libzfs_crypto_os.c returns ENOTSUP) and
+  mount layer (zfs_mount_setattr falls back to full remount like
+  FreeBSD).
+
+*Pagecache design decision*
+- A preparatory commit adds osv_pagecache_map_page() and
+  osv_pagecache_map_read_cached_page() as extern "C" helpers so
+  libsolaris.so (compiled with -fvisibility=hidden) can reach them.
+  The visibility attributes carry a comment explaining why they are
+  needed.
+- The old ARC-bridge path (IS_ZFS() branches, cached_page_arc) was
+  removed because arc_share_buf() became a static function in OpenZFS
+  2.x, making that code unreachable.  A detailed comment explains the
+  architectural decision and why there is no double-caching risk (ARC
+  caches compressed blocks; read_cache caches decompressed 4 KB mmap
+  pages).
+
+*ZFS low-memory stability fixes*
+Several fixes were needed to run reliably at 128 MiB RAM:
+- virt_to_phys() now walks the page table for VMA-mapped DMA buffers
+  that land below phys_mem, rather than asserting.  ZFS malloc_large()
+  buffers fragment physical memory under sustained I/O and the old code
+  panicked when such a buffer landed in mmap-managed space.
+- kthread stacks increased from 16 KiB to 256 KiB to prevent stack
+  overflow in ZFS TXG and L2ARC threads.
+- The ARC shrinker is registered inside register_shrinker_arc_funs()
+  (called after arc_init() completes inside zfs_kmod_init()) rather
+  than in bsd_shrinker_init() which runs before libsolaris.so is
+  loaded.  Without this, OSv's memory reclaimer cannot shrink the ARC
+  under pressure, causing alloc_phys_contiguous_aligned() to block
+  forever -- a deadlock during TXG sync.
+- arc_default_max() uses a tiered formula capping the ARC at 1/8 of
+  RAM for 128-256 MiB VMs (compared to FreeBSD's 5/8), leaving room
+  for the ZIO pipeline, thread stacks, and virtio-blk DMA buffers.
+- arc_available_memory() uses a 7/8 low-pass filter on freemem to
+  dampen sub-second eviction spikes while still tracking sustained
+  memory pressure.
+- zfs_txg_timeout reduced to 2 s (from 5 s) and
+  zfs_dirty_data_max_percent to 5% to reduce peak dirty-data
+  accumulation at 128 MiB.
+- zfs_recover = B_TRUE prevents CE_PANIC from a benign link-count
+  mismatch during dataset teardown (a known z_vnode initialisation
+  quirk on OSv; logged as CE_WARN instead).
+
+*ZFS tests*
+- tests/tst-zfs-direct-io.cc: validates O_DIRECT on a ZFS dataset
+  (9/9 pass).
+- tests/tst-zfs-recordsize.cc: sequential read/write throughput
+  benchmark for 8 KB vs 128 KB recordsize.
+- tests/tst-zfs-db-sim.cc: simulates a Postgres WAL workload (8 KiB
+  random pages, 750 MiB dataset) across five dataset configurations.
+  Demonstrates that O_DIRECT + primarycache=metadata + lz4 achieves
+  ~1100 txn/s at 128 MiB RAM and ~1450 txn/s at 512 MiB, with
+  configurations that would OOM automatically skipped based on the
+  detected RAM size.
+- tests/tst-zfs-trim.cc: exercises 'zpool trim' via lzc_trim(); PASS on
+  TRIM-capable devices, SKIP on devices without VIRTIO_BLK_F_DISCARD.
+- Test helpers use the libzfs API via dlopen("libzfs.so") at runtime
+  instead of system("zfs create ..."), since OSv does not support
+  fork/exec.
+
+*Known gaps*: MAP_SHARED on ZFS-backed files uses a private-copy path
+(each VMA gets its own anonymous pages) rather than a true shared
+mapping, because OpenZFS does not expose ARC buffers to the mmap layer.
+This is consistent with how Linux handles the same case.
+
+TRIM/DISCARD ('zpool trim') now works end-to-end: ZIO_TYPE_TRIM zios are
+routed through vdev_disk to BIO_DISCARD -> VIRTIO_BLK_T_DISCARD.  On QEMU
+without VIRTIO_BLK_F_DISCARD the bio completes with ENOTSUP and trim is
+silently skipped -- no panic.  tests/tst-zfs-trim.cc validates this.
+
+I am quite uncertain whether the zfs_vop_cache() design (one zfs_read()
+call per missing page) is acceptable or whether there is a better way to
+hook into the existing page-cache machinery.
+
+*Multi-record write data integrity fix*: while validating the Crucible
+driver against ZFS I bracketed and fixed a long-standing bug in the OSv
+SPL: zfs_uioskip() was advancing uio_offset and uio_resid but NOT the
+caller's iov->iov_base / iov_len, so any write spanning more than one
+ZFS record (>128 KiB by default) silently populated the second record
+from the FIRST record's source bytes.  No existing test caught it
+because tst-fs-bench and tst-zfs-recordsize don't verify data after
+read.  tests/tst-zfs-multirec.cc reproduces it in the smallest possible
+form (single 256 KiB write+fsync+read+memcmp), and the fix mirrors
+FreeBSD's zfs_uioskip() which routes through uiomove(NULL, ...) so the
+iov is advanced exactly the way uiomove() advances it for a real copy.
+
+---
+
+## 2. ZFS encryption integration test (AES-256-GCM)
+
+tests/tst-zfs-encryption.cc exercises encryption end-to-end: create an
+encrypted dataset, write/read data, unload the key, verify access is
+blocked, reload the key, verify access is restored.  21/21 test cases
+pass.
+
+This required fixing the libzfs mnttab cache: libzfs_mnttab_add was
+guarded behind avl_numnodes > 0, so on OSv (where /proc/mounts is
+absent and the initial libzfs_mnttab_update always returned ENOENT) the
+in-memory mount table was never populated, causing zfs_unmount to
+silently skip the actual umount2() call, which left the key's reference
+count pinned and zfs_crypto_unload_key returning EBUSY forever.  The
+fix enables the in-memory cache unconditionally on first mount via
+libzfs_mnttab_cache(hdl, B_TRUE).
+
+---
+
+## 3. musl upgrade (1.1.24 -> 1.2.1)
+
+The musl submodule is bumped to 1.2.1.  The main motivation was 64-bit
+time_t on 32-bit targets and several correctness fixes, but it also
+resolves symbol conflicts that appeared when building the OpenZFS
+userspace tools.  The commit adds libc/stdio/__string_read.c and
+updates include/api/*/bits/dirent.h to match the new musl ABI.
+
+---
+
+## 4. io_uring async I/O interface
+
+A single commit implements the three io_uring syscalls: io_uring_setup,
+io_uring_enter, and io_uring_register.
+
+Key design points:
+
+- The submission and completion rings are backed by mmu::map_anon
+  regions.  io_uring_params.sq_off and cq_off are populated with
+  offsetof() so liburing can locate ring metadata without hard-coding
+  struct layouts (Linux 5.4+ ABI requirement).
+- io_uring_enter returns the submitted count.
+- IORING_SETUP_SQPOLL is implemented as a sched::thread that polls the
+  SQ ring.  After sq_thread_idle milliseconds of inactivity it sets
+  IORING_SQ_NEED_WAKEUP and sleeps on a condvar until the application
+  calls io_uring_enter with IORING_ENTER_SQ_WAKEUP.
+- io_uring_register supports IORING_REGISTER_BUFFERS,
+  IORING_REGISTER_FILES, and IORING_REGISTER_EVENTFD.
+- Operations implemented: NOP, READV, WRITEV, READ, WRITE, FSYNC,
+  POLL_ADD, TIMEOUT, ACCEPT, CONNECT, SEND, RECV, OPENAT, CLOSE, and
+  more.
+
+My main uncertainty is whether the mmap layout (two anonymous regions
+sharing a single file descriptor) is the right model for OSv, and
+whether SQPOLL at OSv's scheduling priority is likely to starve other
+threads under load.
+
+---
+
+## 5. Boost and Boost.Asio updates
+
+- "build: update to latest Boost library" removes the boost177
+  dependency and moves to the system Boost package.
+- "build: update Boost.Asio API" updates httpserver-api and
+  monitoring-agent for the Boost 1.74+/1.78+ API changes: io_service ->
+  io_context, mutable_buffers_1 -> mutable_buffer, resolver.resolve()
+  synchronous overload, boost::asio::dispatch(), std::isinf/isnan,
+  fs::extension().string().
+- modules/common.gmk now searches for libboost_filesystem.so (not
+  libboost_system.so, which is header-only since 1.78) and accepts a
+  boost_lib_dir override for NixOS where headers and libs live in
+  separate store paths.
+
+---
+
+## 6. MADV_HUGEPAGE and MAP_HUGETLB
+
+OSv already defaults to 2 MB huge pages for anonymous mappings, so the
+interesting case here is strict enforcement.
+
+- mmap_huge (a new mmu::mmap_flags bit) is set by MAP_HUGETLB.  A
+  huge_only_page_provider subclass refuses the small-page fallback;
+  populate_vma() returns a mapped byte count less than size, which
+  map_anon() detects to clean up the partial mapping and return ENOMEM.
+- MADV_HUGEPAGE is mapped to a new advise_hugepage flag that clears
+  mmap_small on intersecting VMAs so subsequent faults use 2 MB pages
+  again.
+- Tests cover both the success path and the ENOMEM path.
+
+---
+
+## 7. POSIX shared memory and ftruncate
+
+- shm_open, shm_unlink, and shmctl(IPC_STAT) are implemented.
+- sys_ftruncate in vfs_syscalls.cc now delegates to fp->truncate() for
+  files without dentries.
+- A stale-PTE bug in shm_file::put_page() was fixed: the function was
+  not calling clear_pte(ptep) before returning false, leaving mappings
+  in place after munmap.
+- tests/tst-shm-consistency.cc verifies shared memory across multiple
+  threads with mmap/munmap cycling; 30/30 subtests pass.
+
+---
+
+## 8. VirtIO-BLK multiqueue (per-CPU queue dispatch)
+
+Replaces the single global _lock mutex with per-queue locks and
+CPU-affine queue selection (sched::cpu::current()->id % _num_queues).
+On a multiqueue-capable hypervisor (VIRTIO_BLK_F_MQ), multiple CPUs
+can now submit I/O simultaneously without serialising on a single
+global lock.
+
+A concurrency bug was also fixed in the drain path: the drain-all loop
+(qid==0) and the per-queue poll path (qid>0) were both missing
+_queue_locks[q] around their ring-buffer walk, which could race with
+request completion and corrupt the used-ring index under high queue
+depth.  This was exposed by the ZFS TXG write path which pipelines
+many I/Os across all queues simultaneously.
+
+---
+
+## 9. Pagecache improvements: sequential readahead, periodic writeback,
+   and filesystem-signalled writeback API
+
+Sequential readahead: after fetching a page on an mmap fault miss, the
+pagecache layer checks whether the preceding page is already cached (a
+sequential-access signal).  If so, it speculatively prefetches the next
+4 pages before returning, hiding one round-trip of I/O latency on
+sequential scans.
+
+Periodic writeback: a background thread (pagecache-wb) wakes every N
+seconds (default 5, tunable via pagecache_wb_interval_secs) and flushes
+all dirty write-cached pages.  Previously, dirty pages were only flushed
+on LRU eviction or explicit fsync.
+
+Filesystem-signalled writeback API: pagecache::writeback_inode() lets
+filesystem VOP callbacks (VOP_FSYNC, checkpoint hooks, pre-unmount)
+request writeback of specific inode ranges without holding a vfs_file*.
+A C-linkage entry point osv_pagecache_writeback_inode() is provided for
+C filesystem code.
+
+Three correctness fixes:
+- Fixed thread-unsafe static std::stack<> in pagecache::sync().
+- Added a phase that promotes PTE-dirty bits to the software _dirty
+  flag before collecting pages, so sync() no longer misses MAP_SHARED
+  writes that have not yet been unmapped.
+- Fixed sys_fsync() to flush the write cache before calling VOP_FSYNC.
+  Previously, MAP_SHARED mmap writes that had not been msync()ed would
+  not reach the filesystem's journal even after fsync() returned.
+
+---
+
+## 10. Crucible distributed block device driver
+
+The Crucible driver connects OSv to Oxide Computer's Crucible downstairs
+storage service over a TCP framing protocol (the upstream V13 wire
+format, length-prefixed bincode-serialised messages).
+
+Negotiation handshake implemented end-to-end against a real
+27-downstairs cluster (9 volumes × 3 replicas):
+
+  HereIAm → YesItsMe → PromoteToActive → YouAreNowActive
+         → RegionInfoPlease → RegionInfo
+         → ExtentVersionsPlease → ExtentVersions
+
+After the handshake the upstream is "active (read-write)" and serves
+ReadRequest / Write / Flush against the replica set with a 2-of-3
+quorum.  Each Connection's send and receive paths take per-direction
+locks; Write frames hold the send lock across BOTH the bincode
+header and the bulk data so concurrent senders cannot interleave.
+
+Bug fixes during this work (driver-side):
+
+- Frame prefix is total length (prefix + payload), not payload only.
+- Uuid is encoded as bincode `bytes` (u64 length=16 + 16 raw bytes),
+  not a bare 16 raw bytes.
+- HereIAm.alternate_region: bool → alternate_versions: Vec<u32>.
+- YesItsMe layout corrected to { version: u32, repair_addr: SocketAddr }.
+- Message variant indices reordered to match the upstream Rust enum
+  (Discard / DiscardAck were OSv-specific extensions and have been
+  removed; BIO_DISCARD now returns ENOTSUP).
+- Result<T, E> uses a u32 LE variant tag (not u8).
+- Write { header, data: bytes::Bytes } and ReadResponse { header,
+  data: bytes::BytesMut } encode the data inline in the same frame
+  with a u64 length prefix; the OSv driver previously sent the
+  header separately and then send_exact-ed the data, which bled
+  bytes into the next frame's prefix on the downstairs side.
+- RegionInfo carries Block { value: u64, shift: u32 } and a u32
+  extent_count plus database_*_version usize fields.
+- Flush.snapshot_details is Option<SnapshotDetails { String }>;
+  Flush.extent_limit is Option<ExtentId(u32)>; both default to None.
+- Connection::send_exact / recv_exact each take a per-Connection
+  mutex; send_exact_with_data() holds the send mutex across the
+  header and the data so a Write frame is atomic vs other senders.
+- zfs_dev_is_whole_disk(): Crucible volumes are raw network block
+  devices and must NOT be partition-suffixed (".1") by zpool create.
+
+Tests:
+
+- tests/tst-crucible-blk.cc: opens /dev/crucible0 directly and
+  exercises the bio path (4 KiB at offset 0, end-of-disk, mid-disk;
+  64 KiB random pattern; 128 KiB record-aligned; distant-offset
+  sanity; 4 × 1 MiB sequential throughput).  9/9 PASS against a
+  3-replica podman-hosted cluster.
+
+- tests/tst-crucible-zfs.cc: builds a single-disk ZFS pool on
+  /dev/crucible0 via the libzfs API, creates a dataset, writes,
+  fsyncs, reads back and verifies byte-for-byte.  PASS.
+
+The driver is Oxide-specific hardware and is off by default.
+conf/profiles/x64/base.mk sets conf_drivers_crucible?=0.  Build with:
+  ./scripts/build conf_drivers_profile=crucible
+
+---
+
+## 11. Build and NixOS improvements
+
+- "build: add Nix flake" -- flake.nix for a reproducible development
+  environment (NixOS/nix users).
+- Removed ~60 dead bsd/cddl/ files (60 000+ lines) that were superseded
+  by the external/openzfs userspace build: libzfs, libuutil, libnvpair,
+  libzpool, and all the old OpenSolaris cmd/zpool, cmd/zfs, zdb, ztest,
+  etc.  Only bsd/cddl/compat/ (OSv porting shims) and bsd/sys/cddl/
+  (kernel compat headers) are retained.
+- modules/libz/Makefile: fall back to LD_LIBRARY_PATH search when
+  CC -print-file-name returns a relative path (NixOS behaviour).
+- modules/openssl/Makefile, scripts/manifest_from_host.sh: support
+  OpenSSL 3.x (libssl.so.3); filter lddtree "=> None" lines.
+- modules/common.gmk: accept boost_lib_dir override for NixOS where
+  Boost headers and libs are in separate store paths.
+
+---
+
+## 12. Miscellaneous fixes
+
+- bsd: fix device_delete_child return type -- declared void but called
+  with a return-value check.
+- mmu: add missing #include <algorithm> -- GCC 14 no longer implies it
+  via other headers.
+- block: add TRIM/DISCARD and multiqueue I/O support -- exposes
+  blk_mq.cc / blk_mq.h for multi-queue block I/O and wires up
+  DISCARD/WRITE_ZEROES bio commands.
+- libc: fix nftw uninitialized variable in musl 1.2.1 -- nftw() could
+  read uninitialized memory when processing symlinks.
+
+---
+
+## 13. osv-apps additions (https://codeberg.org/gregburd/osv-apps, osv-improvements branch)
+
+Three new applications demonstrate the new kernel features end-to-end:
+
+*zfs-demo* -- A self-contained showcase of all the new storage features:
+ZFS dataset creation, sequential and random POSIX I/O, io_uring async
+I/O, multiqueue VirtIO-BLK dispatch, and TRIM/DISCARD verification via
+BLKDISCARD ioctl.  Runs on any standard OSv ZFS image with no special
+hardware.
+
+*crucible-basic-test* -- Attaches to a single Crucible volume (Oxide
+Computer's distributed block device), performs sequential write/read
+verification, and logs results to a VirtioFS-mounted /data/ directory.
+A smoke test for the Crucible driver in isolation.
+
+*crucible-zfs-test* -- The full Oxide integration scenario: five Crucible
+volumes presented to OSv, a ZFS RAIDZ pool created across them, and a
+sustained I/O workload run against the pool.  Requires a Propolis VM
+environment with Crucible downstairs -- not runnable on standard QEMU.
+
+---
+
+## 14. Forgejo Actions CI
+
+Added .forgejo/workflows/ with three workflow files:
+- build.yml: builds kernel + ZFS tools on every push/PR
+- zfs-image.yml: builds ZFS test image (manual/master trigger)
+- test.yml: full test suite on self-hosted KVM runner (boot-smoke,
+  tst-zfs-direct-io, tst-zfs-trim, tst-zfs-encryption,
+  tst-shm-consistency, tst-zfs-db-sim)
+
+The test workflow requires a self-hosted runner with /dev/kvm access.
+
+---
+
+## Questions for you
+
+1. OpenZFS overall: Is an in-tree submodule the right model, or would
+   you prefer a separate osv-openzfs repository with patches applied at
+   build time (like the current BSD-ZFS approach)?
+
+2. Page-cache integration: The zfs_vop_cache() one-page-at-a-time
+   approach works but is not ideal for sequential access.  Is there a
+   better hook point in the page-cache fault path to batch read-ahead?
+
+3. ARC bridge removal: I removed the IS_ZFS/cached_page_arc code rather
+   than just leaving it dead.  Was that the right call?  If there is any
+   plan to re-expose arc_share_buf() in a future OpenZFS version it
+   might be worth keeping the skeleton.
+
+4. io_uring completeness: The implementation covers the ops needed for
+   basic file and network I/O.  What threshold of completeness would you
+   want before merging -- a specific subset of ops, liburing's test suite
+   passing, or something else?
+
+5. Crucible driver: This is necessarily Oxide-specific.  Are you
+   comfortable with an opt-in driver for proprietary cloud hardware
+   living in the main tree, or would you prefer it in a separate
+   downstream branch/fork?
+
+6. Boost update: The move from boost177 to system Boost may break builds
+   for users who do not have a recent enough system Boost.  Is there a
+   minimum Boost version policy for OSv?
+
+7. musl 1.2.1: Are there any known compatibility issues with the
+   existing test suite against the newer musl that I should be aware of
+   before declaring the upgrade stable?
+
+8. Pagecache writeback interval: Linux defaults to 30 s
+   (dirty_writeback_centisecs=1500).  I used 5 s for OSv's simpler
+   memory model.  Is that too aggressive, or is there a better default?
+
+I have tried to be conservative about what I upstream -- for example,
+the Nix flake and Crucible driver are commit-separated so they can be
+dropped easily.  I am happy to reorganise, split, or drop any of this
+based on your guidance.
+
+The full diff is also browsable at:
+  https://codeberg.org/gregburd/osv/compare/master...osv-improvements
+
+Thank you for maintaining OSv -- it is a remarkable piece of work.
+
+Greg Burd

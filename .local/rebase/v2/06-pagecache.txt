@@ -1,0 +1,23 @@
+pagecache: ZFS bridging, sequential readahead, periodic writeback
+
+Three pagecache changes that work together to make the OSv VFS
+page cache cooperate with OpenZFS:
+
+  - Expose C-linkage helpers (osv_pagecache_map_page, osv_pagecache_*)
+    so the OpenZFS vop_cache implementation in zfs_vnops_os.c can
+    register and look up cached pages without dragging the C++
+    pagecache headers into kernel-module sources.  Also fixes a
+    GCC 14 ambiguity error on a templated helper.
+  - Remove the original ARC-bridge code path that tried to share
+    pages between the ZFS ARC and the OSv read_cache.  It was never
+    reachable: IS_ZFS() always returned false on OSv (m_fsid
+    distinct), and the bridge data structures were only initialised
+    on the unreachable branch.  Document the design decision in a
+    comment block above the (now removed) site so future readers
+    don't try the same approach again.
+  - Sequential readahead and a periodic writeback worker.  The
+    readahead window grows on consecutive cache hits and resets on
+    seek; the writeback worker flushes dirty pages every 5 s with
+    a global cap so dirty pages can't accumulate without bound.
+
+Verified by tst-mmap-file, tst-zfs-direct-io, and tst-fs-bench.

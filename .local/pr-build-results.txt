@@ -1,0 +1,74 @@
+OSv PR-sweep build validation on bench-db (18.189.43.159), Wed Jul 29 10:28:13 UTC 2026
+Tree: ~/osv (=gh-fork gburd/osv-1), container osv-build (fedora39 gcc13.3.1), -j96
+================================================================================
+branch | PR# | compiles | test | notes
+
+pr/mremap | #1432 | NO | n/a (no build) | FAIL: core/mmu.cc:1512 "could not convert e from error to bool".
+  The shrink-path guard uses:  if (auto e = munmap(...)) { e.to_libc(); return MAP_FAILED; }
+  struct error (include/osv/error.h) has NO implicit bool conversion.
+  FIX: use  if (auto e = munmap(...); e.bad()) { e.to_libc(); return MAP_FAILED; }
+  (mremap symbol-file / linker-script sort NOT yet reached - build died at mmu.o.)
+
+pr/libaio | #1433 | YES | tst-libaio PASS | Full image build EXIT=0, 0 errors. Boot recipe:
+  qemu -kernel loader-stripped.elf -append "/tests/tst-libaio.so" (multiboot; MBR disk-boot
+  loops in this container, ELF-kernel path boots in ~220ms). Output: "libaio tests PASSED".
+  The io_destroy-vs-io_getevents waiters handshake (highest-risk change) exercised OK:
+  no UAF, no hang, clean exit 0. New EINVAL/EFAULT guards did not break existing cases.
+  NOTE(env): container needed jdk+maven+pax-utils for image=tests to build (java-tests dep);
+  these are container-only installs, no git changes.
+
+pr/setrlimit | #1435 | YES | tst-rlimit PASS | image=tests EXIT=0, 0 errors. _GNU_SOURCE/prlimit
+  compile blocker resolved; "rlimit tests PASSED" (incl new null-ptr->EFAULT asserts).
+
+pr/close-range | #1436 | YES | tst-close-range PASS | image=tests EXIT=0, 0 errors.
+  "close_range tests PASSED" (false-positive test-hardening fix confirmed).
+
+pr/mremap | #1432 | NO (re-test of maintainer fix, head 871c20cc) | n/a | STILL FAILS - new error.
+  core/mmu.cc:1511: error: init-statement in selection statements only available with
+  -std=c++17 [-Werror=c++17-extensions]. The fix used the C++17 form:
+      if (auto e = munmap(...); e.bad()) { e.to_libc(); return MAP_FAILED; }
+  but the OSv kernel compiles at gnu++14 (conf/base.mk: conf_cxx_level=gnu++14), so the
+  if-init-statement is rejected as a C++17 extension under -Werror.
+  FIX (C++14-safe): split into two statements:
+      auto e = munmap(reinterpret_cast<void*>(old_start + new_size), old_size - new_size);
+      if (e.bad()) { e.to_libc(); return MAP_FAILED; }
+  (Build again died at mmu.o - __mremap symbol/linker-script sort still NOT reached.)
+
+pr/sec-driver-backend | #1450 | YES | storage smoke PASS | image=tests EXIT=0, 0 errors
+  (virtio-vring.cc, nvme.cc, nvme-queue.cc all clean). HOT-PATH SMOKE:
+   - virtio-blk root: ZFS mounted from vblk0, tst-fallocate 9/9 PASS (get_buf_gc/get_buf_elem
+     drain-loop restructure completes normal traffic, no queue stall).
+   - NVMe root: ZFS mounted from nvme0, tst-fallocate 9/9 PASS (nvme-queue null-row check OK).
+  Malicious-id path not triggered (needs crafted backend) - normal completion draining green
+  on both backends, 1 and 4 CPU boots clean.
+
+pr/sec-rofs | #1451 | YES | ROFS tests PASS | fs=rofs image=tests EXIT=0, 0 errors
+  (rofs_vfsops.cc, rofs_vnops.cc, rofs_common.cc clean). ROFS image built (759 dir entries,
+  9 symlinks, 760 inodes) mounts + reads correctly:
+   - tst-readdir-rofs: 63/63 PASS   - tst-symlink-rofs: 25/25 PASS   - tst-chdir-rofs: 24/24 PASS
+  in_bounds guard + uint64_t loop counters + calloc/cleanup refactor + symlink off-by-one
+  fix confirmed non-regressing (mount, dir listing, symlink resolution all green).
+
+pr/ext4-fsync-cache | #1431 | YES | tst-ext4-rw SKIP(no disk)+PASS(with disk) | image=tests EXIT=0
+  (only a harmless -Wcomment warning, no errors). BOTH paths confirmed:
+   (a) NO /data disk -> "ext4-rw tests SKIPPED: /data/readme.dat not present" exit 0, no abort.
+       Default suite will NOT fail without an ext4 disk (the sweep fix works).
+   (b) WITH ext4 disk at /data (mkfs.ext4 -O ^64bit,^metadata_csum -b1024, readme.dat 12288B
+       pattern (i*7+3)&0xff) -> "ext4-rw tests PASSED" (mmap/vop_cache bridge + fsync assertions).
+  NOTE(env): real-disk run needed container installs e2fsprogs+cmake and image=tests,libext
+  (pulls lwext4 submodule build); lwext4 needs conservative ext4 features to mount.
+
+================================================================================
+FINAL SUMMARY
+branch                  | PR#   | compiles | test                        | verdict
+pr/mremap               | #1432 | NO       | n/a                         | NEEDS FIX (C++14 init-stmt)
+pr/libaio               | #1433 | YES      | tst-libaio PASS             | SAFE
+pr/setrlimit            | #1435 | YES      | tst-rlimit PASS             | SAFE
+pr/close-range          | #1436 | YES      | tst-close-range PASS        | SAFE
+pr/sec-driver-backend   | #1450 | YES      | virtio-blk+NVMe smoke PASS  | SAFE
+pr/sec-rofs             | #1451 | YES      | rofs readdir/symlink/chdir PASS | SAFE
+pr/ext4-fsync-cache     | #1431 | YES      | SKIP(no disk)+PASS(disk)    | SAFE
+================================================================================
+6 of 7 SAFE (build+test green). 1 needs a fix: pr/mremap #1432 (head 871c20cc) -
+  core/mmu.cc:1511 uses C++17 if-init-statement but kernel is gnu++14; split into two
+  statements: auto e = munmap(...); if (e.bad()) { e.to_libc(); return MAP_FAILED; }

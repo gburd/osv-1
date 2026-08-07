@@ -1,0 +1,74 @@
+HAMMER2: HammerDB TPROC-C e2e validation of the two fork-PLT fixes + first OSv NOPM
+=====================================================================================
+Base: #1458 integ/pg-fork-zfs tip 6dd041b7b (gh-fork osv-1). Image = FIXED image.
+Box: cracker i-02866be984be41ca4 (m5d.metal, us-east-2, tag osv-hammer2) - TERMINATED + all EBS gone.
+Image: ZFS (NOT ramfs fallback). zfs-tools,pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1, raidz1 (4 NVMe-backed vblk).
+
+HEADLINE: BOTH fork-PLT fixes are e2e-validated under real HammerDB TPROC-C.
+  NOPM = 155516  (357551 PostgreSQL TPM)  <- the first real OSv HammerDB TPROC-C NOPM.
+  0 resolve_pltgot NULL-faults, 0 symbol-lookup faults (sem_wait/preadv/pwritev/"failed looking up"),
+  0 mmu::vm_fault, across a clean 1-min-rampup + 3-min-timed run (5 VUs, 4 active, forking real backends).
+
+FIX 1 (GOT-slot relocation, 8d775cc01): CLEAN. 0 resolve_pltgot across every phase.
+FIX 2 (bind-now symbol-lookup, 6dd041b7b): CLEAN. 0 "not found" (sem_wait/preadv/pwritev). The exact
+  wall the prior HammerDB wave hit (fork SYMBOL-LOOKUP) is GONE - forked backends never enter the resolver.
+
+BUILD OUTCOME: ZFS image built successfully (the fragile path). Build friction resolved:
+  - submodules: had to force-checkout musl_0.9.12 (libc/locale/*.c symlink into it), kbuild, acpica working trees
+    (initial `git submodule update apps ...` aborted on apps pinned-commit 57c6079 not being public - apps pg18-fork
+    module recreated locally from .local/ozfs-fixes/pg18-fork-module.py; base apps tree = cloudius master, fine).
+  - builder container: fedora:39 + scripts/setup.py toolchain, PLUS dnf musl-gcc musl-devel readline-devel
+    zlib-devel zlib-static libblkid-devel libuuid-devel openssl-devel (zlib.h gap broke openzfs libzfs_sendrecv.o;
+    NOT the byteorder.h gap the report feared - that was already handled in-tree).
+  - postgres 18.0 built musl-PIE via pg-build.sh + 2 OSv neuters (patch-pg.sh: check_root, checkDataDir).
+BOOT SANITY: 5/5 clean (OSv v0.57.0-440-g6dd041b7, ZFS pool ONLINE each boot).
+SEED: raidz1 pgdata pool (4x50G NVMe-raw vblk) ONLINE 0 errors; host-initdb'd cluster cpiod-streamed (996 entries).
+
+SCHEMA BUILD FAULT COUNT (fork-PLT): 0 resolve_pltgot, 0 symbol-lookup, 0 vm_fault.
+  - 250wh/8VU attempted: the build ran 8 min then WEDGED at "Loading Stock 80000/100000" - the guest's qemu
+    user-net (slirp) single-queue RX path wedged under 8 concurrent heavy COPY streams (client-side EPIPE, guest
+    idle at 0% CPU, PG survived + WAL-recovered clean on restart). This is the SEPARATE pre-existing slirp/RX
+    concurrency wedge (roadmap-known), NOT a fork fault. 0 fork-PLT faults during it.
+  - 20wh/4VU: FINISHED SUCCESS. "POSTGRES SCHEMA COMPLETE" (tables+indexes+stored procs+stats). 0 fork-PLT faults.
+    Data durable on ZFS raidz1: warehouse=20 customer=600000 stock=2000000 (survived crash+restart WAL recovery).
+
+TPROC-C RUN FAULT COUNT (fork-PLT): 0 resolve_pltgot, 0 symbol-lookup, 0 vm_fault. Clean 4-min run, NOPM captured.
+
+=====================================================================================
+TWO NEW FAULTS surfaced (both the KNOWN fork-COW-arena coherence class, NEITHER is the
+two fixes under test - both those are clean). Cleared by a plpgsql preload for the run;
+they are real residual fork-teardown/dlopen coherence bugs to fix next:
+
+NEW FAULT A - forked-backend AS teardown NULL-deref in the reaper (post-schema-build COMMIT storm)
+  addr 0x0; RDI=0x300003e87560 (fork COW arena base 0x3000..).
+  RIP mmu::destroy_address_space (core/mmu.cc:767 = `as->owned_vmas->clear_and_dispose([](vma*v){delete v;})`)
+    <- fork.cc:621 child->set_cleanup lambda (destroy child_as)
+    <- sched::thread::reaper (core/sched.cc:2086) <- thread::main
+  Mechanism (hypothesis, matches the fork-arena class): the child AS's owned_vmas snapshot (or a file_vma's
+  page_allocator/fileref) lives in / points into the recycled COW fork arena; ~vma dereferences a stale/NULL
+  arena pointer when the reaper tears down a short-lived forked backend under heavy connection churn.
+  Trigger phase: end of 20wh schema build, HammerDB's autocommit COMMIT storm reaping many backends fast.
+
+NEW FAULT B - forked-backend dlopen get_library corruption (stored-proc first-call, no preload)
+  addr 0xfffffffffffff000; RBX/RDI/R8/R9/R12-R15 all 0x30000021c9.. (fork COW arena).
+  RIP elf::program::get_library (core/elf.cc:1646) <- dlopen (libc/dlfcn.cc:49) <- app (0x100000b1b1e9)
+    (return addr 0x692f383167702f6b = ASCII "k/pg81g/i" = a corrupted/overwritten stack return -> arena node walk
+     over COW-incoherent list).
+  Mechanism (hypothesis): a forked backend calls dlopen (plpgsql.so on first stored-procedure call); the linker's
+  library/module list nodes it walks live in the COW fork arena and are incoherent across the fork boundary.
+  WORKAROUND that made the NOPM run clean: ALTER SYSTEM SET shared_preload_libraries='plpgsql' + restart, so the
+  postmaster dlopens plpgsql in AS0 BEFORE any fork; forked backends inherit it and never dlopen-in-fork.
+  => real residual: dlopen-in-a-forked-child is not fork-coherent (get_library list on the arena). Same class as
+     the shipped fixes (route the linker list/nodes to the identity kernel heap under CONF_fork).
+
+NON-FAULT config gotchas handled (for the next agent):
+  - musl has no C.UTF-8 locale data: create bench DB with LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C' (connectable);
+    a plain C.UTF-8 libc-provider DB is created OK but is UN-CONNECTABLE (ENOENT). Also boot --env=LC_ALL=C.
+  - HammerDB pgtcl needs a GLIBC libpq (dnf install libpq); the musl libpq we build won't dlopen under glibc Tcl.
+  - Non-stored-proc TPROC-C fails on a stored-proc-built schema (calls neword() as a FUNCTION; it's a PROCEDURE).
+    Use pg_storedprocs true + the plpgsql preload workaround.
+
+VERDICT: both fork-PLT fixes (8d775cc01 GOT-slot, 6dd041b7b bind-now symbol-lookup) e2e-validated under HammerDB
+TPROC-C, NOPM=155516. Two NEW residual fork-COW-arena faults (reaper AS-teardown, dlopen get_library) found and
+characterized - next fork-stack targets, same identity-heap class as all prior fork fixes. No commit needed
+(the two fixes under test are complete + clean; the two NEW faults are separate follow-on work).

@@ -1,0 +1,55 @@
+=== virtio-net MULTIQUEUE — implementation summary ===
+Branch: pr/virtio-net-multiqueue  (base: upstream/master ae077860c, current tip)
+Author: Greg Burd <greg@burd.me>   Scope: virtio-net:   Leak-clean: yes
+Bundle: /tmp/vnetmq-fix.bundle  (ae077860c..pr/virtio-net-multiqueue, on floki)
+STANDALONE MASTER PR — fork-independent. drivers/virtio-net.{cc,hh} on the fork
+tip are byte-identical to upstream/master, and the change builds+boots on plain
+upstream/master with no fork code. NOT a fork-stack patch.
+
+Files changed (7; 322 insertions, 53 deletions):
+  drivers/virtio-net.hh   - _rxq/_txq single structs -> vectors of queue pairs;
+                            forward-decls; _nqp; ctrl-vq index; set_vq_pairs().
+  drivers/virtio-net.cc   - negotiate VIRTIO_NET_F_MQ + VIRTIO_NET_F_CTRL_VQ;
+                            read max_virtqueue_pairs; pick nqp = min(advertised,
+                            vCPUs, MSI-X budget); N Rx poll threads pinned across
+                            CPUs; per-queue MSI-X (entry = vq index); Tx queue
+                            select by cpu id; CTRL_MQ_VQ_PAIRS_SET on ctrl vq.
+  drivers/virtio.{hh,cc}  - reserve_msix_vectors(): process-wide MSI-X vector
+                            budget shared by all virtio devices.
+  drivers/virtio-blk.cc   - consult the budget to cap interrupt-bearing queues.
+  drivers/msi.cc          - request_vectors()/msix_vector degrade gracefully
+                            when the IDT vector pool is exhausted.
+  arch/x64/exceptions.cc  - register_interrupt_handler() returns 0 (invalid MSI
+                            vector) instead of abort() when the IDT is full.
+
+Design notes:
+  * Queue layout per spec: rx[i]=vq 2*i, tx[i]=vq 2*i+1, ctrl=vq 2*max_pairs.
+  * MSI-X entry == virtqueue index (setup_queue() maps 1:1); each Rx vector wakes
+    its own pinned poll thread -> N receivers run in parallel across CPUs.
+  * nqp==1 path (no F_MQ, or MMIO shared IRQ) is behaviourally identical to the
+    original single-queue driver.
+  * The MSI-X vector budget fixes the pre-existing high-vCPU boot crash: the
+    x86-64 IDT has only 224 usable vectors (32..255) shared by every device;
+    several multiqueue virtio devices at high vCPU counts exhausted them and
+    aborted at driver load. Now each device caps its interrupt-bearing queues
+    against a shared pool and the allocator degrades instead of aborting.
+
+VALIDATION (host: 96-vCPU x86-64 metal, KVM, qemu 9.0.2; guest OSv master+patch):
+  Build: clean on upstream/master (BUILDRC=0, no warnings on the changed files).
+  Boot stability (single virtio-blk, virtio-net, virtio-rng):
+     -smp 4  : 10/10 reached ready (eth0 up + "Booted up", no crash)
+     -smp 16 : 10/10
+     -smp 48 : 10/10        (was a boot CRASH before the MSI-X fix)
+  MSI-X exhaustion A/B (8x virtio-blk num-queues=48 + virtio-net mq=on, -smp 48):
+     STOCK master : 3/3 abort() in register_interrupt_handler (the exact crash)
+     PATCHED      : 5/5 boot to ready
+  Multiqueue activation (TAP+vhost, queues=8, mq=on, -smp 16):
+     device offers 8 pairs + ctrl vq (17 vqs); driver activates nqp=8;
+     CTRL_MQ_VQ_PAIRS_SET(8) ACKed VIRTIO_NET_OK; DRIVER_OK reached.
+     SLIRP (no MQ): nqp=1 single-queue fallback (unchanged behaviour) - verified.
+
+pgbench resweep: BLOCKED on this box - the pg18-fork+ZFS image is fork-stack and
+its build fails under the box's GCC 11.5 on fork-specific code (core/mmu.cc
+CONF_fork anon_vma dtor, unrelated to this driver). The driver change itself is
+master-standalone and needs no fork code. Network-throughput proxy A/B (iperf3)
+attempted; see ab2.txt.

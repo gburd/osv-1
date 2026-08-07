@@ -1,0 +1,12 @@
+KVM PARITY A/B re-run (contradiction resolution) - box tracking
+DB host  c5n.metal   i-04b20fa1e15eff33f  osv-kvmparity-db  us-east-2/2b subnet-0b076883cbad2cccf
+Driver   m5d.xlarge  i-0cd9d2cb7f3158c81  osv-kvmparity-drv us-east-2/2b subnet-0b076883cbad2cccf
+Pre-existing (DO NOT TOUCH): osv-prmaint4 i-0a3061f529cfb0e6e, solnix-beef-boot i-0e3f7de8ddb47b9e5
+MUST TERMINATE both + delete ALL EBS at end.
+
+=== FINAL: both TERMINATED, all session EBS deleted (2026-08-02) ===
+i-04b20fa1e15eff33f  TERMINATED (root vol auto-deleted, DoT=true)
+i-0cd9d2cb7f3158c81  TERMINATED (root vol auto-deleted, DoT=true)
+vol-0e8004482cd857997 (data, DoT=false) MANUALLY DELETED
+Untouched: osv-prmaint4 i-0a3061f529cfb0e6e, solnix-beef-boot i-0e3f7de8ddb47b9e5 (their vols in-use: 0f202c9a/0235386798)
+Security: SG SSH 73.4.58.126/32 + intra-SG only, no 0.0.0.0/0, no public AMI/snapshot created.

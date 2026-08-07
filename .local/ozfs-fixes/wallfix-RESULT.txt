@@ -1,0 +1,49 @@
+WALLFIX RESULT (three walls -> stock PG serves a real pgbench workload on OSv/KVM from committed code)
+=====================================================================================================
+Boxes (all TERMINATED, 0 orphaned EBS): i-0fd2b459ec3b6d19d, i-027f0420f15a8b2f0, i-04eb5c5cf06333c0a
+  (all c5n.metal us-east-2; boxes 1+2 reaped mid-build by the shared beef-account automation
+   "User initiated shutdown"; box 3 completed the full build+seed+serve+validate before its reap.)
+solnix-beef-boot untouched. SG SSH 73.4.58.126/32 only, no 0.0.0.0/0, no public AMI/snapshot.
+
+Commits on integ/pg-fork-zfs (#1458), author Greg Burd, leak-clean, base 6dd041b7b:
+  1370f10b9  [fork-stack / CONF_fork] populate::page descends to 4K when a provider rejects a 2M
+             fill -> fixes the anon-MAP_SHARED populate spin loop (W1). CONF_fork-gated.
+  861be4908  docs/pg-osv-kvm-walls.md -- how the three walls resolve, reproduce steps.
+Bundle: .local/ozfs-fixes/wallfix-1458.bundle  (6dd041b7b..861be4908)
+
+W1 (mmap populate spin) -- REAL OSv MM FIX (not the sysv workaround):
+  root cause: populate::page() returned true even when a page provider's level-1 (2M) map()
+  returned false to force 4K; the walker then left the 2M PTE empty -> instruction re-faulted
+  forever at 99.9% CPU the moment PG first touched shared_buffers (default shared_memory_type=mmap).
+  fix: return false at a large-capable level so the walker descends to the 4K map(). PG now uses
+  its DEFAULT mmap shared memory; NO sysv config needed.
+
+W2 (catalog-read-zero across forked backends) -- root cause + already-committed fix:
+  the zero page was PG's shared_buffers catalog page read in a forked backend from a non-coherent
+  shared segment. Already solved by the committed shared_anon_page_provider (8bec67d1c): a global
+  VA-keyed registry maps a given shared-anon page VA to the SAME physical frame in every fork AS.
+  The W1<->W2 crux: the sysv workaround routed shm through SysV shm (a DIFFERENT OSv path the
+  provider does NOT cover), so sysv dodged W1 but re-opened W2. Fixing W1 puts PG back on the
+  default mmap path, which IS coherent -> W2 solved with no new code.
+
+W3 (page_range_allocator::remove in l2::fill_thread) -- DOWNSTREAM OF W1, GONE:
+  did not reproduce once W1 was fixed; it was the L2 pool churn caused by the 2M populate spin.
+
+VALIDATION from the committed tip + W1 fix, default shared_memory_type=mmap (pasted):
+  select current_database() -> postgres ; select current_user -> postgres (pg_authid, no zero page)
+  select count(*) from pg_class -> 415 (was: index contains unexpected zero page)
+  pg_roles -> 17 roles incl postgres ; information_schema.tables -> 213
+  CREATE TABLE t + INSERT 1000 + SELECT count(*) -> 1000
+  pgbench -i -s50 -> 5,000,000 tuples, rc=0
+  pgbench -c8 -T30 -> 37281 transactions, 0 failed (0.000%), tps ~1252
+  boot 5/5 -> "ready to accept connections" ~500 ms each; 0 page_range_allocator / vm_fault / zero-page
+
+What's committed vs config-only:
+  COMMITTED (kernel): the W1 populate-descend fix (1370f10b9) + the pre-existing shared_anon
+    coherence provider (8bec67d1c). That is the whole fix. conf_fork=0 behaviorally unchanged
+    (change entirely inside #if CONF_fork; matches the established fork-stack bar -- prior fork
+    commits like 8bec67d1c likewise shift assert __LINE__ under #if CONF_fork with no code change).
+  CONFIG-ONLY a user must set: NONE for the three walls. shared_memory_type stays at PG default
+    (mmap). The only non-default settings are OSv-platform facts, not wall workarounds:
+    unix_socket_directories='' (no AF_UNIX on OSv), builtin C locale + --env=LC_ALL=C (musl has no
+    C.UTF-8 locale data), --extra-zfs-pools at boot to import the pgdata pool.

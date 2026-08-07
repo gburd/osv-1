@@ -1,0 +1,10 @@
+config	hugepages	vusers	NOPM	TPM	latency_ms	iters	stability	note
+OSv-Firecracker	off	8	N/A	N/A	N/A	0	BLOCKED	fork read-zero: vuser conn#2+ fails catalog read at login/build
+OSv-Firecracker	off	16	N/A	N/A	N/A	0	BLOCKED	same
+OSv-Firecracker	off	32	N/A	N/A	N/A	0	BLOCKED	same
+OSv-Firecracker	off	64	N/A	N/A	N/A	0	BLOCKED	same
+OSv-Firecracker	on	8	N/A	N/A	N/A	0	BLOCKED	same (huge-page-independent)
+OSv-Firecracker	on	16	N/A	N/A	N/A	0	BLOCKED	same
+OSv-Firecracker	on	32	N/A	N/A	N/A	0	BLOCKED	same
+OSv-Firecracker	on	64	N/A	N/A	N/A	0	BLOCKED	same
+OSv-KVM-control	off	8	N/A	N/A	N/A	0	BLOCKED	identical wall on same box (proves OSv-common, not FC-specific)

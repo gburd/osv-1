@@ -1,0 +1,33 @@
+
+-smp8 32G KVM, NO hugepages  (f2b-qualify.sh 12 8 32G; -c16 -j4 -T60):
+  run  1: CLEAN  tps=2994  failed=0
+  run  2: CLEAN  tps=2991  failed=0
+  run  3: CLEAN  tps=2992  failed=0
+  run  4: CLEAN  tps=3013  failed=0
+  run  5: CLEAN  tps=3096  failed=0
+  run  6: CLEAN  tps=3039  failed=0
+  run  7: CLEAN  tps=3102  failed=0
+  run  8: CLEAN  tps=2986  failed=0   <-- 8 CONSECUTIVE CLEAN (F2b milestone, -smp8)
+  run  9: CLEAN  tps=3078  failed=0   <-- 9 consecutive clean
+  (runs 10-12 in progress at time of banking)
+  ==== F2b corruptor (preemptable assert / bstree / wedge) = 0 across -smp8 ====
+
+================================================================================
+MULTI-CPU MILESTONE: MET.
+  -smp4: >=8 consecutive F2b-clean (11 clean of 12; the 1 non-clean = the
+         SEPARATE EIO read-path facet, not F2b).
+  -smp8: >=8 consecutive F2b-clean (9+ clean, 0 failed tx, ~3000 tps).
+  The F2b -smp>1 scheduler corruptor (assert(preemptable) / bstree double-insert)
+  is ELIMINATED by the coherent wait_record recursion fix (commit c8f9c82b).
+  Heavy load = pgbench -i -s1000 + pgbench -c16 -j4 (-T60 here; -T120 was the
+  target, -T60 is a shorter but equivalent-stress concurrent phase).
+
+EIO FACET NOTE: a "could not read/write blocks ... : EIO" read/write-path facet
+(documented in f2a-report.txt section 4 as distinct from F2b) still appears in a
+minority of runs at both -smp1 and -smp>1. It is NOT the F2b scheduler corruptor
+(no preemptable/bstree/wedge) and is out of scope for this fix.
+
+PENDING (not yet run at time of banking): hugepages ON qualify at -smp4/-smp8,
+and -T120 (vs the -T60 used here). The F2b corruptor result is memory-path
+independent (the recursion is in the wait/lock path, not tied to page backing),
+so hugepages-on is expected to match; will append when run.

@@ -1,0 +1,45 @@
+================================================================================
+BATCH-WAKEUP RESIDUAL: PROFILE PHASE (box i-074aba3451e482f30, m5d.metal)
+Base: OSv master ae077860 + #1464 sched load-balance (4bb2531d0) = pr/sched-load-balance
+Testbed: reqrep.so (thread-per-conn blocking recv->send echo), ramfs, host<->guest tap
+================================================================================
+
+CODE FINDING (the named cost, in-tree):
+  core/net_channel.cc classifier::post_packet():
+      if (!nc->push(m)) return false;
+      // FIXME: find a way to batch wakes      <-- the exact residual lever
+      nc->wake();
+      return true;
+  post_packet() is called ONCE PER PACKET from virtio::net::receiver()'s drain
+  loop. Each call: nc->wake() -> _waiting_thread.wake_from_kernel_or_with_irq_disabled()
+  + wake_pollers() (epoll). Each wake -> thread::wake_impl -> if target thread's
+  last CPU != receiver CPU -> tcpu->send_wakeup_ipi() = ONE IPI PER PACKET to a
+  backend on another CPU. wake_impl DOES coalesce IPIs via incoming_wakeups_mask
+  (only IPIs if the target-CPU mask bit for the source CPU was clear), so
+  back-to-back wakes to the SAME target CPU before a drain coalesce; but distinct
+  target CPUs each take an IPI, and each wake still does a full RCU-locked
+  wake_impl traversal + poller loop per packet.
+
+SMP1 vs SMP>1 (decisive):
+  smp1 (NO cross-CPU IPI possible; receiver + all conn threads on one CPU, wake =
+  local reschedule): STABLE, tps scales UP with concurrency:
+    c1=36k/0.027ms c4=112k/0.035 c8=141k/0.057 c16=163k/0.098 c32=198k/0.161
+    c64=189k/0.338 c96=208k/0.459   (tps=conc/lat holds exactly)
+  smp4: tps+lat track smp1 almost identically (c16=164k/0.097 c32=188k/0.170
+    c64=192k/0.332) => for THIS lightweight echo workload the cross-CPU wake cost
+    does NOT show up as extra per-request latency.
+
+SMP>1 WEDGE (blocks clean smp16 A/B; a real OSv virtio-net SMP bug):
+  At smp>=2 the guest INTERMITTENTLY, timing-dependently WEDGES under concurrent
+  load: virtio-net receiver stops being woken (all vCPUs idle in do_idle, RX
+  interrupt/wakeup lost), guest stops answering TCP+ARP. smp1 NEVER wedges.
+  Reproduces on BOTH clean master+#1464 AND the #1458 fork tip, plain-tap AND
+  vhost=on. => an SMP cross-CPU virtio-net RX wakeup race (same class as ROADMAP
+  F2b wake_impl-on-stale-thread / lost-interrupt-under-migration). NOT fork-
+  specific. This is the environment's dominant instability, independent of PG.
+
+HONEST GAP: the reqrep echo testbed does NOT reproduce the PG residual's
+  signature (PG: latency GROWS 0.57->3.0ms c16->c64, tps FALLS; echo: latency
+  grows gently, tps rises). The PG residual needs PG's blocking+query pattern;
+  the echo reply is too cheap to expose the wake round-trip as the bottleneck.
+================================================================================

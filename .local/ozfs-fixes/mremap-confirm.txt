@@ -1,0 +1,41 @@
+pr/mremap (#1432) single-branch build+link+test confirm
+OSv gh-fork (github.com/gburd/osv-1), branch pr/mremap
+HEAD: 89a822a14006ebc395ba6903e31c6ee4e83715df  ("mm: implement mremap(2)")
+Box: ec2-user@18.189.43.159, container osv-build (fedora39, gcc 13.3.1), 96 cores
+
+RESULT: GREEN
+
+compiles:              YES  (BUILD_EXIT=0; core/mmu.cc compiled OK - shrink-path guard uses C++14-safe two-statement munmap()/e.bad() form, no C++17 if-init, no bool-conversion. 0 error lines in build log.)
+links-with-__mremap:   YES  (LINK loader.elf succeeded; linker-script sort held.
+                             nm loader.elf:      T mremap, T __mremap
+                             objdump -T loader-stripped.elf (dynamic symtab):
+                               403dcb00 g DF .text mremap
+                               403dcb60 g DF .text __mremap
+                             Both symbols present in ld-musl.so.1.symbols + libc.so.6.symbols and exported dynamically.)
+tst-mremap:            PASS
+
+Boot (KVM ELF-kernel path, aio=native virtio-blk disk):
+  OSv v0.57.0-375-g89a822a1
+  Booted up in 270.24 ms
+  Cmdline: /tests/tst-mremap.so
+  Running mremap tests
+  mremap tests PASSED
+
+Test coverage (tests/tst-mremap.cc, 24 asserts, all passed):
+  test_grow_anon, test_shrink_anon, test_grow_no_maymove_blocked,
+  test_file_move, test_errors
+  test_errors asserts: new_size==0 -> EINVAL ; unmapped addr -> EFAULT.
+  (NOTE: test asserts new_size==0->EINVAL, not old_size==0; and has no
+   dedicated MAP_PRIVATE-writable-move EINVAL assert. Those guards exist in
+   core/mmu.cc per the commit but are not directly exercised by the test.)
+
+Errors: NONE.
+
+Boot recipe used (host qemu was absent; qemu lives in the osv-build container):
+  docker exec osv-build qemu-system-x86_64 -m 2G -smp 1 -nographic -no-reboot \
+    -kernel build/last/loader-stripped.elf -append /tests/tst-mremap.so \
+    -device virtio-blk-pci,id=blk0,drive=hd0 \
+    -drive file=build/last/usr.img,if=none,id=hd0,cache=none,aio=native \
+    -device virtio-rng-pci -enable-kvm -cpu host,+x2apic
+  (The task recipe without a disk / --nomount hangs at the banner: the .so
+   lives on the usr.img rofs, so the virtio-blk disk with aio=native is required.)

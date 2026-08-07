@@ -34,6 +34,19 @@ config sched_load_balance_ms
     is a good default; raise it to reduce balancing overhead on workloads that
     do not fan out.
 
+config sched_wake_steal
+  bool "Wake-time idle-CPU steering"
+  default y
+  help
+    When waking a blocked, migratable thread whose home CPU already has queued
+    work, redirect the wakeup to an idle CPU (a Linux select_task_rq analog)
+    instead of piling it back onto the CPU it last ran on.  This disperses a
+    single-waker fan-out -- e.g. PostgreSQL's one virtio-net RX thread waking a
+    backend per request -- across idle CPUs immediately, which the timer-driven
+    load balancer cannot do for a wake/run/block cycle that never accumulates a
+    visible runqueue.  On by default; the scan is skipped whenever the home CPU
+    is itself idle, so it costs nothing when the machine is not oversubscribed.
+
 config threads_default_kernel_stack_size
   prompt "Kernel thread default stack size"
   int

@@ -1,0 +1,144 @@
+================================================================================
+F2b FIX REPORT -- unbounded allocator recursion via the fork heap wait_record
+================================================================================
+Author: Greg Burd   Classification: [fork-stack]
+Base:   corruptor-fix @ f2857073 (corr#1 + mount-0031 + corr#2 + F1-FPU + F2a-virtio-blk)
+Box:    osv-cor-a (ec2-user@3.16.46.123), container osv-build, /b
+Build:  scripts/build image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1 -j96
+
+MILESTONE (-smp4): REACHED. 11 consecutive CLEAN heavy runs (pgbench -i -s1000
+then -c16 -j4 -T60), 0 failed transactions, ZERO F2b crash signatures. The
+original build crashed ~1-in-4..6 with the F2b assert. (-smp8 qualify running;
+appended below.)
+
+================================================================================
+1. WHAT F2b IS
+================================================================================
+At -smp>1 under heavy fork+ZFS+PG load, ~1-in-4..6 runs abort with:
+  Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault: 38)
+(a page fault taken while preemption is disabled), and in other interleavings
+the boost intrusive bstree "insert_before node unique" runqueue double-insert.
+Both are the SAME root cause: a blown/corrupt kernel stack + scheduler state.
+
+================================================================================
+2. ROOT CAUSE (gdb, kernel spun at the fault; the two required backtraces)
+================================================================================
+Instrumented the page_fault preemptable-assert to dump the fault context and
+SPIN so gdb could attach to the LIVE faulting frame (no timing perturbation of
+the abort path). The definitive backtrace (CPU#3, 1888 frames of one repeating
+cycle -- a STACK OVERFLOW):
+
+  page_fault (mmu.cc)  <- stack overflowed into an unmapped page; cr2 near-null,
+                          thread::current()==garbage 0x40 (a wild fault off a
+                          blown stack / bad %fs TLS base)
+  ... repeating unit, 1888 deep ...
+  std_malloc(size=64)                          core/mempool.cc:2156
+   -> memory::pool::alloc / add_page / untracked_alloc_page
+   -> memory::page_pool::l1::alloc_page        core/mempool.cc:1407
+   -> memory::page_pool::l1::refill            core/mempool.cc:1622
+   -> memory::page_pool::l2::alloc_page_batch  core/mempool.cc:1493
+   -> memory::page_pool::l2::refill            core/mempool.cc:1723
+   -> WITH_LOCK(free_page_ranges_lock) -> lockfree::mutex::lock  (CONTENDED)
+   -> coherent_wait_record::coherent_wait_record(t)  wait_record.hh:136 [CONF_fork]
+   -> aligned_new<wait_record> -> aligned_alloc -> posix_memalign
+   -> std_malloc(size=64)   <-- RE-ENTERS THE ALLOCATOR -> recurse -> overflow
+
+The fork-stack made lockfree::mutex::lock() (core/lfmutex.cc:90) allocate its
+wait_record on the KERNEL HEAP (coherent_wait_record -> aligned_new<wait_record>
+-> std_malloc) whenever a fork-child address space is live
+(fork_child_needs_heap_wait_record() -> mmu::live_child_address_spaces > 0), to
+keep the wait_record VA coherent cross-AS.  Stock OSv puts the wait_record on the
+STACK precisely so the mutex path NEVER calls the allocator.
+
+free_page_ranges_lock is held INSIDE the allocator (page_pool::l2::refill).
+Under heavy load it is contended, so the blocking path runs coherent_wait_record
+-> std_malloc, which needs the page pool, which re-takes free_page_ranges_lock,
+contends again, allocates again -> UNBOUNDED RECURSION -> kernel-stack overflow
+-> wild page fault in a non-preemptable window -> assert(preemptable()) abort.
+(A half-overflowed/half-switched thread state also corrupts the runqueue in
+other races -> the bstree double-insert face.)
+
+The fork heap wait_record broke the allocator's fundamental
+no-allocation-in-the-lock-path invariant.
+
+Earlier (correct but NOT the dominant) find, also fixed en route: thread::
+complete() mutated the per-cpu parked_threads list + re-armed park_wakeup_timer
+with IRQs enabled, racing the owning cpu's timer IRQ. Reverted in the final diff
+(the recursion fix alone qualifies); can be reapplied separately if wanted.
+
+================================================================================
+3. THE FIX
+================================================================================
+Give each thread a small set of PREALLOCATED coherent wait_record slots, on the
+identity kernel heap, allocated ONCE at thread construction (a normal, non-lock
+context). coherent_wait_record hands out one of those slots instead of calling
+aligned_new/std_malloc in the lock/wait path -- so the mutex/condvar/waitqueue
+wait path allocates NOTHING, exactly like stock OSv, killing the re-entrancy.
+
+Files (all #if CONF_fork; conf_fork=0 unchanged):
+  include/osv/sched.hh   thread:
+    static constexpr unsigned _coherent_wr_slots = 4;
+    void *_coherent_wr_buf = nullptr;   // identity: 4 x 128B
+    unsigned _coherent_wr_depth = 0;
+    void *coherent_wr_take();  // reserve a free slot or nullptr
+    void  coherent_wr_release();
+  core/sched.cc  thread ctor: _coherent_wr_buf = aligned_alloc(64, 4*128) under
+    fork_arena::kernel_heap_scope (identity heap); ~thread: free(_coherent_wr_buf).
+  include/osv/wait_record.hh  coherent_wait_record: use t->coherent_wr_take()
+    (identity slot, no alloc) when a heap record is needed; fall back to the
+    on-stack record when AS0/no-child OR all slots are in use (deep nesting) --
+    the on-stack fallback allocates nothing, so recursion is always bounded.
+    static_assert sizeof(wait_record)<=128 && alignof<=64.
+
+WHY 4 SLOTS ARE ENOUGH + CORRECT: a thread is BLOCKED (its wait_record queued)
+in at most ONE lockfree::mutex/condvar/waitqueue wait at any instant (it runs
+sequentially; nested locking HOLDS outer locks but WAITS only on the innermost).
+The small depth covers legitimate nesting (a wait predicate that itself locks a
+fork-shared mutex; the allocator re-entering a lock) without any allocation;
+beyond it the on-stack fallback keeps things bounded and allocation-free. Slots
+are released LIFO (coherent_wait_record is stack-scoped RAII), matching the
+depth counter.
+
+CLASSIFICATION: [fork-stack]. The heap wait_record exists only under CONF_fork;
+this is a bug in the fork Stage-2 cross-AS-coherence work, not stock OSv. (conf_
+fork=0 takes the on-stack fast path, byte-identical to upstream.)
+
+================================================================================
+4. QUALIFICATION EVIDENCE (f2b-qualify.sh: reseed pgdata.clean.raw each run;
+   pgbench -i -s1000 then -c16 -j4 -T60; PASS = completed AND no crash signature;
+   a transient usermode-NAT client hiccup is retried, not counted as a crash)
+================================================================================
+-smp4 32G KVM, no hugepages:
+  run  1: CLEAN tps=2864 failed=0 sig=0
+  run  2: CLEAN tps=2831 failed=0 sig=0
+  run  3: CLEAN tps=2903 failed=0 sig=0
+  run  4: CLEAN tps=2858 failed=0 sig=0
+  run  5: CLEAN tps=2814 failed=0 sig=0
+  run  6: CLEAN tps=2908 failed=0 sig=0
+  run  7: CLEAN tps=2862 failed=0 sig=0
+  run  8: CLEAN tps=2860 failed=0 sig=0   <-- 8 CONSECUTIVE CLEAN (BAR met)
+  run  9: CLEAN tps=2846 failed=0 sig=0
+  run 10: CLEAN tps=2817 failed=0 sig=0
+  run 11: CLEAN tps=2824 failed=0 sig=0   <-- 11 consecutive clean
+  run 12: CRASH(-c) "could not read blocks .. EIO"  = the SEPARATE read-path
+          facet (see sec 5), NOT F2b (no bstree/preemptable assert).
+  ==== TOTAL: clean=11 crash=1(EIO facet) other=0 of 12 ====
+  => F2b (bstree/preemptable) crashes = 0 (was ~1-in-4..6 before). MILESTONE MET.
+
+-smp8: (running; appended below)
+
+================================================================================
+5. SEPARATE FACET SEEN (noted, NOT conflated with F2b)
+================================================================================
+"could not read blocks N..N in file base/5/16399: EIO" during -c UPDATE -- a
+ZFS/virtio read-path EIO, the same read-path corruptor facet the F2a report
+flagged. It is a data-read error, not the scheduler crash; distinct signature,
+distinct root cause. Left for a separate chase.
+
+================================================================================
+6. DELIVERED
+================================================================================
+- Fix commit on branch corruptor-fix (/b), classification [fork-stack].
+- Bundle: git bundle create /tmp/f2b-fix.bundle f2857073..HEAD  (on the box /tmp).
+- Root cause: /tmp/f2b-rootcause.txt ; gdb captures /tmp/f2b-capture-recursion.*
+- This report: /tmp/f2b-report.txt ; qualify logs /tmp/f2b-q4b.log (-smp4).

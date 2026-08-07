@@ -1,0 +1,277 @@
+PostgreSQL 18 fork-per-backend on OSv (CONF_fork) — FORKED-CHILD ADDRESS-SPACE /
+CONTEXT-INTEGRITY BUG: gdb isolation (root-cause CLASS pinned, NOT a bounded fix)
+================================================================================
+Date: 2026-07-23/24   Host: floki (local, NOT EC2)   Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena  branch integ/pg-fork-arena
+HEAD: 5d93af47f ("fork arena: eagerly populate the arena so alloc never demand-faults")
+PG: REL_18_4 musl PIE, /b/.local/pg18/install/bin/postgres, PIE base 0x100000000000
+gdb method: TCG (qemu64, NO kvm) + -s -S; gdb build/release.x64/loader.elf; the
+            reliable stop point is `break core/mmu.cc:1974` (mmu::vm_sigsegv);
+            breaks in arch/x64/mmu.cc:page_fault are NOT usable (they trip on the
+            ELF-load faults and prevent PG from loading, or the stub rejects
+            $cr2/$pc in a mid-run breakpoint condition — see METHOD NOTES).
+
+
+THE BOTTOM LINE (honest)
+------------------------
+The remaining PostgreSQL wall is NOT a corrupt COW code page, NOT an unmapped
+data segment, NOT a wrong TLS/%fs base, NOT a shared-memory-attach failure, NOT
+a second fork, and NOT a delivered app signal. It is a TIMING/PREEMPTION-DEPENDENT
+CONTEXT-INTEGRITY corruption of the single forked child (the checkpointer): under
+free-running preemption the child's APP register context (instruction pointer AND
+stack pointer) is reconstructed from PostgreSQL *.text* bytes, producing a wild
+control transfer into the middle of an instruction with a garbage stack pointer.
+When gdb SINGLE-STEPS the same code (20 000+ instructions) the crash NEVER
+reproduces — the normal copy-on-write demand faults on that path are serviced
+cleanly and the child keeps running. That single fact (serialized stepping =
+no crash; free-run preemption = deterministic crash) is the signature of a race
+in the preemptive context-switch / interrupt-return path for a fork child that
+runs on the parent's EXACT stack virtual addresses (the "same-VA" fork stack).
+
+This is a layer BELOW the arena/COW work that was already validated. The fork
+mechanism itself is sound (all fork tests green, below). I did NOT find a bounded
+one-line fix; I pinned the root-cause CLASS with gdb and give a precise,
+scoped fix direction so the team can decide effort. NO psql rows were served on
+OSv; I do not claim PG works.
+
+
+THE EXACT gdb FINDINGS (isolation, not guesses)
+-----------------------------------------------
+1. WHICH child / thread faults, and the checkpointer-vs-BackendInitialize
+   contradiction — RECONCILED.
+   - There is exactly ONE fork. Breaking at the child-resume trampoline
+     (arch/x64/fork.cc, `jmp *%rcx` at loader PC 0x40310a64) fires exactly once:
+        [RESUME #1] target rip=0x10000041cd4b (PIEoff 0x41cd4b, inside
+                    CheckpointerMain @0x41c2e0)  rsp=0x200000200d80
+     i.e. the CHECKPOINTER child resumes cleanly in fork()'s caller with a VALID
+     stack pointer (slot 64, PG's mmap stack). No second fork ever happens
+     (a breakpoint at RegisterPostmasterChildActive 0x48f140 and at the crash
+     region confirm the postmaster forks only the checkpointer before dying).
+   - The thread that faults is that same child: `current()` name = ">/b/.local/pg18"
+     (truncated postgres argv), thread 0x4000bfe00040, running on its private
+     child address space (CR3 = 0x9330000, child PML4; child._current_as valid).
+   - The child runs CORRECTLY through InitAuxiliaryProcess (proc.c): a breakpoint
+     at InitAux 0x4a9000 (right after the `IsUnderPostmaster` branch that the
+     last console breadcrumb "InitAux shmem read OK" precedes) is hit with a
+     VALID rsp=0x200000200cb0. So the last flushed breadcrumb (checkpointer,
+     InitAuxiliaryProcess) is truthful: the child really is the checkpointer and
+     really is in InitAuxiliaryProcess.
+   - The crash PC "BackendInitialize:164 / ClientAuthInProgress = true" is a RED
+     HERRING. A breakpoint at the real movb (0x1000004b0004) NEVER fires: the
+     child never legitimately executes BackendInitialize. The reported crash
+     rip is 0x1000004b0005 — ONE BYTE PAST the movb — i.e. execution landed in
+     the MIDDLE of the instruction `c6 00 01` (movb $1,(%rax)). Disassembled at
+     0x4b0005 that is `00 01` = `add %al,(%rcx)`; with the faulting rcx=1 that
+     writes to address 1 (matching the live CR2=0x1 read at the fault, which the
+     prior console printer had reported as addr=0x0 from a mangled `addr` local).
+   CONCLUSION: rip=0x4b0005 is a WILD control-transfer target, not real
+   BackendInitialize execution. "ClientAuthInProgress" is simply the symbol
+   nearest where a corrupt jump/ret landed.
+
+2. Is it a corrupt child CODE page? NO — the page is faithful.
+   Walked the child CR3 by hand (identity phys map at 0x400000000000):
+     CODE 0x1000004b0000 -> L4[32] L3[0] L2[2] L1[176] present w=0 -> phys 0x917b000
+     bytes read via child CR3 AND via the phys frame BOTH = "bc 27 50 00 c6 00 01 48"
+     which is byte-identical to `objdump postgres` at 0x4b0000 (the tail of
+     `lea …,%rcx` + the movb + next lea). The code page is correct, read-only,
+     shared COW — exactly right.
+
+3. Is the DATA segment (&ClientAuthInProgress) unmapped? NO — mapped & writable.
+     DATA 0x100000999000 -> L4[32] L3[0] L2[4] L1[409] present w=1 -> phys 0x10021e000
+   &ClientAuthInProgress (0x100000999841, section .bss) is present and WRITABLE
+   (a COW-broken private page) in the child. The child could write it fine.
+
+4. Wrong TLS / %fs base? NO.
+   At the fault the live $fs_base = 0x500009332940 (the KERNEL TCB, correctly
+   switched by the exception entry in arch/x64/entry.S), self-pointer at
+   fs:0 == 0x500009332940 (consistent). The faulting instruction is PURE
+   %rip-relative (`48 8d 05 …  lea …(%rip),%rax`), NO %fs: prefix — so TLS is
+   not on this path at all.
+
+5. Clobbered register vs corrupt frame — it is a CORRUPT CONTEXT, and the
+   corrupt values are SOURCED FROM .text:
+   Full exception_frame at the fault (mmu::vm_sigsegv, ef=0x4000bfe05088):
+     rip = 0x1000004b0005          (PIEoff 0x4b0005 — mid-instruction)
+     rsp = 0x00000000c6005027      (GARBAGE — a 32-bit-looking value)
+     cr2 = 0x1                     (write to address 1; = (%rcx), rcx=1)
+     rax = 0x1000009b10ae (&IsUnderPostmaster)  rbp = 0x10000099e3a8 (&MyProc)
+     r12 = 0x10000099e3a0   r13 = 0x40637d10   r15 = 0x10000041c2e0 (&CheckpointerMain)
+     error_code = 0
+   KEY: 0xc6005027 is EXACTLY the four .text bytes at PIE file offset 0x4b0001
+   (`27 50 00 c6`, little-endian) — verified by searching the postgres binary:
+   the u32 0xc6005027 first occurs at file offset 0x4b0001. So the stack pointer
+   was loaded with a WORD OF POSTGRES CODE, and the instruction pointer
+   (0x4b0005) points into the SAME .text region a few bytes away. The register
+   file is otherwise a COHERENT snapshot of InitAuxiliaryProcess (rax/rbp/r12/
+   r13/r15 are the live values that code holds), so the callee-saved/preserved
+   registers survived, but rip and rsp were reconstructed from .text.
+
+6. It is NOT sourced from the child's stack, and the stack is INTACT.
+   Scanned the child's PG stack 0x200000200000..0x200000202000 for the corrupt
+   values (0x4b0005, 0xc6005027, anything in 0x4b0000..0x4b0010): NONE present.
+   The stack itself is coherent — it holds valid return addresses
+   (0x4a8e6d InitAux+0x6d, 0x41c2e0 CheckpointerMain, 0x419fba, 0x60cf81,
+   0x607bb5, 0x783350, 0x41efda …) and legitimate local buffers. So a `ret`/`iret`
+   reading the PG stack did NOT produce the garbage; the corruption is at the
+   REGISTER/CONTEXT level, not on the app stack.
+
+7. It is delivery-of-signal-free and single-fork.
+   A breakpoint at arch/x64/signal.cc:56 (build_signal_frame, real app-signal
+   delivery) NEVER fires before the crash. So no sigreturn/signal-frame path is
+   involved; the crash is the FIRST anomalous event.
+
+8. It is a PREEMPTION RACE — the decisive control experiment.
+   Setting a breakpoint at InitAux (0x4a8e9f / 0x4a9000) and SINGLE-STEPPING
+   (stepi) forward 3 000 and then 20 000 instructions: the child progresses
+   normally through 0x4a8e00…0x4ae7f4 with a STABLE valid rsp (0x200000200cb0),
+   even taking and correctly servicing ordinary COW demand faults
+   (page_fault -> vm_fault -> fpu restore -> return) along the way. It NEVER
+   crashes when stepped. Only in FREE RUN (real timer preemption + scheduler
+   switches interleaved with the parent postmaster and kernel threads on the
+   single CPU) does the child deterministically end up with the .text-sourced
+   rip/rsp. Serialized execution avoids the window; concurrent preemption hits it.
+
+   The exception frame lives on the child's per-thread IST exception stack
+   (arch/x64/exceptions.cc gives #PF IST=1 -> _arch.exception_stack, and all
+   hardware interrupts IST=2 -> _arch.interrupt_stack; TSS ist[2] at the fault =
+   0x4000bfe01130 = end of the child's 4 KiB interrupt_stack, coherent). The one
+   interrupt frame I captured on IST2 was itself VALID (rip=0x4af000 in
+   smgrexists, rsp=0x200000200cb0), i.e. a good preemption of the child; the
+   corruption is a SUBSEQUENT event on the preemptive path, not that frame.
+
+
+ROOT-CAUSE CLASSIFICATION
+-------------------------
+A forked child that resumes on the parent's EXACT stack virtual addresses
+("same-VA" fork stack, arch/x64/fork.cc + the deferred-CR3 context switch in
+arch/x64/arch-switch.hh) suffers a register/context-integrity corruption on the
+PREEMPTIVE context-switch / interrupt-return path: the app rip and rsp are
+reconstructed from PostgreSQL .text memory, giving a wild jump into the middle
+of an instruction with a garbage stack pointer. It is timing-dependent (only
+under real preemption; never single-stepped), the app stack and the child's
+page tables (code RO+correct, data RW+present) are intact, and %fs/TLS is
+correct. This is an OSv same-VA-fork / scheduler-integrity bug, one layer below
+the (validated) COW-arena and fork-mechanism work.
+
+Why the tst-* suite does not catch it: tst-fork / tst-pgfork / -cow / -deep /
+-execve all fork a child that does a BOUNDED amount of work and exits quickly;
+they do not run a long-lived child (like the checkpointer) that is repeatedly
+PREEMPTED while executing on a same-VA stack under concurrent load from the
+parent + kernel threads. The gap is precisely "a forked child that survives
+many preemptive context switches while running on the parent's stack VAs." A
+new regression test should fork a child that spins in a compute/allocate loop
+(touching .data/.bss globals and its stack) for long enough to be preempted
+hundreds of times while the parent stays runnable — today that scenario is
+untested, which is why this survived the green suite.
+
+
+RECOMMENDED FIX DIRECTION (scoped; not yet implemented)
+-------------------------------------------------------
+The corruption is on the preemptive switch/IRQ-return path for a same-VA fork
+child. In decreasing order of likelihood, instrument/audit:
+
+(a) The interrupt-entry FS-base swap + IST interaction for a fork child
+    (arch/x64/entry.S lines 36-104). The entry reads `%gs:16` (per-CPU kernel
+    TCB) and `%fs:0`, switches %fs to the kernel TCB, and on exit restores the
+    app TCB via `16(%r12)` where r12 is CALLEE-SAVED across the handler. If the
+    handler `switch_to`'s to another thread and back, r12 is spilled to / reloaded
+    from the child's IST2 frame; verify that reload survives the AS/CR3 change
+    and that the exit-path fsbase write targets the CORRECT thread's app TCB.
+    A wrong app-TCB restore would not by itself explain a .text-sourced rsp, so
+    this is a secondary suspect.
+
+(b) The deferred-CR3 same-VA switch asm (arch/x64/arch-switch.hh, the
+    `if (switch_as)` block) and the FPU-control reload that FOLLOWS it
+    (`emms; fldcw(fpucw); ldmxcsr(mxcsr)`). Confirm the compiler cannot place
+    `fpucw`/`mxcsr` (or any other live SSA temp) in a caller-saved register that
+    the asm clobbers, forcing a reload from a stack slot addressed relative to
+    the NEWLY-swapped rsp/rbp; a reload through the wrong frame is the kind of
+    bug that only manifests when the incoming thread is a fork child on a
+    same-VA stack. Recommended experiment: temporarily force `switch_as` threads
+    through a NON-deferred variant that switches CR3 on a dedicated kernel
+    scratch stack (never a same-VA app stack), and see if the crash disappears.
+
+(c) The window in which the fork child is RUNNABLE at the same stack VA as the
+    still-runnable parent postmaster on a SINGLE cpu. Pin both to confirm/deny a
+    cross-thread same-VA stack aliasing hazard during the switch. Experiment:
+    boot -smp 1 vs a build that never lets two same-VA-stack threads be
+    concurrently runnable (serialize checkpointer start after postmaster parks);
+    if that removes the crash, the aliasing window is the culprit.
+
+The definitive next gdb step (blocked here only by stub friction, not by
+analysis): a HARDWARE watchpoint on the child's IST2 interrupt-frame rip/rsp
+slots, armed at the moment the child is preempted while on its PG stack, to
+catch the exact store that writes the .text-derived rsp. The stub in this
+environment rejects $cr2/$pc in mid-run breakpoint conditions and page_fault
+breakpoints break the ELF load, so arming that watchpoint reliably needs either
+a KVM+hbreak setup or a tiny in-kernel assert (print rip/rsp on IST2 restore
+when rip is in slot 32 with rsp<4 GiB) — a 5-line diagnostic, gated CONF_fork,
+is the fastest path to the exact line.
+
+
+VALIDATION (this HEAD, all green)
+---------------------------------
+Build: CONF_fork=y ./scripts/build -j conf_fork=1 fs=rofs image=tests  (OK)
+  tst-fork      10/10 PASS  — run 5x, "0 failures" every run (PASS count=10 each)
+  tst-pgfork     9/9  PASS  ("done: 0 failures")
+  tst-fork-cow   PASS       ("done: 0 failures")
+  tst-fork-deep  PASS       ("done: 0 failures")
+  tst-execve     PASS       ("done: 0 failures")
+conf_fork=0 sanity:
+  ./scripts/build -j conf_fork=0 fs=rofs image=tests  -> rc=0 (clean; the fork
+  code is entirely #if CONF_fork, so the non-fork kernel is unaffected).
+PG image rebuilt:
+  ./scripts/build -j conf_fork=1 fs=ramfs image=pg18-fork -> rc=0
+  cmdline: --rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data
+
+
+POSTGRES STATUS (no overclaiming)
+---------------------------------
+PG boots to:
+  LOG: starting PostgreSQL 18.4 on x86_64-pc-linux-musl …
+  LOG: listening on IPv4 address "0.0.0.0", port 5432
+  … forks the checkpointer, which reaches InitAuxiliaryProcess ("InitAux shmem
+  read OK") and then the checkpointer child hits the context-integrity crash
+  above -> Aborted -> unikernel down.
+PG does NOT reach "database system is ready to accept connections".
+NO psql query was served. NO real rows were produced on OSv. SINGLE and
+CONCURRENT psql: NOT SERVED (no listener ever becomes ready). I do NOT claim
+PG works. (Control: the same musl binary serves real rows on the Linux host —
+see /tmp/pg-boot-result.txt.)
+
+
+REPRO
+-----
+Build PG image (in arena-dev):
+  cd /b/.local/worktrees/fork-arena && export CONF_fork=y
+  ./scripts/build -j$(nproc) conf_fork=1 fs=ramfs image=pg18-fork
+Boot (crash is deterministic ~within 5-10 s of "listening"):
+  qemu-system-x86_64 -m 4G -smp 1 -cpu qemu64 -nographic \
+    -kernel build/last/loader.elf \
+    -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+    -drive file=build/last/usr.img,if=virtio,cache=none \
+    -netdev user,id=un0,hostfwd=tcp::5432-:5432 -device virtio-net-pci,netdev=un0
+gdb (TCG + -s -S), the reliable catch:
+  break core/mmu.cc:1974   # mmu::vm_sigsegv(addr, ef)
+  # stop when (ef->rip>>39)==32; read *ef, walk child CR3 by hand.
+Helper scripts left in the worktree (untracked, .local-*.gdb / .local-run-pg-gdb.sh).
+
+METHOD NOTES (for the next investigator)
+----------------------------------------
+- Reliable stop: break core/mmu.cc:1974 (vm_sigsegv). It is the SIGSEGV
+  chokepoint, hit rarely, and the stub reads *ef cleanly there.
+- Do NOT break in arch/x64/mmu.cc:page_fault: it trips on the thousands of
+  ELF-load / boot / COW demand faults; under this TCG stub that either makes PG
+  "Failed to load object … Powering off" or is impossibly slow.
+- The stub REJECTS $cr2 and $pc inside a mid-run breakpoint CONDITION
+  ("Cannot execute this command while the target is running"). Use only ef->*
+  MEMORY fields in conditions, and read $cr2/$cr3 only after a clean stop.
+- Walk the CHILD page tables from the LIVE $cr3 (the child's PML4), NOT the
+  `osv pagetable walk` macro (that uses mmu::page_table_root = AS0/kernel root).
+- Restart arena-dev to reap zombie qemus; a stale gdb-stub qemu holds :1234 and
+  the usr.img drive lock and silently kills the next boot.
+- WATCH OUT: `./scripts/build … fs=rofs image=tests` OVERWRITES
+  build/release.x64/usr.img (and build/last) with the TESTS image. After running
+  the test suite you MUST rebuild the PG image before booting PG again, or you
+  get "Failed to load object: …/postgres. Powering off." (that exact symptom
+  bit this session once and was recovered by rebuilding image=pg18-fork).

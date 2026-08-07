@@ -1,0 +1,79 @@
+diff --git a/core/mempool.cc b/core/mempool.cc
+index 6066db8d..323dd187 100644
+--- a/core/mempool.cc
++++ b/core/mempool.cc
+@@ -1997,7 +1997,11 @@ static inline void* std_malloc(size_t size, size_t alignment)
+     // time, while free()/realloc() decide purely by address, so a buffer
+     // allocated by an app thread and freed by a kernel thread (or vice versa)
+     // is always handled by the allocator that owns its address range.
+-    if (smp_allocator && fork_arena::ready() && !fork_arena::force_kernel_heap &&
++#ifndef WALL3_NOARENA
++#define WALL3_NOARENA 0
++#endif
++    if (!WALL3_NOARENA &&
++        smp_allocator && fork_arena::ready() && !fork_arena::force_kernel_heap &&
+         sched::cpu::current()->app_thread.load(std::memory_order_relaxed)) {
+         ret = fork_arena::alloc(size, alignment);
+         if (ret) {
+diff --git a/core/mmu.cc b/core/mmu.cc
+index 1503f861..f90e0ad6 100644
+--- a/core/mmu.cc
++++ b/core/mmu.cc
+@@ -39,6 +39,7 @@
+ #include <osv/kernel_config_fork.h>
+ #if CONF_fork
+ #include <osv/fork_arena.hh>
++#include <osv/execinfo.hh>
+ #endif
+ 
+ // FIXME: Without this pragma, we get a lot of warnings that I don't know
+@@ -823,8 +824,40 @@ void* phys_to_virt(phys pa)
+ 
+ phys virt_to_phys_pt(void* virt);
+ 
++#ifndef WALL3_ARENA_DMA
++#define WALL3_ARENA_DMA 0
++#endif
++#if WALL3_ARENA_DMA && CONF_fork
++// WALL-3: a virt_to_phys() (i.e. a DMA / physical-address) request for a
++// fork-arena VA is the corruptor.  The arena is COW-private per address space,
++// so translating an arena VA in a kernel/AS0 thread walks THAT thread's page
++// table and resolves to the WRONG physical page -> a wild read/write.  Dump the
++// VA + a backtrace naming the caller.  Layout-neutral (no allocation resize).
++static void wall3_arena_dma_report(void *virt)
++{
++    void *bt[24];
++    int nb = ::backtrace_safe(bt, 24);
++    debug_ll("\n*** WALL3_ARENA_DMA virt_to_phys on arena VA %p ***\n", virt);
++    debug_ll("    cur_as=%p tid=%d app=%d\n",
++             current_address_space(), (int)sched::thread::current()->id(),
++             (int)sched::cpu::current()->app_thread.load(std::memory_order_relaxed));
++    debug_ll("    backtrace (%d):\n", nb);
++    for (int i = 0; i < nb; i++)
++        debug_ll("      #%d %p\n", i, bt[i]);
++    while (true) processor::cli_hlt();
++}
++#endif
++
+ phys virt_to_phys(void *virt)
+ {
++#if WALL3_ARENA_DMA && CONF_fork
++    // Only a NON-app (kernel/AS0) thread translating an arena VA is the bug.
++    // App threads translating their own arena buffers (e.g. a synchronous
++    // pread) are legitimate and NOT flagged.
++    if (fork_arena::contains(virt) && fork_arena::ready() &&
++        !sched::cpu::current()->app_thread.load(std::memory_order_relaxed))
++        wall3_arena_dma_report(virt);
++#endif
+     if ((virt >= elf_start) && (virt < elf_start + elf_size)) {
+ #ifdef __x86_64__
+         return reinterpret_cast<phys>((void*)(virt - OSV_KERNEL_VM_SHIFT));
+@@ -2303,7 +2336,7 @@ bool access_fault(vma& vma, unsigned int error_code)
+ TRACEPOINT(trace_mmu_vm_fault, "addr=%p, error_code=%x", uintptr_t, unsigned int);
+ TRACEPOINT(trace_mmu_vm_fault_sigsegv, "addr=%p, error_code=%x, %s", uintptr_t, unsigned int, const char*);
+ #ifndef WALL3_FAULT_TRACE
+-#define WALL3_FAULT_TRACE 0
++#define WALL3_FAULT_TRACE 1
+ #endif
+ TRACEPOINT(trace_mmu_vm_fault_ret, "addr=%p, error_code=%x", uintptr_t, unsigned int);
+ #if CONF_lazy_stack

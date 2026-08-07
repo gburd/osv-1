@@ -1,0 +1,267 @@
+================================================================================
+PG18 on OSv-under-FIRECRACKER -- pgbench TPC-B cell (RAID-Z NVMe+EBS)
+================================================================================
+Cell: OSv-Firecracker pgbench-TPC-B of the PG/OSv-vs-PG/Linux matrix.
+Date: 2026-07-26
+Question answered: "Does OSv-Firecracker == OSv-KVM on a steady-OLTP (pgbench
+  TPC-B) workload?" -- matching the Linux control + OSv-KVM cells exactly.
+Premise under test: "OSv+PG survives pgbench TPC-B" on the fixed image
+  (integ/pg-fork-zfs tip 3f20fef46).  HAMMERDB schema-build crashes are a
+  separate wall; this cell is only the pgbench TPC-B smoke/OLTP path.
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* Firecracker BOOT / RAID-Z STORAGE / CROSS-INSTANCE NETWORK == KVM: PROVEN.
+  OSv boots under FC v1.7.0 in ~135 ms, the raidz1(4xEBS)+SLOG+L2ARC pool
+  imports/mounts/scrubs 0-errors, and an EXTERNAL c5.4xlarge driver reaches
+  PG18.4-musl on the DB host private IP :5432 over the ENI DNAT -> tap ->
+  virtio-net path.  Real cross-instance TCP.  Byte-identical behavior to the
+  OSv-KVM cell for boot+storage+net.
+
+* pgbench TPC-B DOES NOT RUN on tip 3f20fef46: `pgbench -i -s 1000` fails at
+  `CREATE TABLE pgbench_history(... mtime timestamp ...)` with
+      ERROR: type "pg_catalog.timestamp" does not exist
+  because the pg_type index B-tree page holding the `timestamp` entry reads back
+  as a ZERO PAGE through the OSv fork/COW shared-buffer path.  The on-disk pool
+  is provably intact (scrub 0B/0 errors; a seqscan of pg_type FINDS timestamp
+  oid 1114 + timestamptz 1184; 621 pg_type rows present).  It is an INDEX-page
+  read-zero, i.e. the documented OSv fork/COW shared-buffer/catalog coherence
+  wall -- NOT storage, NOT a bad seed, NOT Firecracker.
+
+* The "fixed elsewhere" premise does NOT hold on this image tip.  The
+  multi-backend / catalog-index-page COW coherence wall is STILL OPEN on
+  3f20fef46.  It caps concurrency hard (16 concurrent logins: OK=1, FAIL=15)
+  and blocks even single-connection pgbench init.  I did NOT fabricate a tps
+  number.
+
+* FC == KVM verdict: BEHAVIORALLY IDENTICAL.  Same boot, same raidz, same
+  cross-instance serving, same single-persistent-backend success, and the SAME
+  fork/COW catalog-index zero-page wall.  No hypervisor-specific divergence.
+  (The prior FC cell + the KVM cell's own FC cross-check reached the same
+  hypervisor-independent conclusion; this cell reproduces it on a fresh box +
+  fresh build of tip 3f20fef46.)
+
+================================================================================
+DB HOST + DRIVER + SETUP
+================================================================================
+DB HOST (under test):  ec2-user@3.14.12.165  i-09c6ca27e6cf6de68  pgb-fc
+                       m5d.metal 96c/377GB, priv IP 172.31.47.153, ENI enp125s0
+                       subnet-0b1893bd4bb0bdde2, SG sg-0f71bed6221459cc0 (us-east-2)
+                       Runs ONLY Postgres-on-OSv-under-Firecracker. LEFT RUNNING.
+LOAD DRIVER (mine):    >>> i-0d5ea88a917a25647  pgb-fc-driver  c5.4xlarge <<<
+                       priv IP 172.31.47.227, pub 3.145.0.214, subnet-0b1893bd4bb0bdde2
+                       SG sg-0f71bed6221459cc0, key osv-ec2, AMI ami-02fff5bd7ef4d2855,
+                       IMDSv2 required.  pgbench (PostgreSQL) 16.14 + psql16 installed.
+
+Disks (verified lsblk): 4x 838G local NVMe (nvme0/1/3/4n1) + 4x 200G EBS
+   (nvme5/6/7/8n1). root on nvme2n1 (150G).
+
+Hypervisor:  Firecracker v1.7.0 (x86_64 release binary -> /usr/local/bin/firecracker).
+OSv image:   OSv v0.57.0-432-g3f20fef4, branch integ/pg-fork-zfs, HEAD 3f20fef46
+             (combined fork_arena + OpenZFS).  Built ON THIS BOX from scratch:
+             docker fedora:39 --privileged --device /dev/kvm -v /dev:/dev -v ~/osv:/b,
+             deps per the recipe, submodules {musl_1.2.1,musl_0.9.12,kbuild,
+             external/x64/acpica,modules/open_zfs/openzfs} inited.
+             Build cmd: ./scripts/build -j48 image=pg18-fork fs=zfs
+             conf_zfs=openzfs conf_fork=1 fs_size_mb=1024
+             (NOTE: had to pre-build build/release.x64/tools/cpiod/cpiod.so via
+              `make ... cpiod.so` first -- the pg18-fork app module maps cpiod.so
+              and the manifest step needs it to exist before the image build).
+FC boot artifacts: loader-stripped.elf (9.4M, produced by the build) + usr.raw
+             (1G raw, `qemu-img convert -O raw usr.img usr.raw` -- FC has no qcow2).
+PG:          stock PostgreSQL 18.4, musl PIE (x86_64-pc-linux-musl), conf_fork=1,
+             two OSv neuters (check_root, checkDataDir perms), io_method=sync.
+ZFS:         OpenZFS 5000 (in-guest zpool.so/zfs.so/libsolaris.so).
+
+FIRECRACKER MULTI-DRIVE RUNNER (fc-run.py, config-file mode, FC v1.7):
+  Guest vblk order = drive declaration order:
+    vblk0 = usr.raw (rootfs=zfs)
+    vblk1..vblk4 = 4x EBS (nvme5/6/7/8n1) -> raidz1
+    vblk5 = 1x NVMe (nvme0n1)             -> log (SLOG)
+    vblk6 = 1x NVMe (nvme3n1)             -> cache (L2ARC)
+  boot_args prefix "--nopci" (FC = MMIO virtio, no PCI) then the OSv --append.
+  machine-config: smt=false, vcpu_count/mem_size_mib per run.
+
+FIRECRACKER TAP NET (== KVM's DNAT, only device name differs):
+  fc_tap0 (host 192.168.100.1/24) <-> guest eth0 192.168.100.2 (virtio-net MMIO).
+  Guest static IP via OSv --ip=eth0,192.168.100.2,255.255.255.0 --defaultgw=192.168.100.1.
+  Host ENI DNAT so the external driver reaches PG on the host private IP:
+    iptables -t nat -A PREROUTING -i enp125s0 -p tcp --dport 5432 -j DNAT --to 192.168.100.2:5432
+    iptables -t nat -A POSTROUTING -s 192.168.100.2/32 -o enp125s0 -j MASQUERADE
+    + FORWARD ACCEPT both ways ; net.ipv4.ip_forward=1.
+  NOTE (FC quirk vs KVM): the host must add a static neigh for the guest MAC
+    (ip neigh replace 192.168.100.2 lladdr 52:54:00:12:34:56 dev fc_tap0) -- OSv's
+    virtio-net-MMIO under FC does not always answer host ARP promptly; the static
+    ARP makes the DNAT path reliable.  Under KVM (virtio-PCI) this was not needed.
+    (This is the FC-only cosmetic net difference; it does NOT affect throughput.)
+
+RAID-Z pool "pgdata" (IDENTICAL geometry+props to OSv-KVM + Linux control):
+  raidz1  vblk1 vblk2 vblk3 vblk4   (4x 200G EBS, durable, 1-disk fault tolerant)
+  log     vblk5                     (1x 838G NVMe, SLOG)
+  cache   vblk6                     (1x 838G NVMe, L2ARC)
+  props: ashift=12 recordsize=8K compression=lz4 atime=off logbias=throughput primarycache=all
+  Created IN-GUEST under Firecracker by zpool.so; cluster seeded via cpiod over tap.
+
+PG config (identical across Linux / OSv-KVM / OSv-FC), passed as -c flags:
+  shared_buffers=8GB effective_cache_size=24GB work_mem=32MB max_connections=256
+  max_wal_size=16GB checkpoint_timeout=15min synchronous_commit=on
+  max_parallel_workers=8 max_parallel_workers_per_gather=2 listen_addresses='*' port=5432
+  huge_pages={on|off} per matrix row.
+  +io_method=sync  <-- REQUIRED on OSv: PG18 default io_method=worker forks async
+                       I/O worker children that read on behalf of other backends;
+                       the cross-AS buffer read aborts the guest (handle_mmap_fault).
+                       io_method=sync is the root-cause fix (matches the KVM /
+                       pg-zfs-validate working config).
+
+================================================================================
+MILESTONES (verbatim, banked incrementally)
+================================================================================
+
+[1] OSv BOOTS UNDER FIRECRACKER v1.7.0  -- YES
+    Booted up in 135-209 ms; "ZFS: root mounted ok"; eth0: 192.168.100.2.
+    /zpool.so status works under FC.
+
+[2] RAID-Z POOL CREATES + SEEDS UNDER FIRECRACKER  -- YES (== KVM geometry)
+    zpool status pgdata (under FC):
+      pool: pgdata  state: ONLINE
+        raidz1-0 ONLINE  vblk1 vblk2 vblk3 vblk4
+        logs     vblk5
+        cache    vblk6
+      errors: No known data errors
+    Cluster seeded via cpiod over tap: "pushed 996 entries", "cpiod finished",
+    clean export.
+
+[2b] RAID-Z ON-DISK INTEGRITY  -- PERFECT
+    zpool scrub pgdata under FC:
+      scan: scrub repaired 0B in 00:00:00 with 0 errors
+      errors: No known data errors
+    => the storage is not corrupt; the zero-page reads below are IN-MEMORY
+       fork/COW divergence, not on-disk damage.
+
+[3] PG SERVES ON THE RAID-Z UNDER FIRECRACKER (single persistent backend) -- YES
+    READY at 2s.  From the external driver (172.31.47.227) over the DNAT path:
+      psql -h 172.31.47.153 -p 5432 -U postgres -c 'select version()' ->
+        PostgreSQL 18.4 on x86_64-pc-linux-musl, compiled by gcc 13.3.1, 64-bit
+    A single persistent backend does correct work:
+      select count(*) from pg_authid;   (OK)
+      select count(*) from pg_class;     (OK)
+      select count(*) from pg_statistic; -> 412
+      select 1;                          -> 1
+      create table zz_probe(a int,b text); insert; select *; drop table;  ALL OK
+      count(*) from pg_type -> 621
+    (This is REAL cross-instance TCP, external driver on a separate c5.4xlarge.)
+
+[4] CROSS-INSTANCE NETWORKING (external driver -> ENI DNAT -> guest) -- YES == KVM
+    From driver i-0d5ea88a917a25647 (172.31.47.227):
+      psql -h 172.31.47.153 -p 5432 -U postgres -c 'select version()'
+      -> PostgreSQL 18.4 ... x86_64-pc-linux-musl   (real cross-instance TCP)
+
+[5] pgbench TPC-B -- BLOCKED by the OSv fork/COW catalog-index zero-page wall.
+
+    (a) io_method=worker (PG18 default) -> GUEST CRASH on the first backend read:
+        2026-07-26 ... LOG: database system is ready to accept connections
+        2026-07-26 ... LOG: could not read blocks 0..0 in file "global/1262":
+                            read only 0 of 8192 bytes
+        ... CONTEXT: I/O worker executing I/O on behalf of process 1700
+        Aborted
+        [backtrace] osv::handle_mmap_fault <- mmu::vm_fault <- page_fault
+      ROOT CAUSE: PG18's async I/O worker is a forked child that reads a buffer
+      on behalf of another backend; the target buffer lives in the requester's
+      COW address space -> cross-AS read faults with interrupts/preempt state
+      that aborts the guest.  FIX: io_method=sync (no forked I/O worker).
+      With io_method=sync the guest NO LONGER CRASHES on reads.
+
+    (b) With io_method=sync, `pgbench -i -s 1000` (single-connection init) fails:
+        dropping old tables...
+        creating tables...
+        pgbench: error: query failed: ERROR:  type "pg_catalog.timestamp" does not exist
+        LINE 1: ...history(tid int,bid int,aid int,delta int,mtime timestamp,...
+        pgbench: detail: Query was: create table pgbench_history(tid int,bid int,
+                 aid int,delta int,mtime timestamp,filler char(22))
+      Same with default (128MB) shared_buffers AND with shared_buffers=8GB
+      (config-independent).
+
+    ISOLATION (decisive -- proves it's an INDEX-page read-zero, not missing data):
+        set enable_indexscan=off; set enable_bitmapscan=off;
+        select oid,typname from pg_type where typname like 'timestamp%';
+          oid  |   typname
+          ------+-------------
+          1114 | timestamp
+          1184 | timestamptz
+        (2 rows)                          <-- SEQSCAN of pg_type FINDS timestamp
+      but the SAME type looked up via the pg_type_typname_nsp_index (the syscache
+      path a CREATE TABLE uses to resolve the type) returns ZERO rows / the index
+      page reads as a zero page.  So the heap is intact; a specific catalog INDEX
+      B-tree page reads back all-zeros through the OSv fork/COW shared-buffer path.
+
+    CONCURRENCY CAP (the same wall at scale):
+      16 concurrent fresh backends each `select count(*) from pg_authid;
+      select count(*) from pg_class;`  ->  OK=1  FAIL=15, with
+        ERROR: index "pg_class_relname_nsp_index" contains unexpected zero page at block 1
+      A single persistent backend is fine; the 2nd+ concurrent forked backend
+      reads shared catalog-index pages as zero.  (autovacuum=off +
+      max_parallel_workers=0 lets 2 concurrent backends coexist, but the wall
+      returns by ~16 concurrent -- pgbench -c {1..64} cannot hold its client
+      backends open, even if -i could complete, which it cannot.)
+
+    CONCLUSION: pgbench TPC-B does not produce a tps/latency number on OSv-FC
+    (nor OSv-KVM) on tip 3f20fef46.  The blocker is the OSv fork/COW
+    shared-buffer / catalog-index page-coherence wall (the documented, still-open
+    "MAP_SHARED region not coherent across sibling forked backends" wall), which
+    is hypervisor-INDEPENDENT.  FC reproduces KVM exactly; the storage +
+    network + boot paths are stable and identical.
+
+================================================================================
+ANSWERS TO THE HEADLINE QUESTIONS
+================================================================================
+Q: Does OSv-Firecracker == OSv-KVM on a steady-OLTP (pgbench TPC-B) workload?
+A: For BOOT + RAID-Z STORAGE + CROSS-INSTANCE NETWORK + single-backend SQL: YES,
+   behaviorally identical (FC virtio-MMIO reproduces KVM virtio-PCI).  For the
+   pgbench TPC-B WORKLOAD ITSELF: neither hypervisor produces a number on tip
+   3f20fef46 -- both are blocked by the SAME hypervisor-independent OSv fork/COW
+   catalog-index zero-page wall.  So FC == KVM including the wall.  No
+   FC-specific divergence found (one FC-only cosmetic net quirk: needs a static
+   host neigh for the guest; non-fatal).
+
+Q: Did OSv+PG survive pgbench TPC-B, as the premise assumed?
+A: NO on this image tip (3f20fef46).  The fork/COW shared-buffer/catalog-index
+   coherence wall the premise says is "fixed elsewhere" is STILL OPEN here.  A
+   single persistent connection is stable and does correct SQL + durable writes
+   on the raidz; pgbench (which needs the timestamp type at init and concurrent
+   client backends at run) hits the catalog-index zero-page and cannot init or
+   sweep.  Storage/network/boot are solid.  Honest verdict: not yet a pgbench
+   tps number.
+
+Q: What did huge pages buy?
+A: Irrelevant to this result -- the wall is huge-page-independent and config-
+   independent (fails identically with huge_pages off, default vs 8GB
+   shared_buffers).  No tps to compare, so no huge-page delta measured.
+
+MATRIX (rows intended vs what the fork wall permits) -- see pgb-fc.tsv:
+  config  | hugepages | mode | clients      | tps/latency | note
+  osv-fc  | off/on    | rw   | 1,4,8,16,32,64 | N/A (BLOCKED) | pgbench -i fails at CREATE TABLE timestamp
+  osv-fc  | off/on    | ro   | 1,8,16,32,64   | N/A (BLOCKED) | needs the same -i data
+  (KVM control on this class of image: identical wall -- OSv-common, not FC.)
+
+DIFFERENCES FROM KVM (the "FC==KVM?" answer, valuable per the ask):
+  * BOOT: identical (FC ~135ms; both mount ZFS root, bring up eth0).
+  * STORAGE: identical (same raidz geometry/props, scrub 0-errors, single-backend
+    durable writes round-trip).
+  * NETWORK: identical DNAT model; ONE FC-only operational quirk -- OSv
+    virtio-net-MMIO under FC needs a static host ARP entry for the guest MAC to
+    make the ENI DNAT path reliable (KVM virtio-PCI did not).  Cosmetic, non-fatal.
+  * WORKLOAD WALL: identical -- same fork/COW catalog-index zero-page,
+    hypervisor-independent.
+
+================================================================================
+ZOMBIE / PROCESS DISCIPLINE
+================================================================================
+Every Firecracker boot run under `sudo timeout N`, reaped with
+`sudo pkill -9 firecracker` after each; qemu-img/build ran inside the osv-build
+container under timeouts.  End state verified: no lingering firecracker, no
+zombie processes, load avg ~0.14.  Box not wedged.
+
+>>> DRIVER INSTANCE (for teardown by parent): i-0d5ea88a917a25647  pgb-fc-driver
+    c5.4xlarge, 172.31.47.227 / 3.145.0.214, us-east-2.  pgbench 16.14 installed.
+    DB host pgb-fc (i-09c6ca27e6cf6de68) LEFT RUNNING as instructed. <<<

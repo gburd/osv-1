@@ -1,0 +1,185 @@
+================================================================================
+PG18-on-OSv-under-KVM  vs  PG18-on-Linux  TPROC-C benchmark  (OSv-KVM cell)
+================================================================================
+Date: 2026-07-26  Agent: OSv-KVM cell.  Parent manages the Linux control + osv-bench.
+
+DB HOST (under test): osv-bench-kvm  i-0f3bc0a7b8a0a5d25  m5d.metal (96c/377GB)
+   private IP 172.31.6.3  subnet-08627f3be3da35553 (us-east-2a)  ENI enp125s0
+   Disks: 4x 838GB local NVMe (nvme0/1/3/4n1) + 4x 200GB EBS (nvme5/6/7/8n1)
+   Runs ONLY Postgres-on-OSv-under-KVM.  (Parent: do NOT terminate this box.)
+
+HAMMERDB DRIVER (external, dedicated -- TERMINATE THIS when done):
+   >>> DRIVER INSTANCE-ID: i-096abcbaeb390dcc5   (c5.4xlarge, 172.31.3.152) <<<
+   Name=osv-bench-kvm-driver  subnet-08627f3be3da35553  SG sg-0e2719d4599449a12
+
+Storage layout (matches Linux control): OpenZFS 2.4.2 raidz1 over the 4 EBS
+   virtio-blk + SLOG on 1 NVMe + L2ARC on 1 NVMe.  Pool "pgdata", props:
+   ashift=12 recordsize=8k compression=lz4 atime=off logbias=throughput
+   primarycache=all.  PG /data = dataset on it.
+
+PG config (identical to plan/Linux): shared_buffers=8GB effective_cache_size=24GB
+   work_mem=32MB max_connections=256 max_wal_size=16GB checkpoint_timeout=15min
+   synchronous_commit=on max_parallel_workers=8.
+
+Honesty note: OSv-PG = musl PIE (WAIT_USE_SELF_PIPE, neutered root/perms checks,
+   unix_socket_directories=''); Linux control = stock glibc.  Same SQL + config,
+   different libc.  All HammerDB output pasted raw below.
+
+================================================================================
+PROGRESS LOG (incremental)
+================================================================================
+[start] Driver launched i-096abcbaeb390dcc5 (c5.4xlarge). DB host bootstrap next.
+
+[boot] raidz1 pool built IN-GUEST (vblk1-4=EBS raidz1, vblk5=SLOG NVMe,
+       vblk6=L2ARC NVMe), props ashift=12/recordsize=8k/lz4/atime=off/
+       logbias=throughput/primarycache=all. Cluster seeded with matrix PG config.
+[boot] PG reaches "ready" over tap NIC (guest 192.168.100.2) in 4s, smp32/32G.
+       virtio-blk num-queues=1 (else MSI-X vector exhaustion crash at smp32).
+[net]  Cross-instance VERIFIED: driver 172.31.3.152 -> DB host 172.31.6.3:5432
+       via ENI enp125s0 DNAT -> tap0 -> guest. psql from driver returns:
+       "PostgreSQL 18.4 on x86_64-pc-linux-musl" (real musl PIE, cross-instance).
+[drv]  Driver c5.4xlarge i-096abcbaeb390dcc5 (16 vCPU AL2023), psql16 installed.
+
+[schema] TPROC-C 500-warehouse build BLOCKERS resolved (all driver/config-side,
+   NOT OSv PG bugs):
+   1. CREATE DATABASE C.UTF-8 collation unusable on musl-OSv (ENOENT locale) ->
+      pre-create tpcc with PG18 builtin locale provider: locale_provider builtin
+      builtin_locale 'C' -> datlocprovider=b, connectable+writable on musl.
+   2. Driver missing libpq.so.5 -> dnf install -y libpq.
+   3. HammerDB v5.0 do_tpcc "wrong # args": empty pg_superuserpass/pg_pass
+      collapse the 16-arg do_tpcc call -> set both to "postgres" (trust auth
+      ignores value). Build then runs: 32 loaders + monitor, warehouses loading.
+   OSv STABILITY FINDING (real): DROP DATABASE wedges on OSv+ZFS -- the bulk
+   directory unlink stalls indefinitely, backend unkillable (pg_terminate ESRCH,
+   stuck in ZFS I/O). Worked around by rebuilding the pool fresh. Logged for the
+   report; does not affect the steady-state OLTP workload.
+
+================================================================================
+STABILITY FINDING (decisive) -- OSv-KVM under concurrent write load
+================================================================================
+The OSv guest CRASHES during the HammerDB TPROC-C 500-warehouse SCHEMA BUILD,
+at BOTH 32 and 8 concurrent loaders, within ~1-2 min. TWO crash signatures, same
+class (cross-AS free in a kernel worker thread, faulting in an atomic context):
+
+ (A) Assertion failed: ef->rflags & processor::rflags_if (arch/x64/mmu.cc:
+     page_fault:39)  RIP -> sbcompress (bsd/sys/kern/uipc_sockbuf.cc:840)
+     = page fault with interrupts disabled in the socket-buffer compaction path.
+
+ (B) Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault:38)
+     backtrace: memory::pool::free <- <ZFS callback> <- taskqueue_run_locked
+     (subr_taskqueue.c:327) <- taskqueue_thread_loop (subr_taskqueue.c:498)
+     = the BSD/ZFS taskqueue worker (AS0) frees memory a forked backend
+       allocated in its COW-private arena -> touches a diverged/unmapped page
+       while preemption is disabled -> illegal fault -> abort.
+
+ Consequence: NOT a clean stop -- it left on-disk system-catalog corruption:
+     ERROR: index "pg_database_oid_index" contains unexpected zero page at
+     block 0 (torn write from the crash). Pool rebuild required to recover.
+
+BUT: plain OLTP transaction load is STABLE. pgbench TPC-B from the external
+driver, cross-instance, survives cleanly with ZERO failed transactions and no
+crash at EVERY concurrency tried (fresh clean raidz, sync=standard, smp32/32G):
+     -c 1  -T30 : 10546 tx, 0 failed, 353 tps
+     -c 4  -T30 : 31067 tx, 0 failed, 1059 tps
+     -c 8  -T30 : 45880 tx, 0 failed, 1599 tps
+     -c 16 -T30 : 59513 tx, 0 failed, 2180 tps
+     -c 32 -T30 : 63479 tx, 0 failed, 2579 tps   (guest alive, 0 crashes)
+ (loopback-vs-network note: this is REAL cross-instance TCP over the tap NIC +
+  ENI DNAT, driver on a separate c5.4xlarge -- not hostfwd loopback.)
+
+INTERPRETATION: OSv-KVM stock PG18 is stable for concurrent OLTP small-txn load
+over the network on the durable raidz, but the HammerDB schema BUILD's bulk
+COPY + concurrent index-create pattern drives enough ZFS-taskqueue/socket-buffer
+kernel free traffic to hit the forked-backend cross-AS COW free fault. The wall
+is in the DATA-LOAD path, not the steady OLTP path. Next: try to get the schema
+built with a single loader (minimal concurrent taskqueue pressure) so the
+TPROC-C RUN (which is small-txn OLTP, like pgbench) can be measured.
+
+================================================================================
+STOP + CONFIRMATION (per parent 2026-07-26 18:1x): benchmark abandoned.
+================================================================================
+Parent's directive: the parallel Firecracker agent proved a HARD multi-backend
+catalog-read coherence bug (backend #2+ reads shared pg_authid/pg_statistic
+catalog pages as ZEROS -> "unexpected zero page" / "cache lookup failed"),
+hypervisor-independent, blocking any HammerDB run. Asked me to (1) confirm the
+same failure under KVM, (2) gdb the zero-page read, (3) report + stop.
+
+------------------------------------------------------------------------------
+(1) CONFIRMATION RESULT ON THIS KVM BOX: I did NOT reproduce the catalog-read
+    zero-page failure. Same image (loader.elf/usr.img scp'd from osv-bench,
+    combined branch), same raidz (raidz1 4xEBS + SLOG + L2ARC NVMe), PG18.4
+    musl, sync=standard, smp32/32G, booted to "ready". Tested cross-instance
+    from the driver (172.31.3.152 -> 172.31.6.3:5432 over the tap NIC):
+
+      * conn#1 select 1 x3 -> 1,1,1 (OK)
+      * pg_authid index read -> "postgres" (OK)
+      * pg_statistic read -> count 412 (OK)
+      * 5 sequential fresh backends reading pg_authid -> all "postgres" (OK)
+      * CONCURRENT: backend#1 holds a 20s session (already read catalogs) while
+        backend#2 reads pg_authid, backend#3 reads pg_statistic, backend#4 is a
+        NON-SUPERUSER 'bob' auth (forces pg_authid_rolname_index) -> ALL OK
+      * STORM: 20 simultaneous backends each reading pg_authid + pg_statistic
+        + pg_class concurrently -> OK=20 FAIL=0
+      * STORM to the tpcc db (the FC failure db): 32 simultaneous backends each
+        reading pg_authid + current_user + pg_class -> OK=32 FAIL=0
+      * server-side log: NO "zero page", NO "cache lookup", NO crash; guest
+        stayed alive through every test.
+
+    HONEST READ: on THIS KVM box, the multi-backend shared-catalog read path is
+    COHERENT (up to a 32-way concurrent connection storm, incl. non-superuser
+    auth via pg_authid_rolname_index). I cannot confirm KVM==FC for the
+    zero-page catalog bug -- I could not trigger it here. Possible reasons:
+    the FC failure needs a still-heavier/different concurrency or ordering than
+    a raw connection storm (e.g. HammerDB's specific vuser create+auth
+    interleave), or there is a build/state difference between the two boxes'
+    otherwise byte-identical images. NOT claiming the FC finding is wrong --
+    only that this KVM instance did not exhibit it under direct multi-backend
+    catalog-read stress.
+
+(2) gdb ZERO-PAGE DATA POINT: N/A -- there was no zero-page read to catch on
+    this box (no reproduction). Nothing to gdb. Reporting the non-repro
+    honestly rather than fabricating a VA/page-table dump.
+
+------------------------------------------------------------------------------
+THE WALL THIS KVM BOX ACTUALLY HITS (reproduced + root-caused, decisive):
+    A ZFS ARC write-completion reference-count underflow crash under BULK write
+    (the HammerDB TPROC-C schema build / bulk COPY), independent of loader count
+    (crashes at 32, 8, AND 1 loader). Deepest signature (single-loader run):
+
+      SPL PANIC at modules/open_zfs/openzfs/module/zfs/arc.c:7068:
+        arc_write_done(): VERIFY3S(remove_reference(hdr, hdr), >, 0) failed (0>0)
+      [backtrace] <app/ZFS frames> <- taskqueue_run_locked (subr_taskqueue.c:327)
+                  <- taskqueue_thread_loop (subr_taskqueue.c:498) <- thread_main_c
+
+    Same load also produced two sibling faults in the same taskqueue/socket
+    write-completion path (all on the AS0 kernel worker touching COW-diverged /
+    freed memory):
+      - Assertion failed: ef->rflags & processor::rflags_if (mmu.cc page_fault:39)
+        RIP -> sbcompress (bsd/sys/kern/uipc_sockbuf.cc:840)
+      - Assertion failed: sched::preemptable() (mmu.cc page_fault:38)
+        memory::pool::free <- ZFS cb <- taskqueue_run_locked <- taskqueue_thread_loop
+    Consequence: unclean crash left on-disk catalog corruption once
+    ("index pg_database_oid_index contains unexpected zero page at block 0").
+
+    => The ARC arc_write_done refcount race in the ZFS write-completion
+       taskqueue is THIS box's benchmark blocker. It is in the DATA-LOAD (bulk
+       write) path, NOT the multi-backend catalog-READ path.
+
+WHAT WORKS on this KVM box (stable, cross-instance, durable raidz, sync=standard):
+    pgbench TPC-B from the external driver, ZERO failed txns, no crash, at every
+    concurrency: -c1 353tps, -c4 1059tps, -c8 1599tps, -c16 2180tps, -c32 2579tps.
+    (Real cross-instance TCP over tap+ENI DNAT, not loopback.) So steady-state
+    small-txn OLTP over the network is stable; the bulk-load ARC path is not.
+
+VERDICT: OSv-KVM cannot produce a HammerDB TPROC-C NOPM/TPM number, because the
+    TPROC-C schema BUILD (bulk COPY) crashes the guest in the ZFS
+    arc_write_done write-completion path -- a DIFFERENT wall than the FC agent's
+    catalog-read zero-page bug (which did not reproduce here). Benchmark STOPPED
+    per directive.
+
+------------------------------------------------------------------------------
+DRIVER INSTANCE FOR TEARDOWN (parent to terminate):
+    >>> i-096abcbaeb390dcc5  (osv-bench-kvm-driver, c5.4xlarge, 172.31.3.152) <<<
+DB host osv-bench-kvm i-0f3bc0a7b8a0a5d25 left running w/ artifacts (parent-owned).
+Zombie discipline held throughout: qemu always under timeout, reaped after each
+boot, container restarted to clear zombies every few boots; no qemu accumulation.

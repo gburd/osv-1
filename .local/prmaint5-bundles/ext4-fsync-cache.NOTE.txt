@@ -1,0 +1,15 @@
+PR #1431 - libext: real fsync + page-cache bridge for ext2/3/4 (+ leak fix)
+branch: pr/ext4-fsync-cache
+bundle head: 894d58793e25e5182625d75da68c4843f2a6cffe
+base (in master): 95f478cb708aa32928119cc27f57bebbbb8d5763 (REBASED onto current master)
+OLD remote head (for --force-with-lease): a17fcf79fdaa57368e40dec1b36d24858509fb67
+
+PUSH (re-sign the 2 commits, then force-with-lease):
+  git push --force-with-lease=pr/ext4-fsync-cache:a17fcf79fdaa57368e40dec1b36d24858509fb67       gh-fork pr/ext4-fsync-cache
+Notes:
+- REBASED onto current master (was stale on cb8c7205; would have silently reverted
+  merged splice/membarrier/iovcnt/sigchld). Feature-only: ext_vnops.cc, pagecache.cc,
+  pagecache.hh, tests Makefile (union: splice+ext4-rw), tst-ext4-rw.cc, .gitignore.
+- Leak fix folded into commit 1 (bridge). Fixes the unmap-path leak wkozaczuk flagged
+  (cached_page_read_owned frees the page on eviction) + a collision double-free + copyright.
+- 2 commits, both need re-sign under greg@burd.me.

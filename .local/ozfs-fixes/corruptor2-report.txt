@@ -1,0 +1,161 @@
+================================================================================
+CORRUPTOR #2 -- ROOT-CAUSED + FIXED + QUALIFYING (default 8k sustained RW)
+================================================================================
+Author: Greg Burd
+Box:    osv-cor-a (ec2-user@3.16.46.123), container osv-build, /b
+Base:   corruptor-fix @ 41c360da (RELIABLE base: #1 fix 14667a8d + mount patch 0031)
+Build:  scripts/build -j96 image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1
+Class:  [fork-stack] (CONF_fork page-reclaim coherence; the page-path sibling of #1)
+
+BOTTOM LINE
+-----------
+Corruptor #2 is the PAGE-PATH sibling of corruptor #1: the small-object pool's
+lock-free MPSC cross-CPU garbage queue (unordered_queue_mpsc) writes an intrusive
+free_object::next link (an 8-byte 0x500 mem_area::page-alias pointer) INTO a pool
+backing page during a window in which that page has already been returned to
+page_pool and recycled into a live 4096B object (a ZFS abd read-chunk, a
+range_tree btree leaf, a thread TCB/TLS block).  The stale 8-byte store is the
+wild write: it corrupts range_tree metadata (the VERIFY3U(start<end),
+const end=0x804000000), ARC read buffers (the EIO on vacuum/checkpoint reads),
+and the per-thread TLS s_current slot (the migrate_disable/preemptable assert).
+#1's fix hardened the pool's OWN deferred page release; #2 closes the residual by
+QUARANTINING every freed page briefly before page_pool can recycle it, so any
+in-flight MPSC next-link store drains onto a not-yet-reused page.
+
+=== REPRO CONFIRMED (this base, this session) ===
+Fresh 8k lz4 single-file pool, -smp4 -m32G KVM. pgbench -i -s1000 then -c16 -T120.
+Every pre-fix run: EITHER migrate_disable/preemptable page-fault assert (TLS
+s_current clobbered to 0x40), OR range_tree class, OR EIO storm on read
+("could not read blocks ... EIO") during vacuum/checkpoint, OR lost-wakeup hang.
+
+=== VICTIM ADDRESS (localized) ===
+RUN B (gdb): faulting thread CPU#2, its own TCB = 0x40010036d980; the TLS block
+(kernel_tls_size=2368) at 0x40010036d040..d980 was overwritten; s_current slot
+(0x40010036d088) held 0x40 -> thread::current()=0x40 -> migrate_disable() faulted
+in memory::page_pool::l1::refill (mov %fs:s_current,%rax ; addl $1,0xe8(%rax)).
+
+=== WRITER PC / FINGERPRINT (named) ===
+poison-on-free + verify-on-alloc canary caught the stale writes prolifically (a
+plain cpiod/mkfs boot fires 35+):
+  off=64,   val = <page>|page-area   (page's own mem_area::page self-alias)
+  off=1128, val = <page>|page-area+0x428   == CORRUPTOR #1's EXACT RUN-3 signature
+These offsets are free_object slots; the value is std_malloc's page-branch return
+(translate_mem_area(main,page,alloc_page())).  Writer = unordered_queue_mpsc::push
+"item->next = _head" (and pop()'s "_poll_list = r->next" look-ahead) in the pool's
+cross-CPU garbage path (core/mempool.cc garbage_sink / free_different_cpu ->
+queue.push).  Confirmed by: (a) offsets/value match a free_object link exactly;
+(b) it hits pages that were freed via free_page(); (c) delaying free_page reuse
+(quarantine) makes the corruptor vanish.
+
+=== ROOT CAUSE ===
+A pool backing page reaches page_pool (via pool::flush_empty_pages ->
+untracked_free_page, or is recycled and re-grabbed by pool::add_page) while a
+producer on another CPU is mid-push (item->next store) or the consumer's
+_poll_list look-ahead still dereferences an object in it.  The 8-byte next-link
+store then lands in a page page_pool has already recycled into a live object.
+#1 deferred the pool's own release to a drained point; a concurrent producer push
+plus the pop look-ahead leave a residual window this fix closes.
+
+=== THE FIX (core/mempool.cc, gated CONF_fork) ===
+Bounded per-CPU page-reclaim quarantine in memory::free_page(): a freed page is
+parked in a per-CPU ring of PGQUAR_DEPTH=512 pages and only handed back to
+page_pool after 512 subsequent frees, so any in-flight MPSC next-link store drains
+onto a page that is not yet a live object before recycling.  Bounded (2 MiB/CPU) so
+a free storm cannot pin unbounded memory.  Entirely under #if CONF_fork; conf_fork=0
+is byte-identical to stock OSv (free_page skips the block).
+
+================================================================================
+QUALIFICATION EVIDENCE (pasted, real) -- default recordsize=8k, sustained RW
+================================================================================
+Clean production build (nm: percpu_pgquar present; 0 pgcanary/pgq_/CORRUPTOR2/STALE
+diagnostic symbols).  Fresh 8k lz4 single-file pool from pgdata.clean.raw, -m32G KVM.
+
+-smp4:
+  pgbench -i -s1000  -> done in 118.95 s, rc=0 (CLEAN; pre-fix this EIO'd on vacuum/PK)
+  pgbench -c16 -j4 -T120 -> 292,607 tx / 0 failed / 2459 tps / rc=0
+  no range_tree VERIFY3U, no migrate_disable/preemptable assert, no EIO, guest alive.
+
+-smp8:
+  pgbench -i -s1000  -> done in 124.88 s, rc=0 (CLEAN)
+  pgbench -c16 -j4 -T120 -> 292,927 tx / 0 failed / 2467 tps / rc=0
+  no crash signatures, guest alive.
+
+REBOOT-CLEAN + on-disk integrity (-smp4):
+  automatic recovery in progress; redo done at 3/E38D0428 (47s, clean);
+  end-of-recovery checkpoint: wrote 192661 buffers, total=295.263 s (slow but clean,
+  no EIO/PANIC); "database system is ready to accept connections".
+  select count(*) from pgbench_accounts -> 100000000   (complete, s=1000)
+  select count(*) from pgbench_branches -> 1000
+  vacuum analyze pgbench_accounts       -> VACUUM   (the exact op that EIO'd pre-fix)
+
+SCRUB (-smp4, fresh import of the -c16 pool):
+  pool: pgdata  state: ONLINE
+  scan: scrub  ...  0B repaired
+  NAME pgdata ONLINE 0 0 0 ; vblk1 ONLINE 0 0 0   (READ/WRITE/CKSUM all 0)
+  errors: No known data errors
+
+CONF_fork=0 byte-identical: the entire fix is inside #if CONF_fork.  With
+CONF_fork stripped (=0), the fix's core/mempool.cc differs from the parent
+(41c360da) by EXACTLY ONE BLANK LINE (source whitespace, no tokens) -> identical
+object code.  NOTE: this fork-stack branch does not fully LINK at conf_fork=0
+(pre-existing: ZFS/libc reference fork_arena::force_kernel_heap,
+fork_kernel_heap_push/pop, osv::fork::wait_child, defined only under CONF_fork),
+so a full conf_fork=0 image cannot be built on this branch -- independent of this
+fix.  The mempool.cc change itself is conf_fork=0 no-op (blank-line-only delta).
+
+CLASSIFICATION: [fork-stack]  (CONF_fork page-reclaim coherence; the direct
+page-path sibling of corruptor #1).  Commit 6ccf4a92, Author Greg Burd.
+
+MILESTONE: OSv+PostgreSQL QUALIFIES at default recordsize=8k under SUSTAINED
+CONCURRENT RW (pgbench -i -s1000 + pgbench -c16 -j4 -T120), -smp4 and -smp8, KVM.
+This is the final corruptor milestone that unblocks the real 8k benchmark.
+
+HUGEPAGES ON (-mem-path /dev/hugepages -mem-prealloc, 16640x2M reserved), -smp4:
+  pgbench -i -s1000  -> done in 117.55 s, CLEAN
+  pgbench -c16 -j4 -T120 -> 285,812 tx / 0 failed / 2401 tps / rc=0
+  no crash signatures.  => corruptor #2 fix holds with hugepages ON and OFF.
+
+HONEST RESIDUAL (NOT corruptor #2): on ONE hugepages-ON run the pgbench -i COPY
+stalled at "checkpoint starting: wal" with the guest ~idle (lost-wakeup: postmaster
++ a fresh `select 1` still answered, but the checkpointer/COPY wedged; no wild write,
+no crash).  This is the pre-existing intermittent lost-wakeup ("signature F" in
+lostwakeup-report.txt), a fork wait/wake coherence stall independent of the page-UAF
+this fix closes -- a re-run of the identical hugepages workload completed clean.  The
+corruptor #2 wild-write (range_tree/EIO/TLS clobber) did NOT recur in any post-fix run
+(-smp4, -smp8, hugepages on/off).
+
+INTERMITTENT LOST-WAKEUP (pre-existing, SEPARATE from corruptor #2):
+A "confirm" -smp4 hugepages-OFF run stalled during the -i load at "checkpoint
+starting: wal": guest ~idle (6% CPU), disk grow=0, pgbench COPY wedged, BUT
+`select 1` still returns 1 (postmaster + a fresh backend answer) -> a lost-wakeup,
+not a total hang.  CORRUPTOR SIGNATURE COUNT IN CONSOLE = 0 (no VERIFY/range_tree/
+preemptable/EIO/PANIC).  So the page-UAF wild write is GONE; what remains is the
+pre-existing intermittent fork wait/wake lost-wakeup ("signature F"), which pre-dates
+this fix (session RUN A on the base image hung identically).  It stalls, it does not
+corrupt.  Frequency: several heavy runs completed fully clean (-smp4, -smp8, HP-on),
+a subset stall.  This is the next milestone after corruptor #2, not part of it.
+
+ADDITIONAL CLEAN RUNS (post-fix, corroborating):
+  -smp4 load run #3: pgbench -i -s1000 done in 117.51 s, 0 corruptor sig;
+    then pgbench -c16 -j4 -T120 -> 290,328 tx / 0 failed / 2445 tps / rc=0, 0 sig.
+Post-fix, across all runs, the corruptor-#2 wild write (range_tree VERIFY3U /
+migrate_disable preemptable assert / EIO on reads / TLS s_current clobber) NEVER
+recurred.  Multiple full heavy repros (-smp4, -smp8, hugepages on/off) completed
+clean; a subset of load phases hit the pre-existing intermittent lost-wakeup (which
+stalls, never corrupts).
+
+FIRECRACKER (FC): not run here -- no firecracker binary on this box (only OSv's
+scripts/firecracker.py helper); the reliable base was KVM-only too.  The fix is a
+pure OSv allocator change (memory::free_page, no virtio/hypervisor path), so it is
+hypervisor-independent by construction and exercises identical code under FC.
+
+NON-FORK REGRESSION: none possible.  The fix is a strict no-op at conf_fork=0
+(CONF_fork=0-stripped mempool.cc differs from parent by one blank line only).  A full
+conf_fork=0 image does not link on this branch for pre-existing reasons unrelated to
+this fix (ZFS/libc reference fork-only symbols).
+
+DELIVERABLES:
+  commit  6ccf4a92 on branch corruptor-fix (Author Greg Burd, [fork-stack])
+  bundle  floki:/tmp/corruptor2-fix.bundle  (git bundle 41c360da..HEAD)
+  reports floki:/tmp/corruptor2-report.txt, /tmp/corruptor2-repro.txt,
+          /tmp/corruptor2-fix-progress.txt

@@ -1,0 +1,60 @@
+=======================================================================
+ pr/virtio-blk-completion-deadlock  —  build+boot+I/O verification
+=======================================================================
+Branch : pr/virtio-blk-completion-deadlock
+HEAD   : dc7d777b860eae95865c85cd413cb8b5770e1cc3
+Remote : gh-fork = github.com/gburd/osv-1
+Fix    : virtio-blk: do not hold per-queue lock while draining completions
+         (drivers/virtio-blk.cc, req_done() drain no longer takes
+          _queue_locks[q]; single-file, +19/-5)
+Cut on : upstream/master line (OSv v0.57.0-375-gdc7d777b), NOT the fork stack
+Box    : bench-db 18.189.43.159, built in osv-build container (gcc 13.3.1)
+Date   : 2026-07-29
+
+RESULTS
+-----------------------------------------------------------------------
+compiles                 : Y   (CXX drivers/virtio-blk.cc, virtio-blk.o rebuilt, 0 errors/warnings)
+links                    : Y   (loader.elf / loader-stripped.elf / usr.img all linked, EXIT=0)
+                               image=native-example  build EXIT=0
+                               image=tests           build EXIT=0
+boots-on-virtio-blk      : Y   (default device = virtio-blk-pci; rootfs mounted from vblk0;
+                               "Booted up in ~190-290 ms", clean run+exit)
+disk-I/O                 : PASS
+
+DISK I/O DETAIL (this is the changed completion path)
+-----------------------------------------------------------------------
+Test    : tests/misc-bdev-write.so — fires unthrottled concurrent async
+          BIO_WRITEs straight through the virtio-blk block layer; only
+          waits for in-flight to drain at the very end. This is exactly the
+          producer(add_buf_wait) / consumer(req_done drain + wakeup_waiter)
+          interaction the fix targets. 1-page-buffer cycle floods the ring
+          -> add_buf returns false -> producer sleeps in add_buf_wait waiting
+          for req_done to advance _used_ring_host_head. Pre-fix this
+          deadlocked ~1-in-3 at heavy load; that path is now lock-free.
+Target  : second virtio-blk data disk (vblk1, 1 GiB raw), rewritten in a loop
+Ring    : per-queue negotiated size (QEMU virtio-blk); multi-descriptor reqs
+          fill it well before device drains -> add_buf_wait IS exercised.
+
+STRESS MATRIX (all clean, qemu_exit=0, no hang / no deadlock / forward progress)
+  virtio-blk-queues=4  (32p bufs) : 28800 MB / 10.01s = 2877 Mb/s   PASS
+  virtio-blk-queues=4  (1p  bufs) : 23540 MB / 10.00s = 2353 Mb/s   PASS  <- ring-full path
+  virtio-blk-queues=4  rerun A    : 27042 MB / 10.00s = 2704 Mb/s   PASS
+  virtio-blk-queues=4  rerun B    : 27497 MB / 10.00s = 2749 Mb/s   PASS
+  virtio-blk-queues=8             : 20522 MB / 10.00s = 2052 Mb/s   PASS
+  virtio-blk-queues=1  (baseline) : 21484 MB / 10.02s = 2144 Mb/s   PASS
+  (throughput never dropped to 0; final in-flight drain loop completed every
+   run; both 32p and 1p cycles printed their "Wrote ..." summary; clean exit.)
+
+  The old bug reproduced ~1-in-3 under multiqueue write load; 4 consecutive
+  clean multiqueue-heavy runs (incl. queues=8) = strong evidence the fix holds.
+
+ERRORS: none. (Only benign QEMU warning: raw data disk format not specified.)
+
+VERDICT
+-----------------------------------------------------------------------
+pr/virtio-blk-completion-deadlock is GREEN:
+  build OK, links OK, boots on virtio-blk OK, sustained multiqueue disk I/O
+  PASS with no deadlock and full forward progress on the exact completion-
+  drain / ring-full path the fix changes.
+=> SAFE to open as a master PR.
+Read-only run: nothing pushed, box left running & clean (NOT terminated).

@@ -1,0 +1,185 @@
+================================================================================
+OSv fork() large-page COW fix -- RESULT (rigorously honest)
+Branch integ/pg-fork-zfs @ d9dd6131 (on top of 3a73d9f0)
+EC2 i-0cb67953b594d5184 (m5d.metal, us-east-2), fedora:39 build container
+"osvbuild", /b = OSv tree. Build CONF_fork=1, KVM qemu_microvm boot.
+Date: 2026-07-23
+================================================================================
+
+BOTTOM LINE
+-----------
+I fixed a REAL fork()-COW bug: 2 MB large pages in the application slots were
+shared verbatim on fork instead of copy-on-written, so a forked child's writes
+to a large private mapping leaked into the parent.  This is now fixed and
+proven (approach A: split-at-clone).  It fixes large malloc (>= 2 MB), large
+MAP_ANON, and any 2 MB-backed private writable app mapping.
+
+HOWEVER, this is NOT sufficient to run stock multi-process PostgreSQL, and I am
+being explicit about that: **psql returned ZERO real rows. The postmaster still
+does NOT reach "database system is ready to accept connections."** PG's forked
+children still SIGSEGV, for a DIFFERENT and DEEPER reason than the ticket
+described (see "The real root cause" below).
+
+--------------------------------------------------------------------------------
+(1) tst-pgfork.c -- child heap-write isolation
+--------------------------------------------------------------------------------
+Extended the repro to also test a >2 MB ("BIG") malloc and to print the VA slot
+of each allocation.  On the fixed kernel:
+
+    parent: global=0x1111 heap=0x2222 shmem0=0x3333
+    VA: heap=0x600000be21f0 (slot 192) big=0x200000400040 (slot 64) shmem=... (slot 64)
+    CHILD: wrote global/heap/shmem, ok=1
+    PASS: parent global isolated (0x1111)          <- .data COW (4K)        OK
+    FAIL: parent heap changed (COW leak)           <- SMALL malloc (slot192) STILL LEAKS
+    PASS: parent BIG heap isolated                 <- >2MB malloc (slot 64)  FIXED by this change
+    PASS: shared mmap visible across fork (0xcccc) <- MAP_SHARED preserved   OK
+
+So the large-page COW fix WORKS ("BIG heap isolated" was a FAIL before, now
+PASS).  The remaining "FAIL: parent heap changed" is the SMALL-object heap,
+which does not live in an application slot at all -- see below.
+
+--------------------------------------------------------------------------------
+(2) Regressions -- ALL PASS (qemu_microvm, CONF_fork=1)
+--------------------------------------------------------------------------------
+    tst-fork        : 10/10 PASS, 0 failures
+    tst-fork-cow    :  6/6  PASS, 0 failures
+    tst-fork-deep   :  3/3  PASS, 0 failures
+    tst-execve      :  3/3  PASS, 0 failures
+No regressions from the large-page-COW change.
+
+--------------------------------------------------------------------------------
+(3) conf_fork=0 -- clean, fork fully excluded
+--------------------------------------------------------------------------------
+    scripts/build ... conf_fork=0  -> kernel_config_fork.h has "#define CONF_fork 0"
+    core/mmu.cc compiles clean.
+    nm loader.elf | grep -c clone_address_space  ->  0
+The entire fork path (this change included) is compiled out; the default page
+fault path is untouched.  (The only build error with conf_fork=0 in this env is
+a missing libsolaris.so at IMAGE-PACKAGING time -- a ZFS-module artifact issue
+unrelated to fork; the loader.elf kernel itself links clean.)
+
+--------------------------------------------------------------------------------
+(4) THE PG MILESTONE -- does the postmaster reach "ready"? does psql return rows?
+--------------------------------------------------------------------------------
+NO.  Rebuilt the musl-PG image (image=pgapp, reusing /b/pgm from the prior
+agent) on the fixed CONF_fork=1 kernel and booted with --forward tcp::5432-:5432.
+The postmaster boots further but STILL crashes in the first forked child:
+
+    LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+    LOG:  listening on IPv4 address "0.0.0.0", port 5432
+    LOG:  could not open directory "pg_tblspc": ENOENT   (non-fatal)
+    OSV_PG_DIAG signo=0xb (SIGSEGV)  fault_addr=0x0  user_err=0x2 (write, not-present)
+    rbx=0x60000077c2c10 (slot 192, identity heap)  ... NULL-deref
+    Aborted
+
+    [backtrace]
+    osv::handle_mmap_fault -> mmu::vm_fault -> page_fault  (child faults)
+
+Same crash class as the prior agent: a forked child dereferences a NULL/garbage
+pointer it read out of the SHARED small-object heap.  ZERO psql rows.  No client
+backend is ever forked.  Concurrent connections: not reached.  I did NOT claim
+success; I verified the crash directly.
+
+--------------------------------------------------------------------------------
+THE REAL ROOT CAUSE (the ticket's diagnosis was PARTIALLY WRONG)
+--------------------------------------------------------------------------------
+The ticket said: "OSv backs the malloc heap with 2 MB huge pages ... clone
+shares them verbatim ... fix clone_pt_level<1>/handle_cow_write_fault."
+
+I fixed exactly that (large-page COW) and PROVED it works for large allocations
+(BIG heap isolated).  But it does NOT fix PostgreSQL, because PG's crashing
+heap state is in the SMALL-object heap, and the small-object heap does NOT live
+in an application-slot large page.  Measured (VA slot = addr >> 39):
+
+    small malloc  ->  0x600000...   PML4 slot 192   = mem_area::mempool
+    large malloc  ->  0x200000...   PML4 slot 64    = application mmap area (COW-able)
+    MAP_SHARED    ->  0x200000...   PML4 slot 64
+    .data/.bss    ->  0x100000...   slot 32         (COW-able)
+
+OSv's PML4 layout (core/mmu.cc:142):
+    slots 1..127   : application VMA space  -- PRIVATE, cloned per child (COW)
+    slots 128..511 : kernel identity / phys / mempool / debug maps -- SHARED
+
+Small-object malloc returns pointers in the mem_area::mempool identity map
+(slot 192, base 0x420000000000... actually 0x600... = 3<<43 within the mempool
+band).  clone_address_space() shares slots 128..511 VERBATIM as "kernel" (this
+is BY DESIGN -- OSv has no user/kernel split and the kernel heap must stay
+coherent across address spaces; see commit a0e9fd81's message: "Kernel PML4
+entries are shared ... so OSv code + the kernel heap work identically").
+
+So PG's per-backend small-object heap (MemoryContexts, catcache/relcache,
+GUC tables, cached pointers) is silently SHARED between parent and every forked
+child, gets corrupted, and the next child NULL-derefs.  The large-page COW fix
+never even sees this memory -- it is not in slots 1..127.
+
+Additionally: virt_to_phys() on identity-mapped (slots 128..511) addresses is
+pure ARITHMETIC (addr & mask), not a page-table walk.  So the heap CANNOT be
+made COW in place -- giving a child a different physical page at the same
+identity VA would break virt_to_phys() for that page (used by the kernel, e.g.
+for DMA on the I/O path).  COW-ing the identity map is architecturally
+impossible without breaking the kernel.
+
+--------------------------------------------------------------------------------
+WHAT IT WOULD TAKE (and what I prototyped)
+--------------------------------------------------------------------------------
+Correctly isolating the small-object heap requires MOVING the application heap
+out of the shared kernel identity map into a page-table-mapped, COW-able
+application-slot region (so both per-AS COW AND page-walk virt_to_phys work).
+
+I prototyped this as a "fork heap arena": a fixed application-slot mmap region
+(PML4 slot 120) that backs the malloc pools under CONF_fork, with free()/
+object_size() taught to recognise arena VAs, and the arena eagerly PRIVATISED
+(byte-copied, plain-writable, NO COW) at fork -- privatise rather than COW is
+mandatory because the KERNEL writes heap objects with preemption/irqs off
+(inside preempt_lock in the allocator, on the I/O path), where a COW write
+fault is illegal (asserts sched::preemptable()).
+
+Status of that prototype (NOT committed -- it is not shippable yet):
+  - It DID move the small heap into a COW-able app slot (verified: heap moved
+    from slot 192 to slot 120, boot succeeds, "parent:" prints).
+  - It resolved several sub-issues along the way: the arena's own free-back to
+    the identity page allocator (guarded), the arena reservation colliding with
+    the mmap region / thread stacks / shmem (moved to a dedicated fixed slot),
+    the arena's demand-paged pages faulting under preempt_lock (pre-touch),
+    and clone_address_space's own bookkeeping allocating from the very arena it
+    was cloning (per-thread bypass to the identity heap).
+  - BUT it still hits a fork-time RECURSIVE fault ("exception nested too
+    deeply") on the child's resume/teardown path that I could not root-cause in
+    the time available.  The recursion is pre-vm_fault (fault-on-fault, likely
+    on the exception/stack path), and it persists even with the child doing
+    nothing but _exit(42) and even with the arena privatise disabled -- i.e. it
+    is triggered by merely routing the heap through the arena, independent of
+    the privatise copy.  This needs deeper work across the allocator, the fault
+    path, the fork trampoline (arch/x64/fork.cc), and __osv_run_atfork_child.
+
+I deliberately did NOT commit the arena: a half-working heap allocator that
+crashes fork is worse than the proven, contained large-page fix plus an honest
+diagnosis.  Committing it would violate "replicate the WHOLE mechanism
+correctly" -- it is a partial mechanism.
+
+--------------------------------------------------------------------------------
+DELIVERABLE
+--------------------------------------------------------------------------------
+Approach: (A) split-at-clone for 2 MB large pages.
+Fix (1 file, 16 lines, all under CONF_fork):
+    core/mmu.cc  clone_pt_level<1>():  a WRITABLE large PD entry is split to 4K
+    in the parent (split_large_page) then falls through to the existing 4K
+    clone path (clone_pt_level0), which COWs private-writable / keeps
+    MAP_SHARED shared / shares read-only.  Read-only large pages stay verbatim.
+    (+ two forward declarations of split_large_page.)
+
+Commit: d9dd6131 "mm/fork: copy-on-write 2 MB large pages on fork (opt-in)",
+        author Greg Burd <greg@burd.me>, gated CONF_fork.
+Bundle: /tmp/largepage-cow.bundle (ec2-user-owned), head refs/heads/
+        integ/pg-fork-zfs = d9dd6131.
+
+Instance left RUNNING (not terminated), per instructions.
+
+VERDICT: the large-page-COW bug is real and now fixed (proven, no regressions,
+conf_fork=0 clean).  It is a necessary step but NOT the last blocker for
+multi-process PostgreSQL.  The last blocker is the small-object heap living in
+the shared kernel identity map, which needs the app heap relocated to a
+COW-able app slot -- a larger allocator change (prototyped, hits a fork-time
+recursive-fault bug still to be solved).  No psql rows were served; I am not
+claiming PG works.
+================================================================================

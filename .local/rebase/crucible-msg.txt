@@ -1,0 +1,32 @@
+crucible: V13 wire-format compliance + threading + tests
+
+Replaces an early prototype Crucible client message layer with one
+that speaks the upstream Crucible V13 protocol byte-for-byte:
+
+  - HereIAm carries Vec<u32> alternate_versions, not bool;
+    YesItsMe layout corrected to {version, repair_addr}.
+  - PromoteToActive / YouAreNowActive negotiation completed.
+  - RegionInfoPlease + ExtentVersionsPlease handshake completes so
+    the downstairs transitions out of negotiation state.
+  - Result tag widened from u8 to u32; Write / ReadResponse / Flush
+    layouts and Option<u32> extent_limit, Option<String>
+    snapshot_name encodings match upstream bincode 1.x.
+  - RegionDefinition reordered to match the upstream Rust struct.
+  - libzfs/zpool device-path handling skips the ".1" partition suffix
+    for "crucible*" volumes (no MBR partitions on raw replicated
+    extents).
+
+Thread-safety hardening so concurrent ZFS TXG-sync writes do not
+interleave on the wire: per-Connection send_lock_/recv_lock_ mutexes
+and a new send_exact_with_data() that takes the send mutex across
+both header and data halves of a Write / ReadResponse frame.
+
+Production logging: removed per-I/O kprintfs that would spam the
+console under load.  Only error paths and a single connection-state
+line per downstairs remain.
+
+New tests:
+  - tst-crucible-blk: direct /dev/crucible0 round-trip at multiple
+    offsets and sizes (BLKGETSIZE64, pwrite/fsync/pread).
+  - tst-crucible-zfs: end-to-end zpool_create / dataset / mount /
+    write / fsync / read / verify on a 3-replica Crucible volume.

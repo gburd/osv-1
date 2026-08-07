@@ -1,0 +1,31 @@
+zfs: upgrade OpenZFS from 2.4.1 to 2.4.2
+
+Rebase our 12 OSv platform patches onto OpenZFS 2.4.2 (zero conflicts).
+Add zfs_mount_setattr() stub to the OSv libzfs shim — 2.4.2 uses this
+for selective namespace property remounts on Linux; OSv falls back to a
+full remount like FreeBSD.
+
+Two OSv-specific fixes carried in the same submodule bump:
+
+  - zfs_uioskip(): advance the iov->iov_base / iov_len pointers in
+    addition to uio_offset / uio_resid.  Without this, multi-record
+    writes (>= 128 KiB single-write transactions, e.g. ZFS TXG sync
+    with two records) corrupt at record boundaries when the data
+    source is a UIO_SYSSPACE iovec.  Reproducer: tests/tst-zfs-multirec
+    (256 KiB single write+fsync+read+memcmp).
+  - libzfs/libzutil device-path handling: skip the ".1" partition
+    suffix for "crucible*" volumes; replicated raw extents have no MBR
+    partition table.
+
+Key fixes inherited from upstream 2.4.2:
+  - DRAID: data corruption after disk clear, import after replacement
+  - Rare checksum errors after rebuild
+  - Read corruption after block clone + truncate
+  - dnode_sync range tree corruption race
+  - DMU direct I/O use-after-free in dmu_write_direct_done
+  - Memory leaks in snapshot automount, spa_errlog, zfsvfs_hold
+  - POSIX_FADV_DONTNEED support
+
+All OSv ZFS tests pass: tst-zfs-direct-io (9/9), tst-zfs-trim (5/5),
+tst-zfs-encryption (21/21), tst-shm-consistency (30/30), tst-huge,
+tst-io_uring, tst-zfs-multirec.

@@ -1,0 +1,30 @@
+fs: implement inotify(2)
+
+Implement the inotify(2) family (inotify_init/inotify_init1,
+inotify_add_watch, inotify_rm_watch) backed by the VFS.  OSv routes all
+path mutations through a few central functions in fs/vfs/vfs_syscalls.cc,
+which now call osv_inotify_notify() after a successful create, delete, or
+rename.  A small registry of inotify instances matches each event against
+their watches and queues a packed struct inotify_event for the fd, waking
+any poller.
+
+A directory watch reports the affected entry name; a watch on the file
+itself reports the change with no name.  The VFS hooks currently generate
+IN_CREATE, IN_DELETE, and IN_MOVED_FROM/IN_MOVED_TO (with IN_ISDIR for
+directories); IN_MODIFY, IN_ATTRIB and IN_CLOSE_WRITE are not yet wired
+and the file comment says so.  A rename emits the IN_MOVED_FROM/IN_MOVED_TO
+pair with a shared non-zero cookie so readers can correlate the two halves,
+matching the Linux ABI.
+
+inotify_add_watch resolves the target to an absolute path (returning
+ENAMETOOLONG on truncation), then stats it: a nonexistent path fails with
+ENOENT, and a non-directory with IN_ONLYDIR fails with ENOTDIR, as on Linux.
+Pollers are woken only when an event is actually enqueued for the instance,
+avoiding spurious POLLIN wakeups on unmatched mutations.
+
+tst-inotify.cc exercises create/delete/move/rmdir events, the shared move
+cookie, IN_IGNORED on watch removal, ENOENT on a missing path, and the
+EAGAIN/EINVAL edge cases.  It uses a per-run-unique directory so leftovers
+from a previous run cannot suppress the events it asserts on.
+
+Signed-off-by: Greg Burd <greg@burd.me>

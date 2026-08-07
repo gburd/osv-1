@@ -1,0 +1,30 @@
+================================================================================
+CLEAN FRESH-BOOT A/B (single warm c1->c64 sweep each, -smp16 ramfs RO, tap)
+BASELINE = stock cpu::load_balance  |  FIX = aggressive load_balance (10ms+drain)
+================================================================================
+  c     BASELINE   FIX       delta
+  1     12469      11480     -8%    (migration overhead at low conc)
+  4     41926      37435     -11%
+  8     68543      64294     -6%
+  16    28113      31892     +13%   <-- crossover
+  32    17015      26075     +53%
+  48    14341      24692     +72%
+  64    13139      22698     +73%
+
+The fix trades ~6-11% at c1-c8 for +53..73% across the c32-c64 tail that
+previously collapsed.  Both loaders built identically (same toolchain, same
+image, only core/sched.cc load_balance differs); fresh boot + fresh -s50 seed
+per side; host->guest over tap virtio-net (inet_server_addr=192.168.100.2).
+================================================================================
+
+================================================================================
+DELIVERABLES / ROUTING
+================================================================================
+FIX: standalone off upstream/master (ae077860c) = NEW MASTER PR (general OSv
+  scheduler fix, no fork/PG specifics).  Branch pr/sched-load-balance,
+  commit 4bb2531d0 "sched: disperse threads faster in the load balancer".
+  Bundle: /tmp/conc2-fix.bundle  (base ae077860c041686e7baee5e0bbfc1895c226b634)
+  Leak-scanned CLEAN (commit msg + diff).  Author Greg Burd, Signed-off-by.
+BOX: i-0cb172435eba1734f TERMINATED; all 5 EBS deleted (InvalidVolume.NotFound);
+  no orphans.
+================================================================================

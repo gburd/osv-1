@@ -1,0 +1,225 @@
+================================================================================
+OSv + PostgreSQL 18 -- ZFS-on-OSv WALL 3 (sustained-write corruptor)
+Session 2 investigation: faithful reproduction + deep narrowing + HONEST status
+================================================================================
+Date:   2026-07-27 (evening)  Box: osv-qual (ec2-user@3.142.230.27, m5d.metal
+        96c/377GB, 4x local NVMe, KVM).  Build tree: /b @ integ/pg-fork-zfs.
+        Base tip on entry: dfed474b (== the wall3.txt tip; all 5 prior fixes in).
+        conf_fork=1 conf_zfs=openzfs fs=zfs recordsize=8k.  Author: Greg Burd.
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* I did NOT land a fix this session.  OSv+PG is STILL NOT QUALIFIED at default
+  recordsize=8k + 32G under KVM.  Do NOT relaunch the default-recordsize fleet.
+
+* I DID make concrete forward progress and eliminate several hypotheses:
+  - Built a FAITHFUL, layout-neutral reproducer and confirmed the residual
+    corruptor reproduces reliably under pgbench -i -s1000 / -c16 RW at 8k+32G.
+  - Proved it is NOT a forward tail-overflow of any ZFS kmem/kmem_cache object
+    (an allocator-safe 16-byte trailing redzone on EVERY zfs_kmem_alloc /
+    kmem_cache_alloc object -- abd_chunk, dbuf, arc_buf_hdr, zio_buf,
+    dbuf_dirty_record, all of them -- checked at free NEVER tripped on the hot
+    path; it only caught a self-inflicted instrumentation false positive, now
+    understood and fixed: kmem_vasprintf allocated via libc vasprintf but was
+    freed via kmem_strfree->zfs_kmem_free, so the redzone read past the libc
+    allocation).
+  - Proved it is NOT a per-CPU-area COW divergence across fork (percpu_base is
+    aligned_alloc'd once in AS0 at boot -> identity heap -> coherent).
+  - Proved it is NOT an aliasing bug in commit c6c89c59's large-alloc linear-map
+    routing (free_page_ranges::alloc always returns a single VA-contiguous,
+    non-overlapping page_range; the offset/header math round-trips correctly).
+  - Confirmed the corruptor is a BROAD WILD-POINTER WRITE / USE-AFTER-FREE: it
+    writes a (varying) pointer-sized value into whatever live object happens to
+    occupy a semi-random heap address, so the FAULT always lands on a downstream
+    victim, never the writer.  Captured 6 distinct downstream victims this
+    session (all the SAME cause), see below.
+
+* WHY I could not name the writer: every fault is a victim being *used* long
+  after the wild write already succeeded to a valid-but-wrong address.  Neither
+  a trailing redzone (catches only forward tail overflow), a poison-on-free /
+  check-on-alloc UAF probe (defeated by OSv's shared per-size-class pool, which
+  writes a freelist next-pointer into freed objects and hands a freed slot to
+  ANY caller), nor a bounded quarantine (hung the guest / perturbed ARC) can see
+  the writer.  Only a hardware watchpoint on a victim address BEFORE it is
+  written will name it -- and victim addresses vary per run, so it needs an
+  automated -smp1 watchpoint on a stable victim class (the recommended next
+  step; I set up the infra but did not land it within the session budget).
+
+================================================================================
+METHOD (faithful reproduction)
+================================================================================
+Reproduce at full speed: reseed a clean single-file recordsize=8k ZFS pool on
+local NVMe (.local/ozfs-fixes/seed.sh), boot serve.sh 4 32G (KVM), then:
+   pgbench -i -s 1000            (15GB, drives the 8k write path)
+   pgbench -c 16 -j 4 -T 120     (sustained concurrent RW)
+Reboot-clean check: kill, re-serve the same pgdata.raw, confirm WAL replay is
+clean (no range_tree VERIFY / SPL PANIC) and a full table scan matches.
+
+CRITICAL LESSON (do not repeat my mistake): a redzone that ADDS bytes
+(size+16) to every ZFS allocation changed the OSv pool SIZE CLASS of objects
+that straddle the 1024-byte pool/page boundary (max_object_size = page_size/4 =
+1024), which reshuffled the heap layout enough to MASK the corruptor -- a full
+battery ran clean once on the +16 build and clean on reboot.  The un-padded
+(faithful) build then corrupted 3/3.  Any instrumentation MUST be layout-neutral
+(guard existing slack, or a side table) or it will mask this layout-sensitive
+bug -- exactly like recordsize=32k and >=96G RAM mask it.
+
+================================================================================
+SIGNATURES captured this session (all downstream of ONE wild-write corruptor)
+================================================================================
+(1) FREE of a mempool object with a CORRUPT page_header:
+      GPF in memory::pool::free_different_cpu (core/mempool.cc)
+      <- memory::pool::free <- free <- kmem_cache_free(zio_cache)
+      <- zio_destroy (zio.c:1053) <- __zio_execute (zio.c:2485)   [ZFS taskq]
+    header->cpu_id had been clobbered (obj_cpu=0x36 on the faulting path), so
+    pcpu_free_list[obj_cpu][cur_cpu] indexed garbage.  The object's OWN kmem
+    tail redzone was intact -> the write hit the page-start page_header, not the
+    object tail.
+
+(2) dbuf db_buf cleared (== wall3.txt signature (a), reproduced faithfully):
+      page fault, addr 0x0 (NULL deref)
+      <- arc_release(db->db_buf, db)   dbuf.c:2437, db->db_buf == NULL
+      <- dbuf_dirty <- dmu_write_impl <- dmu_write <- space_map_write
+      <- metaslab_flush <- spa_flush_metaslabs
+      <- spa_sync_iterate_to_convergence <- txg_sync_thread    [AS0]
+    A DB_CACHED space_map dbuf whose db_buf field was externally zeroed.
+
+(3) torn data block -> checksum EIO:
+      PANIC: could not write to log file ... EIO ; writing block ... of
+      base/5/16399   (PostgreSQL aborts itself; ZFS returned EIO on read-back
+      of a block whose in-memory content was corrupted before checksum).
+
+(4) per-CPU page pool + scheduler state clobbered:
+      Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault:38)
+      primary fault at sched::migrate_disable() (thread::current()->
+      _migration_lock_counter++) inside memory::page_pool::l2::alloc_page_batch
+      (mempool.cc:1438) <- l1::refill <- l1::alloc_page <- untracked_alloc_page
+      <- pool::add_page.  thread::current() / the thread's migration counter was
+      at a corrupt/unmapped address.  Nested fault in sched::thread::current_app
+      reading a clobbered application_runtime shared_ptr.
+
+(5) RCU deferred-free of a corrupt vfs_file:
+      page fault, addr 0x0 in free+275
+      <- file::~file <- vfs_file::~vfs_file
+      <- osv::rcu::cpu_quiescent_state_thread::do_work   [AS0 RCU reclaim]
+    The struct file's pool page_header (freed slot) was clobbered, so free()
+    NULL-deref'd.  (Same page_header-corruption family as (1).)
+
+(6) (from the +16 diagnostic build only) boost intrusive bstree corruption:
+      Assertion failed: node_algorithms::unique(to_insert)
+      (boost/intrusive/bstree.hpp insert_before:1355) -- the VMA set (vma_list
+      in core/mmu.cc) had a node with a clobbered hook.
+
+(7) LOST-WAKEUP HANG (== wall3.txt signature (e) family):
+      pgbench stalls mid-load; PG makes no progress; gdb 'thread apply all bt'
+      shows ALL vCPUs parked in sched::cpu::do_idle -> a wakeup was lost.  A
+      blocked backend/txg thread is waiting on a condvar/wait_record or sits on
+      a per-CPU incoming-wakeups lockless_queue<sched::thread> whose linkage the
+      wild write clobbered (prior session saw the matching pop_front NULL deref
+      cr2=0x4898).  No console output (the loss is silent); only an all-CPU
+      gdb backtrace reveals it.  This is the hardest variant to catch because
+      nothing faults.
+
+The victims span ZFS heap objects (dbuf, zio, data block), OSv core heap
+objects (pool page_header, struct file, VMA node) AND scheduler/per-CPU state
+(thread migration counter, page-pool L1).  This breadth == a wild pointer write
+scribbling semi-random addresses, NOT a structured over-run of one object type.
+
+================================================================================
+WHAT THE EVIDENCE NARROWS THE WRITER TO
+================================================================================
+* Scales with the count of small (8k) ZFS buffers (recordsize=32k => 4x fewer
+  dbufs/abd_chunks/zio_bufs => survives) and with write concurrency; masked by
+  >=96G RAM (little allocation/eviction churn -> window rarely hits).  The
+  recordsize sensitivity points the WRITER at the ZFS 8k-record buffer
+  alloc/free churn (dbuf / abd_chunk / arc_buf_hdr / zio / dirty-record
+  lifecycle), NOT at fds, VMAs, or the scheduler (those are victims).
+* It is an OVERFLOW-that-skips-my-guard OR (more likely) a USE-AFTER-FREE:
+  a stale/dangling pointer into a ZFS buffer that was freed and whose slot was
+  reused, written through after reuse.  The prior session already audited ZFS's
+  own dbuf state machine (DB_CACHED => db_buf!=NULL is never violated by ZFS
+  code) -> the db_buf clear is EXTERNAL, consistent with a wild write.
+* It requires the fork COW boundary: a SINGLE forked backend + AS0 txg_sync is
+  enough (pgbench -i, one COPY backend, sometimes corrupts), so it is not purely
+  a multi-backend SMP race; it is the fork-child <-> AS0 interaction on the 8k
+  ZFS buffer lifecycle.
+
+================================================================================
+EXTRA DATA POINT: recordsize=4k does NOT import cleanly after seed
+================================================================================
+Seeding a recordsize=4k pool (ashift=12 -> 4k records are LINEAR abd, no scatter
+chunks -- unlike 8k which is a 2-chunk SCATTER) and booting serve.sh FAULTED at
+MOUNT during ZIL replay, before any workload ran:
+      page fault <- handle_mmap_fault
+      <- zfs_freesp (module/os/osv/zfs/zfs_znode_os.c:691, zfsvfs->z_log deref)
+      <- zfs_space (zfs_vnops_os.c:674) <- zfs_replay_truncate (zfs_replay.c:950)
+      <- zil_replay_log_record <- zil_parse <- zil_replay
+      <- zfsvfs_setup (zfs_vfsops.c:447) <- zfs_mount
+DISTINCT from the sustained-write corruptor (ZIL-replay-at-mount fault on a
+freshly-exported pool).  It lives in the OSv zfs_freesp/zfs_space ZIL-replay
+glue (patch 0029 area).  Whether it is (a) a 4k-specific bug in that glue,
+(b) the seed's cpiod write leaving a truncate ZIL record only 4k replay
+exercises, or (c) the corruptor poisoning the pool during the 4k seed write, is
+UNDETERMINED.  8k pools import cleanly after the same seed.  Resolve as part of
+the recordsize sweep AFTER the main 8k corruptor -- 4k currently does not even
+reach a workload.
+
+RULED OUT this session (do not redo): ZFS-object tail overflow (redzone clean);
+per-CPU COW divergence; c6c89c59 large-alloc aliasing; kmem_vasprintf redzone
+false-positive (fixed).  Prior sessions ruled out: cross-AS data-buffer
+coherence (fixed), the DMA/bounce path, taskq_wait, compression, zio_buf tail
+overflow (ZFS canary), arc_memory_throttle, force_kernel_heap push/pop balance,
+parallel ARC eviction (patch 0030).
+
+================================================================================
+RECOMMENDED NEXT STEP (the definitive one)
+================================================================================
+Automated hardware WATCHPOINT at -smp 1 on a STABLE victim class -- the only
+tool that names the WRITER (all my content-guards only see victims):
+  1. Instrument core/mempool.cc pool::add_page to log the header address of the
+     first N pages of the small pool size-classes that back dbuf/zio/arc caches.
+  2. Under -smp 1 gdb, set DR7 write watchpoints on those page_header.owner /
+     .cpu_id fields (they are invariant after add_page; ANY write to them is the
+     corruptor).  Continue; the watchpoint fires in the writer's context with
+     its backtrace.  -smp 1 makes it deterministic and gdb-tractable.
+  Alternative: a side-table canary (checksum every pool page_header in a
+  background sweep; on mismatch, dump the page + a stack) -- layout-neutral,
+  finds the victim address fast, then re-run with a watchpoint on it.
+Then FIX the named UAF/overflow and classify:
+  OSv ZFS platform layer (arc_os/abd_os/dbuf glue) -> [#1423/OpenZFS];
+  OSv-fork interaction (heap/taskq/free routing)    -> [fork-stack/CONF_fork].
+
+================================================================================
+QUALIFICATION STATUS
+================================================================================
+PASS  : clean tree builds, boots, imports the pool, serves PG, answers catalog
+        queries; a clean -i -s1000 run + -c16 -T120 RW (283094 tx, 0 failed) +
+        full 100M-row scan + reboot-clean re-import all PASSED on ONE run (the
+        +16 build -- but that build is now known to MASK the bug, so this is NOT
+        a valid qualification).
+OPEN  : on the FAITHFUL (un-padded) build, sustained/concurrent write at DEFAULT
+        recordsize=8k + 32G still corrupts (signatures 1-5 above), 3/3 runs.
+VERDICT: NOT QUALIFIED at default recordsize=8k.  recordsize sweep (4k/8k/16k/
+        32k/64k/128k) NOT run -- blocked on the fix.  Do NOT relaunch the fleet.
+
+================================================================================
+ARTIFACTS (box left UP, ec2-user@3.142.230.27, container osv-build running)
+================================================================================
+Tree /b is at dfed474b with layout-neutral diagnostics present but DISABLED
+(off by default), ready to remove or arm:
+  core/mempool.cc                                   MEMPOOL_FREE_GUARD  (=0 off)
+    -- validates pool page_header owner/cpu_id/_size at pool::free; on
+       corruption dumps the page_header + object + a backtrace and cli_hlt's
+       (safe under preempt_lock; abort() would deadlock there).  CAUGHT
+       signature (1).  Layout-neutral (adds only two compares per free).
+  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
+    ZFS_KMEM_REDZONE (=0 off)   -- trailing 16-byte guard, checked at free.
+       NOTE: adding bytes changes size classes and MASKS the bug -- use the
+       slack-guard variant if re-armed.
+    ZFS_KMEM_QUARANTINE (=0 off) -- bounded poison-and-scan ring; hangs under
+       load (mutex per free + ARC perturbation).  Not recommended as-is.
+  Saved copies: /b/.local/ozfs-fixes/instrumentation/*.instrumented
+No source fix committed (none found).  bsd/.../openzfs_osv_compat.c reverted to
+pristine (kmem_vasprintf false-positive fix was diagnostic-only).
+Bundle to floki: /tmp/corruptor.bundle (diagnostics only, clearly not a fix).

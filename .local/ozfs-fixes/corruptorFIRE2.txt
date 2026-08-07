@@ -1,0 +1,60 @@
+=== WALL3_QUAR UAF-quarantine — RESULTS (RUNS 1-3) — Author: Greg Burd ===
+Box: osv-cor-a m5d.metal (3.16.46.123), branch wall3c-watchpoint, /build/osv
+Build: WALL3_QUAR=1 conf_zfs=openzfs conf_fork=1 -j96
+       WALL3_ARENA_DMA + WALL3_FAULT_TRACE forced to 0 (only the quarantine speaks)
+Repro (all runs): fresh clean 8k lz4 pool, boot -smp4 -m32G KVM, pgbench -i -s1000
+
+Quarantine implemented VERBATIM per design in
+  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c  (kmem_cache_free choke point):
+  - N=4096 slot ring in static BSS (identity-mapped, never COW)
+  - poison whole malloc_usable_size, record freeing backtrace, verify at eviction
+  - layout-neutral, #ifndef WALL3_QUAR gate, CONF_fork
+  Impl deltas forced by the platform (not design changes):
+   * backtrace_safe is NOT dynamically exported to libsolaris.so (-z now) -> replaced
+     with an inline frame-pointer walk (wq_backtrace).
+   * kmem_cache_free runs in non-preemptable ZFS contexts -> ring bookkeeping under a
+     spinlock, but poison/verify/free done UNLOCKED (page faults must stay preemptable);
+     and skip quarantine when !sched::preemptable() (e.g. arc_buf_hdr freed under the arc
+     hash_lock) since poisoning there would fault into an assert.
+
+TARGET CACHES TESTED (openzfs names, confirmed in modules/open_zfs/openzfs/module/zfs):
+  run 1: abd_chunk + dmu_buf_impl_t (dbuf)
+  run 2: + arc_buf_hdr_t_full + arc_buf_hdr_t_l2only + dbuf_dirty_record_t  (all five)
+  run 3: same five, with the !preemptable() skip guard
+
+RESULT: corruptor REPRODUCED every run; WALL3_QUAR NEVER fired (0 poison mismatches).
+  Poison across every quarantined abd_chunk / dbuf / arc_buf_hdr / dbuf_dirty_record was
+  byte-intact at eviction, through the full ~83s pgbench up to corruption.
+
+  Corruption signature (run 3, the telling one):
+    pgbench -i loaded 100M tuples OK, then during "alter table ... add primary key":
+    server terminated. Console:
+      Assertion failed: !node_algorithms::inited(... to_node_ptr(value))
+        (/usr/include/boost/intrusive/list.hpp: iterator_to: 1310)
+      [backtrace]
+        __assert_fail
+        memory::page_range_allocator::alloc<true>(unsigned long, bool)+797
+        memory::page_pool::l2::refill()+137
+        memory::page_pool::l1::refill()+297
+        memory::page_pool::l1::fill_thread()+332
+      (run 1/2 showed the downstream form: EIO "could not read blocks ... in base/5/16399")
+
+CONCLUSION — the corruptor is NOT a use-after-free / backward-overflow of ANY of the five
+  ZFS metadata caches (abd_chunk, dbuf, arc_buf_hdr full/l2only, dbuf_dirty_record). Those
+  are CLEAN. The wild write lands in the OSv PHYSICAL PAGE ALLOCATOR's free-list metadata:
+  memory::page_range_allocator's boost::intrusive list of page_range free nodes is
+  clobbered, so page_pool::l2::refill() walks a corrupted node and the intrusive-list
+  invariant assert trips. i.e. something writes into a FREED/foreign page_range (or the
+  page-pool free list) — a page-granularity wild write, not a kmem_cache object.
+
+NEXT DIRECTION (narrowed): stop chasing ZFS kmem caches. Point the catcher at the page
+  allocator instead:
+   - guard/poison page_range free nodes in core/mempool.cc (page_range_allocator free path)
+     — this is where the corruption is OBSERVED, so a quarantine/poison there will catch the
+     writer at the moment it clobbers a free page_range (WALL3_FREE_GUARD in mempool.cc
+     already validates pool page_header owner/cpu at pool::free — extend that to the
+     page_range free list).
+   - the abd_chunk cache uses PAGE_SIZE objects backed by whole pages; the ZFS write path's
+     wild write is most likely into a PAGE it already returned to the page allocator (a
+     page-level UAF), which is why an object-level kmem quarantine never sees it — the page
+     is freed to the page_pool, re-handed to page_range_allocator, and THEN written.

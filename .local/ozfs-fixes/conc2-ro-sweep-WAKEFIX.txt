@@ -1,0 +1,1 @@
+2026-08-01 16:47:45.941 UTC [2] LOG:  database system is ready to accept connections

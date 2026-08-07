@@ -1,0 +1,125 @@
+=== fork same-VA COW stack: kernel-stack coherence work ===
+Author: Greg Burd. Instance i-0a484738c0b4a45ca (m5d.metal, us-east-2).
+Branch wip/fork-stage2 (gburd/osv-1).  All work gated behind CONF_fork.
+
+===========================================================================
+SUMMARY
+===========================================================================
+MILESTONE (tst-fork-deep passing with COW isolation): NOT YET ACHIEVED.
+DELIVERED & COMMITTED: Option A (heap-allocated wait_record for fork-child
+threads) -- a correct, necessary prerequisite, PROVEN to fix a real cross-AS
+crash, zero regressions.  tst-fork 10/10 PASS, tst-fork-cow 6/6 PASS.
+The same-VA COW stack itself is implemented and PRESERVED as patches (see
+below) but hits a not-yet-root-caused parent-stack corruption; it is NOT on
+the branch tip, so the tip stays green.
+
+===========================================================================
+STEP 0 -- BASELINE (biased-copy stack, HEAD 8b367d00)
+===========================================================================
+  tst-fork       PASS (10/10)
+  tst-fork-cow   PASS (6/6, COW private+shared proven)
+  tst-fork-deep  FAIL: child passes fork() then crashes in the 12-frame unwind:
+                   PASS: fork() deep in the call chain returned child pid
+                   Aborted; [backtrace] handle_mmap_fault <- vm_fault <- page_fault
+                 == the biased-copy stack bias corrupts deep unwinds.  Confirmed.
+
+===========================================================================
+STEP 1 -- OPTION A: heap wait_record for fork children  (COMMITTED 8ed1e42a)
+===========================================================================
+WHY: OSv has no separate kernel stack; the mutex/condvar wait_record is a LOCAL
+on the waiter's stack (core/lfmutex.cc mutex::lock, core/condvar.cc condvar::wait).
+With a per-child COW address space, a wait_record queued on a SHARED kernel
+mutex/condvar sits at a VA that maps to a DIFFERENT physical page per AS, so a
+cross-AS thread that walks the queue dereferences the wrong physical page ->
+null/garbage -> crash.
+
+PROVEN: with the same-VA stack enabled and Option A OFF, the CHILD crashes in
+condvar::wake_all()+104 (null deref) walking the PARENT's on-stack wait_record
+through the child's page tables.  With Option A ON that crash is GONE (the
+wr is heap-allocated in the AS-shared kernel heap -> coherent cross-AS).
+
+WHAT: wait_record.hh adds fork_child_needs_heap_wait_record() + a
+coherent_wait_record RAII holder (on-stack fast path for the common case,
+aligned_new heap allocation for fork children -- wait_record is CACHELINE_ALIGNED
+so aligned_new is required).  lfmutex.cc / condvar.cc use it.  Gated CONF_fork.
+The committed predicate keys off "current thread AS != AS0" (self-contained).
+NOTE: the same-VA work (below) generalizes this to "any fork child exists"
+(mmu::fork_children_exist(), a refcount) because with same-VA the PARENT's
+stack is also aliased across ASes, so AS0 threads need heap wait_records too.
+
+VALIDATED: tst-fork 10/10 PASS, tst-fork-cow 6/6 PASS.  No regression.
+
+===========================================================================
+STEP 2 -- SAME-VA COW STACK  (implemented, PRESERVED as patches, NOT on tip)
+===========================================================================
+Design implemented:
+  * arch/x64/fork.cc: child resumes on the parent's EXACT rsp -- no copy, no
+    bias.  Trampoline reproduces fork()'s epilogue (leave; ret):
+        rbp = [caller_sp]; rsp = caller_sp + 16; jmp caller_ret
+    (restoring the caller's frame pointer, not just rsp -- verified against
+    fork()'s real prologue: push rbp; mov rsp,rbp; ret-addr at [rbp+8]).
+  * core/mmu.cc: the forking thread's stack becomes a PRIVCOPY range (not
+    shared): clone_pt_level0 installs the child's copy COW (parent left
+    untouched/writable -- never write-protect a live stack, that would fault
+    the irqs-off context switch), and privatize_child_range() EAGERLY copies
+    each child COW stack page to a fresh private page BEFORE the child runs
+    (from fork(), preemptable -- alloc_page may reschedule), so no lazy COW
+    fault ever fires on the child's stack in the irqs-off context switch.
+    Verified: privatize copies exactly 0x100 = 256 pages = the full 1 MB stack.
+  * include/osv/mmu.hh: declares privatize_child_range.
+  * live_child_as_count + fork_children_exist() drive Option A's predicate.
+
+RESULT with same-VA enabled:
+  - CR3 verified correct: child runs in its own AS (read_cr3 == pt_root_phys of
+    child AS); parent stays in AS0.
+  - Child stack isolation PROVEN: poisoning the child's private stack page
+    0x200000200000 with 0xCD did NOT appear at the parent's stack slot -> parent
+    and child do NOT share the physical stack page.
+  - tst-fork-deep: child gets PAST fork(), further into the deep unwind than
+    the biased-copy baseline, but still SIGSEGVs in the unwind
+    (handle_mmap_fault) on a corrupted frame -- the leave;ret fix improved it
+    ("null pointer" -> mmap fault) but did not fully resolve deep fidelity.
+  - tst-fork (shallow) REGRESSES under same-VA: the PARENT, waking from
+    condvar::wait() in wait_child, reads a CORRUPTED user_mutex from its own
+    AS0 stack slot (&user_mutex = 0x200000200df8) and faults in
+    lockfree::mutex::receive_lock() storing owner to that garbage pointer.
+
+THE UNRESOLVED BUG (precisely characterized for the next session):
+  The PARENT (tid 0x1c, address_space == AS0/kernel_as) enters condvar::wait
+  with a VALID user_mutex (&g_lock, 0x408c25e0), blocks in wr.wait(), and on
+  WAKE the on-stack slot holds garbage 0x1fa0037f2xxx (high bits 0x1fa0037f2
+  CONSTANT across runs, low 12 bits vary run-to-run).  Established:
+    * NOT stack aliasing (poison test: child's private phys != parent's phys).
+    * NOT the COW machinery (persists with COW disabled / share-all).
+    * NOT a CR3 mismatch (parent stays in AS0; child in child AS).
+    * NOT the resume convention (persists with the leave;ret rbp fix).
+  I.e. SOMETHING writes 0x1fa0037f2xxx directly into the PARENT's AS0 physical
+  stack page while it is blocked.  Only the parent itself or kernel code on the
+  parent's behalf (scheduler context save / FPU xstate / wait-morphing) can
+  reach that physical page.  The constant-high / varying-low pattern smells like
+  a torn or misaligned 8-byte write (a real pointer's low half over a stale
+  high half).  Leads to chase next:
+    1. Instrument the wait-morphing path (condvar::wake_all -> send_lock, and
+       wake_with_from_mutex) -- does waking the parent write through a stale
+       heap-wr pointer into the parent frame?
+    2. FPU/xstate save on context switch (arch-switch.hh saves fpucw/mxcsr;
+       a diagnostic run showed a spurious simd_exception in
+       reschedule_from_interrupt) -- verify the parent's FPU save area / stack
+       redzone is not clobbered by the same-VA child's kernel execution.
+    3. Add a hardware watchpoint (gdb, qemu -s) on 0x200000200df8 in AS0 to
+       catch the exact writer.
+
+===========================================================================
+PRESERVED ARTIFACTS (git bundles + patches on /tmp, also fetched off-box)
+===========================================================================
+  /tmp/fork-stage2-step0.bundle    origin/master..wip/fork-stage2 @ baseline
+  /tmp/fork-stage2-optA.bundle     .. @ Option A committed (branch tip)
+  /tmp/sameva-clean.patch          same-VA WIP vs Option-A tip (movq rsp resume)
+  /tmp/sameva-leaveret.patch       same-VA WIP + leave;ret rbp resume (closer)
+  /tmp/samevaWIP-full.patch        full same-VA incl. diagnostics
+  /tmp/diag-*.cc, /tmp/wip-diag*.patch   diagnostic snapshots
+Runner: /home/ec2-user/runtest.sh <test> [timeout]  (KVM disk boot bare.raw).
+Build:  docker container "osvbuild" (fedora:39), env conf_fork=1 ./scripts/build
+        fs=rofs image=tests -j$(nproc).
+
+CURRENT BRANCH TIP: 8ed1e42a (Option A).  GREEN: tst-fork 10/10, tst-fork-cow 6/6.

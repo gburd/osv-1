@@ -1,0 +1,198 @@
+================================================================================
+RO SCALING CEILING - box i-02f6e584754a0c39d (m5d.metal, 96 vCPU, 4x900G LOCAL NVMe, us-east-2)
+Substrate: #1458 tip 861be4908 (W1) + #1464 disperse-faster sched (512b2b2ec, cherry-picked)
+           + #1467 batch-wakeup (794fe0f0e, cherry-picked). Branch roceil-substrate 61678c51.
+PG18 default mmap (W1 fix, NO sysv), ZFS pgdata on local NVMe, tap0+vhost virtio-net (non-loopback).
+================================================================================
+
+*** FINDING 0 (BLOCKER, and it explains the whole "#1467 never measured" saga): ***
+#1467 batch-wakeup AS WRITTEN CRASHES under real TCP load on SMP.
+  BATCH=1 (OSV_NET_BATCH_WAKE=1, default): boots, PG "ready to accept", then on the
+    FIRST real TCP connection the guest faults:
+      Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault: 38)
+      [backtrace] page_fault <- ... <- tcp_input <- netisr_dispatch_src
+                  <- virtio::net::receiver()+842
+  BATCH=0 (per-packet, byte-identical to upstream path): boots + SERVES cleanly.
+    psql select 1 -> 1 ; inet_server_addr = 192.168.100.2 (REAL tap NIC, not loopback).
+
+ROOT CAUSE (drivers/virtio-net.cc net::receiver, batch path):
+  The batch path holds osv::rcu_read_lock across the ENTIRE drain loop INCLUDING the
+  slow path `(*_ifn->if_input)(_ifn, m_head)` (the non-fast-path packets go up the full
+  BSD stack: netisr_dispatch_src -> ip_input -> tcp_input). rcu_read_lock disables
+  preemption. tcp_input (and the stack it calls) can demand-fault a lazily-mapped page;
+  page_fault asserts sched::preemptable() -> abort.
+  The ORIGINAL per-packet path takes rcu_read_lock INSIDE classifier::post_packet() and
+  RELEASES it before returning, so the if_input slow path runs preemptable. #1467 widened
+  the lock scope over if_input and broke that invariant.
+
+  => This is the real reason every prior attempt to measure #1467's SMP payoff "wedged":
+     it was not an environmental wedge, it is #1467 crashing the guest on TCP under SMP.
+     #1467 CANNOT be landed or measured as-is. It needs a fix (below).
+
+*** FIX FOR #1467 (commit c1b921f49 on roceil-substrate, drivers/virtio-net.cc): ***
+Defer slow-path (non-classified) RX packets past the batch-wake rcu_read_lock.
+  - Collect non-fast-path mbufs into a std::vector<mbuf*> during the drain.
+  - Run them through (*_ifn->if_input)() AFTER wake_batch.flush()+rcu_read_lock.unlock(),
+    where the receiver thread is preemptable again.
+  - Fast-path (net_channel) packets unaffected; the IPI-coalescing batch win preserved.
+VALIDATED: BATCH=1 (fixed loader) boots, serves (select 1 -> 1), survives c16 RO
+  (24717 tps, 0 failed) - the exact concurrency that crashed pre-fix. NO preemptable assert.
+=> This is the missing piece that made #1467 unmeasurable. #1467 needs THIS fix folded in.
+
+*** PROFILE at c32 (collapsed), BATCH=0, SMP=32 (OSv sampler, 261557 samples): ***
+  99.38% sched::cpu::idle()
+   0.54% sched::cpu::do_idle()
+   ------ = 99.9% IDLE
+   0.04% SHA256_Update/yarrow (RNG entropy harvest - background)
+   0.01% sched::cpu::load_balance()
+   NO lock/malloc/tcp_input/net symbols anywhere.
+  => The RO collapse is NOT CPU-bound, NOT lock contention, NOT ZFS, NOT the net queue.
+     The guest is ~99.9% IDLE while tps has collapsed. tps = concurrency/latency holds
+     exactly (c32=32/0.0073s=4383; measured 4369). This is PURE round-trip LATENCY:
+     every backend spends its time BLOCKED waiting, not running. Need the wait profile +
+     blocked-backend backtraces to name WHAT they wait on.
+
+================================================================================
+*** ROOT CAUSE NAMED (full backtrace, all 32 backends identical): ***
+================================================================================
+The RO c8 ceiling / post-c8 collapse is a SINGLE GLOBAL MUTEX in the fork-coherent
+shared-anon page provider. Every PG backend page-fault on shared_buffers serializes here:
+
+  lockfree::mutex::lock  (this=0x600105e47a00  <- SAME lock addr for ALL backends)  lfmutex.cc:129
+   <- mmu::shared_anon_page_provider::shared_page   core/mmu.cc:1910  WITH_LOCK(reg->lock)
+   <- mmu::shared_anon_page_provider::map           core/mmu.cc:1940
+   <- mmu::populate::page                           core/mmu.cc:1274  (demand-fault shared_buffers)
+   <- mmu::map_range ... (page fault on the 8GB MAP_SHARED anon segment)
+
+STRUCTURE (core/mmu.cc:1869): shared_anon_registry = { mutex lock; std::unordered_map<VA,page> }
+  ONE global lock + ONE map for the whole process. Every fault on any shared_buffers page,
+  from any of the 32 backends, takes reg->lock even for the fast-path find(). Under
+  concurrency all backends serialize on this one lock -> tps = concurrency/latency, ~99.9%
+  idle (backends BLOCKED on the mutex, not spinning, not CPU-bound).
+
+EVIDENCE:
+  - gdb osv info threads (c32, load running): 32 pgbench backends ALL "waiting" at
+    core/lfmutex.cc:129 (lockfree::mutex::lock slow path), crammed onto cpu0/1/2.
+  - all 4 sampled backend backtraces IDENTICAL: blocked on lock 0x600105e47a00 in
+    shared_anon_page_provider::shared_page.
+  - sampler: 99.9% idle (they block, don't spin).
+  - tps=c/latency holds exactly; latency grows with c (serialized resource).
+
+WHY IT PINS AT c8 REGARDLESS OF vCPU COUNT (8/32/48):
+  The lock is global; contention on it does not scale with cores. ~8 concurrent faulters
+  saturate the lock's throughput (acquire/release + the alloc/find under it); beyond that
+  they queue and latency climbs linearly -> knee at ~c8 on any core count. Adding vCPUs
+  just adds idle CPUs (nothing to run - everyone's blocked on the one lock).
+
+WHY #1467 BATCH-WAKEUP DOES NOT LIFT IT (measured, below): the ceiling is a shared-memory
+  page-fault mutex, NOT the net RX wake path. Coalescing wake IPIs cannot help a workload
+  serialized on a mmu lock. (#1467 is still a valid net optimization + its preemptable bug
+  is a real fix, but it is not THIS bottleneck.)
+
+This is CONF_fork-specific (shared_anon_page_provider exists only for the PG fork stack).
+
+================================================================================
+*** FIX (commit 6fe44f097): shard the shared-anon registry lock (256 shards) ***
+================================================================================
+RO sweep BEFORE vs AFTER the shard fix (BATCH=0, SMP=32, same box/config):
+  c      single-lock    sharded(256)   delta
+  1      14671          14318          ~0 (noise)
+  8      77109 (peak)   86457 (peak)   +12%
+  16     22811          34874          +53%
+  32     4048           29789          +636%
+  48     1240           28660          +2212%
+=> THE COLLAPSE IS GONE. Was 77k->1.2k (17x collapse c8->c48); now holds ~29-35k
+   flat from c16 to c48. The c8-peak-then-collapse signature is eliminated by
+   removing the single-global-lock serialization. Latency no longer explodes
+   (c48: 38.7ms -> 1.68ms). This is the root-cause fix (validated by profile +
+   before/after curve), NOT a symptom patch.
+RESIDUAL: past c16 it plateaus ~29k rather than climbing to the core count -> a
+   SECONDARY bottleneck now dominates (re-profile). But the dominant ceiling that
+   pinned RO at c8 is fixed.
+
+================================================================================
+*** #1467 BATCH-WAKEUP A/B (definitive, on the SHARD-fixed substrate, SMP=32): ***
+================================================================================
+  c    BATCH=0(shard)   BATCH=1(shard)   delta
+  1    14318            13751            -4% (noise)
+  8    86457            84971            -2% (noise)
+  16   34874            34326            ~0
+  32   29789            30395            +2% (noise)
+  48   28660            27282            -5% (noise)
+=> #1467 batch-wakeup makes NO measurable difference at any concurrency (within
+   run-to-run noise). It does NOT lift the c8 peak and does NOT move the knee.
+   CONCLUSION: the RO ceiling is NOT the net RX wake path; #1467 targets a path
+   that was never the bottleneck for this workload. (The earlier "wake-round-trip
+   latency residual" hypothesis is REFUTED as the dominant cause -- the latency
+   was the shared-anon-registry mutex, not the wake path.)
+   #1467's own preemptable-assert bug IS a real fix worth landing (it crashes on
+   SMP under TCP without it), but batch-wakeup is a net micro-opt, not the fix
+   for the RO scaling ceiling.
+
+*** RESIDUAL after the shard fix (c48, SMP=32, BATCH=0): ***
+  - PG backends no longer block on any mutex (was: lfmutex; now: sched::thread::switch_to
+    = the normal recv() request/reply block).
+  - sampler: still ~96.5% IDLE at c48 -> still latency-bound, NOT CPU-bound.
+  - placement: 53 of 54 backends clustered on cpu0-3 (blocked-in-recv backends wake on
+    the waker/receiver CPU). tps=c/latency holds (c48 48/0.00168=28571, measured 28660).
+  => The secondary limit is the per-request network round-trip latency + backend clustering
+     on the few CPUs the single virtio-net receiver wakes them onto (the ORIGINAL conc2
+     "round-trip latency / single RX receiver" residual, now the dominant term once the
+     mmu lock is gone). #1467 batch-wakeup was aimed here but measurably does not help
+     (the wake IPI coalescing is not the gate; the gate is the round-trip + placement).
+     Pushing past ~29k needs either multiple RX receivers spreading wakes across CPUs, or
+     wake-onto-idle-CPU steering. Named; a larger change, and a SEPARATE axis from the
+     RO-collapse fix (which is done).
+
+================================================================================
+*** VALIDATED RO CURVE (shard fix) + closeness to Linux ***
+================================================================================
+SMP=48, BATCH=0 (shard fix), m5d.metal local-NVMe ZFS, tap+vhost (non-loopback):
+  c1=12055  c8=84532(peak)  c16=34490  c32=30953  c48=28051  c64=26313  (0-failed all)
+SMP=32 essentially identical (c8=86457, plateau ~29k) -> the plateau is NOT core-limited.
+Host during c48: 98% idle, qemu=152% (1.5 cores of 96), pgbench negligible -> the plateau
+  is NOT driver/host-CPU-limited; the guest is ~96% idle -> pure round-trip-latency ceiling.
+
+VS the DEFINITIVE local-NVMe A/B (agent 1a0fdcb5, plain 861be4908, NO shard fix, NO #1464):
+  OSv RO: c8=58085(peak) c16=13066 c32=2930 c48=1509 c64=1006  <- collapsed
+  Linux  : c1=10644 c8=86693 c16=141201 c32=183774 c48=181100 c64=177878 (flat plateau)
+OSv NOW (shard fix): c8=85k (≈ Linux c8 86.7k = ~98% of Linux AT THE PEAK), then plateaus
+  ~29k vs Linux ~183k at c32 (OSv ~16% of Linux at scale).
+=> THE COLLAPSE IS ELIMINATED (c32 2930->30953 = 10.5x; c48 1509->28051 = 18.6x; c64
+   1006->26313 = 26x). OSv now MATCHES Linux at the c8 peak (~85k vs ~87k) and holds a
+   flat ~29k plateau instead of collapsing. Remaining gap to Linux at scale (29k vs 183k,
+   ~6x) is the round-trip-latency/placement residual (single virtio-net RX receiver wakes
+   backends onto a few CPUs; guest 96% idle). Closing THAT is a separate, larger change
+   (multi-receiver / wake-onto-idle steering) - named, not in scope of the lock fix.
+================================================================================
+
+================================================================================
+*** PR ROUTING ***
+================================================================================
+Two fixes produced (both signed later by user; committed here unsigned on roceil-substrate):
+
+1. mm: shard shared-anon registry lock  (commit 6fe44f097, core/mmu.cc)
+   -> ROUTES TO #1458 (integ/pg-fork-zfs). The shared_anon_page_provider +
+      shared_anon_registry are ENTIRELY under #if CONF_fork (core/mmu.cc:1843).
+      conf_fork=0 byte-neutral (no code outside the CONF_fork block changes).
+      THE headline fix: eliminates the RO scaling collapse.
+   Base: #1458 tip 861be4908. Bundle: .local/ozfs-fixes/roceil-mmu-shard.bundle
+
+2. net: defer slow-path RX past the batch-wake rcu_read_lock  (commit c1b921f49, drivers/virtio-net.cc)
+   -> FOLD INTO #1467 (pr/net-batch-wakeup, standalone master PR). It fixes a
+      REAL bug in #1467 as-merged: the batch path held rcu_read_lock across
+      if_input() -> page_fault under non-preemptable -> guest aborts on the first
+      non-fast-path TCP packet on SMP. Without this, #1467 CANNOT be enabled.
+   NOTE: the batch-wakeup A/B shows NO throughput benefit for the PG RO workload
+      (the ceiling was the mmu lock, not the wake path). So #1467's *value* is now
+      in question: it is correct+safe WITH this fix, but its measured payoff is nil
+      on this workload. Recommend either (a) fold the preemptable fix and keep #1467
+      as a latent net micro-opt (default OFF until a workload shows payoff), or
+      (b) hold #1467 - it does not fix the RO ceiling (the shard fix does).
+   Base: master ae077860c (#1467 base). The fix rebases onto 794fe0f0e.
+
+MEASUREMENTS FOR #1467 (to add to the PR): batch-wakeup A/B on a stable SMP=32
+   substrate (this box, real tap+vhost, PG RO) = NO measurable lift at c1/8/16/32/48
+   (within noise). The prior "SMP wedge blocked measurement" was actually #1467's
+   preemptable-assert crash (fix #2), NOT an environment wedge.
+================================================================================

@@ -1,0 +1,109 @@
+FORKSYM: fork symbol-lookup wall (next HammerDB blocker after the GOT-slot fix)
+============================================================================
+Author: Greg Burd    Base: #1458 integ/pg-fork-zfs tip 8d775cc01 (GOT-slot fix)
+Commit: 5761ed02c (bundle: .local/ozfs-fixes/forksym-fix.bundle, base..HEAD)
+Branch to push to: #1458 integ/pg-fork-zfs (re-sign 5761ed02c, my key)
+
+RESULT: box-id (ouch): i-0b9306ce8531222c3  TERMINATED + all 5 EBS deleted
+        (ouch account was expiring; verified InvalidVolume.NotFound on all vols).
+RESULT: cracker box: NOT launched. Fix was completed + A/B-proven + committed
+        LOCALLY (m5d workstation, qemu 10.2.2 + KVM + fedora39 osv/builder-fork
+        container) before cracker unblocked; a metal box adds nothing to the
+        mechanism proof and only helps the (fragile) full-HammerDB e2e, which I
+        did not stand up (see HONEST CAVEAT). No orphan left on either account.
+
+RESULT: faulting symbol / lookup path
+  The lazy PLT resolver path a forked child runs is:
+    __elf_resolve_pltgot -> elf::object::resolve_pltgot(index)
+      -> object::symbol(idx)             (core/elf.cc)
+        -> program::lookup(name, this)   (iterate modules_get() list)
+          -> module->lookup_symbol(name) (GNU-hash walk of each object)
+    on a null result: abort("%s: failed looking up symbol %s") at elf.cc:729.
+  Target symbols (from the prior wave, verified as genuine kernel exports in
+  loader.elf .dynsym: T sem_wait@0x403f6520, T pwritev, T preadv; postgres has
+  them as normal UND refs). postgres is a lazy-binding PIE (no BIND_NOW), 266
+  JUMP_SLOT PLT entries, so a forked backend that first-calls sem_wait/preadv/
+  pwritev resolves them IN THE CHILD's COW address space.
+
+RESULT: root cause (what is fork-fragile)
+  The whole LAZY-PLT-resolution-across-fork path is the hazard, of which the
+  symbol-lookup failure is the second facet (the GOT-slot NULL-deref fixed in
+  8d775cc01 is the first).  When a forked child is the FIRST to resolve a PLT
+  slot, it runs the resolver in its own COW AS; the resolver touches shared
+  linker state (the GOT page, the module/symbol-lookup structures) that is not
+  guaranteed coherent across the COW fork boundary.  8d775cc01 fixed the
+  GOT-page residence + the _used_by_resolve_plt_got set-node heap; the
+  symbol-lookup facet remained because a child was still ENTERING the resolver.
+  I confirmed by instrumentation (see A/B) that forked children DO run the lazy
+  resolver 100s of times under fork load; every such entry is a fork-coherence
+  hazard.  I could NOT reproduce an actual "not found" abort with minimal tests
+  (a small binary's whole .dynsym/.gnu.hash/GOT is resident, so its child
+  resolver never hits a non-resident/incoherent structure) -- exactly the size
+  dependence the GOT-slot facet also had. The correct-by-construction fix is to
+  stop the child from entering the resolver at all.
+
+RESULT: the fix (laziest correct, CONF_fork-gated)
+  core/elf.cc object::relocate_pltgot(): under CONF_fork force bind_now=true, so
+  every PLT jump slot is EAGERLY resolved in AS0 at LOAD time, before any fork.
+  Consequences:
+    - No forked child ever runs elf::object::resolve_pltgot / program::lookup
+      => both fault facets (GOT-slot NULL-deref AND symbol-lookup "not found")
+      are removed by construction, not merely patched.
+    - Each eager resolution WRITES the GOT slot -> the page becomes anonymous +
+      resident -> clone_address_space() COW-shares the RELOCATED contents.
+    - It runs inside relocate_pltgot(), BEFORE fix_permissions() write-protects
+      the RELRO segment, so the slot writes never hit a read-only page (the
+      failure an earlier POST-fork eager-bind attempt hit at 0x100000031e00).
+  Uses the pre-existing bind_now code path in relocate_pltgot() (with
+  symbol(sym, /*ignore_missing=*/true), so an unresolvable slot is left lazy,
+  never aborts at load) -- a 1-line behavioral change under #if CONF_fork.
+
+  SUPERSEDES / MERGES with 8d775cc01: this supersedes the mmap_populate-of-
+  writable-segments half (the bind-now writes already pin the GOT resident) and
+  is complementary to its identity-heap _used_by_resolve_plt_got insert (that
+  now only matters for objects dlopen'd AFTER the first fork -- rare, but kept).
+  A reviewer MAY drop the mmap_populate half for minimalism; I left it as a
+  cheap belt-and-suspenders for .data.rel.ro pages bind-now does not touch.
+
+RESULT: repro-clean + validation (m5d local KVM, x64, conf_fork=1)
+  A/B mechanism proof (temporary trace counting forked-child lazy resolutions):
+                              WITHOUT bind-now   WITH bind-now (fix)
+    tst-fork-pltgot                 102                  0
+    tst-fork-symlookup              263                  0
+    tst-fork-vislookup              681                  0
+  => the fix eliminates 100% of forked-child lazy resolver entries.
+
+  New tests (added in this commit):
+    tst-fork-symlookup: heavy CONCURRENT fork (6 rounds x 32 children live at
+      once), each child first-resolves a WIDE symbol set incl. sem_wait /
+      sem_post / preadv / pwritev, plus a resolver-pressure pthread. PASS smp4+8.
+    tst-fork-vislookup: a shared lib (libforksym.so, 64 exported fns) LINKED as
+      a dependency; forked children (from main AND from a pthread) first-resolve
+      its PLT symbols. PASS smp4+8.
+    tst-fork-pltgot (existing): PASS smp4+8.  tst-fork: PASS smp4+8.
+  Boot: 10/10 (tst-hello, smp4).
+
+  conf_fork=0 BYTE-IDENTICAL guarantee: rebuilt core/elf.o with a genuinely
+  regenerated conf_fork=0 config for BOTH 8d775cc01 and this commit. The .o
+  differs ONLY in 11 `mov $imm,%edx` immediates, each shifted by exactly 0x19
+  (=25, the number of added #if CONF_fork lines) -- i.e. __LINE__ constants fed
+  to assert/abort. ZERO real code differences. Same standard as 8d775cc01.
+
+HONEST CAVEAT (must close later):
+  - The minimal tests PASS on BOTH clean and fixed kernels (tiny binaries keep
+    their whole GOT/.dynsym resident, so their child resolver never hits the
+    non-resident/incoherent window). The discriminating evidence is the A/B
+    resolver-entry COUNT (100s -> 0), not a crash->clean flip, plus the fact
+    that the fix removes the child resolver path entirely.
+  - I did NOT run the full PostgreSQL18 + OpenZFS + HammerDB image e2e. The full
+    ZFS build failed in the fresh tree (openzfs needs its generated
+    sys/byteorder.h etc. that the bare submodule lacks); AL2023 has no packaged
+    qemu; and the pg18-fork app image is the multi-hour fragile path prior
+    agents burned days on. A LATER agent WITH the real pg18-fork+ZFS+HammerDB
+    image should confirm the stats/monitor phase + a TPROC-C run complete with 0
+    symbol-lookup faults. Given the fix removes the lazy resolver path by
+    construction (0 child resolutions proven), this is expected to hold, but the
+    HammerDB-unblocked claim is MECHANISM-proven, not e2e-proven.
+
+pgbench -c8: not run (no PG image stood up on a box); the fix is in the ELF
+loader path and is filesystem/DB-independent.

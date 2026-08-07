@@ -1,0 +1,27 @@
+#!/bin/bash
+set -eu
+HOST_ENI=enp126s0
+HOST_IP=172.31.30.29
+BR=br0; TAP=tap0; BR_IP=192.168.100.1; GUEST_IP=192.168.100.2; PGPORT=5432
+if ! ip link show "$BR" >/dev/null 2>&1; then
+  sudo ip link add name "$BR" type bridge
+  sudo ip addr add "$BR_IP/24" dev "$BR"
+fi
+sudo ip link set "$BR" up
+if ! ip link show "$TAP" >/dev/null 2>&1; then
+  sudo ip tuntap add dev "$TAP" mode tap user root
+  sudo ip link set "$TAP" master "$BR"
+fi
+sudo ip link set "$TAP" up
+sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sudo iptables -t nat -D PREROUTING -i "$HOST_ENI" -p tcp --dport "$PGPORT" -j DNAT --to-destination "$GUEST_IP:$PGPORT" 2>/dev/null || true
+sudo iptables -t nat -A PREROUTING -i "$HOST_ENI" -p tcp --dport "$PGPORT" -j DNAT --to-destination "$GUEST_IP:$PGPORT"
+sudo iptables -t nat -D OUTPUT -d "$HOST_IP" -p tcp --dport "$PGPORT" -j DNAT --to-destination "$GUEST_IP:$PGPORT" 2>/dev/null || true
+sudo iptables -t nat -A OUTPUT -d "$HOST_IP" -p tcp --dport "$PGPORT" -j DNAT --to-destination "$GUEST_IP:$PGPORT"
+sudo iptables -t nat -D POSTROUTING -s "$GUEST_IP/32" -o "$HOST_ENI" -j MASQUERADE 2>/dev/null || true
+sudo iptables -t nat -A POSTROUTING -s "$GUEST_IP/32" -o "$HOST_ENI" -j MASQUERADE
+sudo iptables -D FORWARD -o "$BR" -j ACCEPT 2>/dev/null || true
+sudo iptables -A FORWARD -o "$BR" -j ACCEPT
+sudo iptables -D FORWARD -i "$BR" -j ACCEPT 2>/dev/null || true
+sudo iptables -A FORWARD -i "$BR" -j ACCEPT
+echo "br0 up host=$BR_IP guest=$GUEST_IP DNAT $HOST_IP:$PGPORT->$GUEST_IP:$PGPORT"

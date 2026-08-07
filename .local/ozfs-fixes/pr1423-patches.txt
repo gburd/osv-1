@@ -1,0 +1,102 @@
+================================================================================
+PR #1423 (branch pr/openzfs-draft) -- route OpenZFS patches 0028 + 0029
+Validation report  --  Sun Jul 26 15:35:56 UTC 2026
+Build host: m5.4xlarge ec2-user@18.222.90.243, docker fedora:39, -j16
+================================================================================
+
+1. CHERRY-PICK ONTO #1423  --  CLEAN (only the 2 patch files, no fork/kernel code)
+--------------------------------------------------------------------------------
+Base (#1423 tip)   : 0f65cdb191277c8c182dab857caa13c592c9dee7  (has patches 0001..0027)
+Cherry-picked from : combined/integ/pg-fork-zfs
+  3fa243d1 -> 096c960d  patch 0028 (refresh OSv vnode v_size after write)
+  3f20fef4 -> 31eb55f3  patch 0029 (zfs_write_simple + zfs_space for ZIL replay)
+New tip            : 31eb55f39210cfc086144910b79ef9920233e61f
+
+Full diff 0f65cdb19..HEAD -- ONLY two new patch files, +218 lines:
+ ...-zfs-refresh-osv-vnode-v_size-after-write.patch |  57 ++++++++
+ ...write_simple-and-zfs_space-for-ZIL-replay.patch | 161 +++++++++++++++++++++
+ 2 files changed, 218 insertions(+)
+
+Both cherry-picks applied cleanly; each commit adds exactly ONE new file under
+modules/open_zfs/patches/ and touches nothing else (no fork / CONF_fork / kernel
+source). Series tail (ordered 0027, 0028, 0029):
+0026-zfs-enforce-the-readonly-property-on-OSv.patch
+0027-zfs-advertise-TRIM-support-on-OSv-vdev_disk.patch
+0028-zfs-refresh-osv-vnode-v_size-after-write.patch
+0029-zfs-implement-zfs_write_simple-and-zfs_space-for-ZIL-replay.patch
+Total patches in series: 29  (0001..0029)
+
+2. OPENZFS MODE BUILD  --  PATCHES APPLY + libsolaris.so BUILDS  (PASS)
+--------------------------------------------------------------------------------
+Cmd: ./scripts/build image=empty fs=zfs conf_zfs=openzfs -j16
+(image=native-example is a separate app submodule not present in this clone;
+ image=empty is the minimal image that still links the full kernel + patched
+ OpenZFS libsolaris.so, a strict proof the patches apply + compile.)
+
+Pinned OpenZFS submodule: modules/open_zfs/openzfs @ 6330a45b (zfs-2.4.2) -- unchanged.
+
+Patch-apply proof:
+ - The Makefile top-block (guarded by conf_zfs=openzfs) runs
+     git -C modules/open_zfs/openzfs apply --whitespace=nowarn <all 29 patches>
+   and only touches the stamp on success. After the build the stamp exists:
+     STAMP-CREATED  (.osv-patches-applied present)
+   => the full series 0001..0029 (incl new 0028 + 0029) applied cleanly,
+      no "patch does not apply", no .rej files.
+ - Independent check: applying the sorted series in one pass to a pristine
+     6330a45b tree succeeds and the new hunks land:
+       0028 v_size refresh  -> zfs_vnops_os.c lines 725, 856
+       0029 zfs_write_simple -> calls zfs_write ; zfs_space -> calls zfs_freesp
+ - numstat excerpt (whole series; 0028/0029 hunks on zfs_vnops_os.c):
+1	0	include/os/osv/zfs/sys/zfs_vfsops_os.h
+20	1	module/os/osv/zfs/zfs_vfsops.c
+24	0	module/os/osv/zfs/zfs_vnops_os.c
+16	0	module/os/osv/zfs/vdev_disk.c
+9	0	module/os/osv/zfs/zfs_vnops_os.c
+86	5	module/os/osv/zfs/zfs_vnops_os.c
+error: module/os/osv/zfs/zfs_vfsops.c: No such file or directory
+
+libsolaris.so (patched OpenZFS kernel) BUILT: 16238608 bytes.
+Patched code compiled in (objdump build/release.x64/libsolaris.so):
+  zfs_space        -> call <zfs_freesp>   (patch 0029: was ENOTSUP stub)
+  zfs_write_simple -> call <zfs_write>    (patch 0029: was ENOTSUP stub)
+  zfs_vop_write / zfs_write_simple set vp->v_size = zp->z_size (patch 0028)
+
+Build linked ALL artifacts and BOOTED under QEMU with OpenZFS:
+  LINK loader.elf / zfs_builder.elf / lzloader.elf / zpool.so / zfs.so
+  loader.elf = 71190760 bytes ; usr.img = 7733248 bytes ; loader.img built
+  Boot: "OSv v0.57.0-394-g31eb55f3"
+        "ZFS: OpenZFS 5000 initialized"
+        "ZFS: root mounted ok, z_root=34"
+Only non-success was the trailing mkfs manifest-upload (upload_manifest.py over
+a localhost socket) -- a container-networking harness limitation, NOT a
+build/patch failure; identical in bsd mode and AFTER compile+link+boot complete.
+
+3. BSD MODE BUILD (regression -- must be unaffected)  (PASS)
+--------------------------------------------------------------------------------
+Cmd: ./scripts/build image=empty fs=zfs -j16   (default conf_zfs=bsd)
+ - Builds clean; boots "OSv v0.57.0-394-g31eb55f3" (NO "OpenZFS 5000" banner --
+   uses legacy in-tree BSD ZFS).
+ - libsolaris.so = 4487568 bytes (BSD ZFS kernel; distinct from openzfs 16MB).
+ - zfs_write_simple symbol count in bsd libsolaris.so: 0 (openzfs-only fn absent).
+ - Same trailing upload_manifest.py harness step; compile+link+boot complete.
+The new patches are applied ONLY by the conf_zfs=openzfs Makefile block, so the
+bsd build never touches them -- structurally unaffected.
+
+4. ORDERING / CONFLICTS  (PASS)
+--------------------------------------------------------------------------------
+ - 0028 and 0029 sort after 0027 and are the last two.
+ - Both modify module/os/osv/zfs/zfs_vnops_os.c (created by 0001, extended by
+   0003/0004/0005...); applied cumulatively they do not conflict with each other
+   or with 0001..0027 (whole-series apply succeeded + stamped).
+
+5. BUNDLE
+--------------------------------------------------------------------------------
+git bundle create /tmp/pr1423-patches.bundle 0f65cdb19..HEAD
+  contains ref : 31eb55f3 (HEAD) -- patch commits 0028 + 0029
+  requires ref : 0f65cdb19       -- current #1423 tip pr/openzfs-draft
+  verify       : okay
+Scp path (floki): /tmp/pr1423-patches.bundle  (re-sign + push from floki).
+
+SUMMARY: cherry-pick clean (2 patch files only, no fork code). openzfs mode
+applies 0001..0029 cleanly (stamped), libsolaris.so builds with the new code
+compiled in, image boots with OpenZFS. bsd mode unaffected. Bundle ready.

@@ -1,0 +1,16 @@
+=== MSI-X vector-budget fix: -smp 48 boot A/B (deterministic) ===
+Host: 96-vCPU x86-64 metal, KVM, qemu 9.0.2. OSv upstream/master ae077860.
+Repro config (the original -smp48 crash): 8x virtio-blk-pci num-queues=48
+  + virtio-net-pci mq=on + virtio-rng, -smp 48.  8*48=384 blk vectors alone
+  >> 224 usable IDT vectors (32..255).
+
+STOCK master  (no fix): 3/3 boots ABORT in
+    interrupt_descriptor_table::register_interrupt_handler(...)+496
+  (exact crash from the diagnosis: MSI-X vector exhaustion at driver load).
+
+PATCHED (this PR): 5/5 boots reach ready (eth0 up, "Booted up").
+  reserve_msix_vectors() caps each device's interrupt-bearing queue count so
+  the total stays <=224; register_interrupt_handler() returns 0 instead of
+  aborting when full and callers degrade to fewer queues.
+
+Single-disk boot stability (patched): 10/10 at -smp 4, 16, AND 48.

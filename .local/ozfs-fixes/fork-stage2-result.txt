@@ -1,0 +1,94 @@
+OSv fork() Stage 2 — per-child address space with COW  (RESULT)
+================================================================
+Branch: wip/fork-stage2, rebased onto wip/feat-fork @ d6865168 (which gates fork behind CONFIG_fork).
+Instance: i-08daca98f002fbc21 (m5d.metal); container "osvbuild" (fedora:39, /dev/kvm). NOT terminated.
+Bundle: /tmp/fork-stage2.bundle (master/base..wip/fork-stage2). This file: /tmp/fork-stage2-result.txt.
+
+BUILD / RUN
+  fork ON:  ./scripts/build -j96 conf_fork=1 fs=rofs image=tests
+  default:  ./scripts/build -j96 fs=rofs image=tests            (conf_fork=0, fork=ENOSYS stub)
+  run:      multiboot: qemu -kernel build/last/loader.elf -append <test.so> + rofs usr.img disk.
+            (SeaBIOS MBR boot loops on this qemu 8.1.3; the -kernel multiboot path works.)
+  NOTE: the build env had a STALE kconfig cache; if kernel_config_fork.h is missing or CONF_fork
+        wrong, delete build/release.x64/.config .config.yes gen/config* gen/include/osv/kernel_config*.h
+        and rebuild (documented; not a code issue).
+
+COMMITS (on top of d6865168)
+  b074f2ae fork: GCC-13 build fix (extern "C" out of lambda body)
+  1e60296f mmu: address_space object (step 1)
+  5dd390bf sched: per-thread AS + CR3 switch on context switch (step 2)
+  6192f5d9 mmu/fork: COW clone-on-fork with per-child AS (step 3)
+  2b4ceaf2 gate all Stage 2 behind CONF_fork
+  ae8749ff wire conf_fork into kconfig; COW test proves private+shared
+  a905af53 share ALL live thread stacks on COW clone (fix irqs-off stack fault)
+  c818f541 execve() moves child back to global AS (fix fork+exec regression)
+  8b367d00 tests: tst-fork-deep (deep-call-chain stack-fidelity test)
+
+STEPS COMPLETED + VALIDATED
+  STEP 1 address_space object .......... DONE + VALIDATED (boot, tst-fork 10/10, no behavior change).
+  STEP 2 per-thread AS + CR3 switch .... DONE + VALIDATED (guarded; no-op in AS0; tst-mmap ok).
+  STEP 3 COW clone on fork ............. DONE + PROVEN.
+  STEP 4 only forking thread in child .. satisfied: child is a single OSv thread in the child AS;
+         sibling threads stay in the parent AS (their stacks shared, never entered by the child).
+  CONF_fork gating ..................... DONE + VALIDATED BOTH WAYS.
+
+*** THE STAGE 2 PROOF — tst-fork-cow (conf_fork=1): 0 failures ***
+  PASS COW: parent's private .data global UNCHANGED after the child wrote it   (private stays private)
+  PASS SHARED: child's write to a MAP_SHARED region IS visible in the parent   (shared stays shared)
+  Runs clean and repeatably (no residual assertion).  This is the memory-isolation contract stock
+  multi-process PostgreSQL needs: private backend heap/globals COW-isolated, shared_buffers shared.
+
+  tst-fork (conf_fork=1): 10/10 (fork return + private-stack, fork+exec, vfork, waitpid/ECHILD).
+
+CONF_fork=0 (default) VALIDATED: builds, boots, tst-mmap passes, fork()=ENOSYS stub;
+  `nm loader.elf` shows NO clone_address_space / current_pt_root / handle_cow symbols — the
+  address-space / CR3 / COW code is entirely absent. thread::switch_to() does NO CR3 check/write
+  (the CR3 reload is under #if CONF_fork). Byte-for-byte the old single-address-space model.
+
+HOW IT WORKS (x86-64)
+  address_space = a synthetic top PML4 entry -> a private PML4 page + own vma_list + mutex.
+  AS0 (kernel_as) aliases the global vma_list and the arch page_table_root.
+  clone_address_space(): child PML4 shares kernel slots (0, 128..511) verbatim; deep-copies app
+  slots (1..127); private-writable 4K leaves -> COW in BOTH parent and child; stack + MAP_SHARED
+  leaves kept shared+writable (never COW), tagged pte_shared so teardown won't free them.
+  ALL live thread stacks are put in the share-range (OSv runs kernel code, incl. the irqs-off
+  context switch, on the app stack, so a live stack must never be write-protected).
+  thread::switch_to() loads the child CR3 only when the target AS differs (guarded).
+  get_root_pt()/vm_fault resolve against the current thread's AS.  A COW write fault copies the
+  page privately for the faulting side (handle_cow_write_fault).  execve() returns the thread to
+  AS0 (exec discards the forked memory).  destroy_address_space() frees the child's private page
+  tables + COW-copied leaves; skips shared frames and kernel slots.
+
+DEEP-CALL-CHAIN / SAME-VA STACK  (honest status)
+  The current arch/x64/fork.cc still COPIES the child stack to a NEW virtual address and biases SP.
+  tst-fork-deep (NEW) forks 12 frames deep and makes the child unwind all the way up: under the
+  copy+bias model the child FAULTS during the deep unwind (saved rbp/&locals point at the parent
+  stack, off by the bias) -- this test DOCUMENTS the bias bug (tst-fork's shallow calls never hit it).
+
+  I implemented the same-VA COW stack (child resumes on the parent's EXACT rsp/rbp; the child AS maps
+  the parent's stack VAs to private copied pages via privatize_child_range()) and it removed the bias.
+  BUT it exposed a deeper OSv issue and was REVERTED to keep the proven state:
+    OSv has no separate kernel stack -- kernel code (e.g. child_exited()'s g_lock) runs on the app
+    stack.  With the forking thread's stack privatized same-VA, a shared kernel mutex's wait_record
+    (allocated on that stack) is at a virtual address that maps to DIFFERENT physical pages in the
+    parent vs child AS.  When parent and child contend on the shared g_lock, one dereferences the
+    other's wait_record through the wrong AS mapping -> lockfree::mutex::unlock() assertion.
+    Root cause: kernel wait-records live on per-AS-private thread stacks.  The correct fix is to run
+    the child's in-kernel lock operations on memory reachable identically in both AS (a real kernel
+    stack, or keep the forking thread's stack shared and give the child a private stack the kernel
+    never parks wait-records on).  This is a bounded but non-trivial follow-up; the copy+bias model
+    is retained for now (shallow fork/exec/vfork/COW all correct; deep unwind is the known gap).
+
+KNOWN GAPS (honest)
+  1. Deep-call-chain child unwind (tst-fork-deep) needs the same-VA stack; blocked on kernel
+     wait-records living on per-AS-private stacks (above).
+  2. mmap/munmap in a forked child still target the GLOBAL vma_list (execve sidesteps this by
+     returning to AS0).  A child that mmap()s before exec would mismatch; wire mmap to the current
+     AS's vma_list next.
+  3. app-installed TCB (arch_prctl SET_FS, glibc) still shared (musl-on-OSv path is clean).
+
+BOTTOM LINE
+  Per-child COW address space is implemented, gated behind CONF_fork (zero cost when off), and
+  PROVEN: a forked child's private memory stays private while MAP_SHARED stays shared (tst-fork-cow
+  0/0), with fork/fork+exec/vfork/waitpid all passing (tst-fork 10/10).  The remaining work is the
+  same-VA stack (needed for deep-call correctness / real PostgreSQL backends) and AS-aware mmap.

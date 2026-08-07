@@ -1,0 +1,218 @@
+================================================================================
+OSv + PostgreSQL 18 qualification report -- ZFS write-path walls
+================================================================================
+Date:   2026-07-27   Box: osv-qual (ec2-user@3.142.230.27, m5d.metal 96c/377GB,
+        4x local NVMe, KVM). Build: /build/osv @ integ/pg-fork-zfs tip 53579137
+        (== 535791372 the W-read fix) + taskq_wait fix (committed on floki as
+        51c147066). Author: Greg Burd.
+Method: single-file ZFS pool on local NVMe (/b/pgdata.raw, 60G), PG18.4 musl PIE,
+        io_method=sync, fsync=on, autovacuum=off, max_parallel_workers_per_gather=0.
+        pgbench driven in-container over hostfwd:5432. qemu -enable-kvm -cpu host.
+
+================================================================================
+HEADLINE (honest)
+================================================================================
+* W-read (catalog zero-page): VERIFIED FIXED (535791372 holds). 24 concurrent
+  cold-catalog readers + cold `pgbench -i` init: OK=24 FAIL=0, repeated. No
+  "unexpected zero page" / "type does not exist" reproduced. (evidence below)
+
+* W-arcwrite + W-lfmutex: ROOT-CAUSED and the PRIMARY cause FIXED. The reported
+  arc_write_done VERIFY3S(remove_reference,>,0)=0>0 and the lfmutex owner-mismatch
+  were the SAME root cause: OSv's taskq_wait() returned BEFORE all taskq workers
+  finished (8-worker system_taskq, but the old code enqueued ONE barrier task and
+  drained only that barrier -- a free worker ran the barrier while the other 7
+  were still mid dnode_sync/dbuf_sync). The syncing thread then raced the still-
+  running workers -> dbuf/dirty-record/refcount corruption. Fixed with
+  taskqueue_drain_all() (wait for the whole queue to quiesce = illumos semantics).
+  This removed the dnode-sync VERIFY corruption (progress went from crash@27% to
+  crash@76% on `pgbench -i -s 1000`).  Classification: [#1423 / OpenZFS] -- it is
+  a correctness bug in the OSv OpenZFS/Solaris compat layer that races the ZFS
+  sync engine regardless of fork (ZFS explicitly documents this taskq_wait
+  contract; see dmu_objset.c PORTING note).
+
+* A SECOND, DISTINCT wall remains OPEN and is NOT yet fixed: a ZFS write-pipeline
+  object-lifetime corruption in the txg_sync / zio-completion path under SUSTAINED
+  write. It is memory-pressure-sensitive and RACY (not deterministic by size).
+  OSv+PG is therefore NOT YET QUALIFIED for `pgbench -i -s 1000` sustained write.
+  Full gdb evidence + precise characterization below. Honest verdict: the
+  taskq_wait fix is necessary but NOT sufficient; one more wall stands.
+
+================================================================================
+WALL 1 -- W-read (catalog zero-page) : VERIFIED FIXED
+================================================================================
+Fix 535791372 (shared_anon_page_provider + registry, pte_shared teardown tag,
+anon_vma::update_shared_base) is present in this tree and HOLDS:
+
+  single conn: select '2024-01-01'::pg_catalog.timestamp -> 2024-01-01 00:00:00 (OK)
+  cold pgbench -i -s 10 COPY -> 1000000 of 1000000 tuples done (OK)
+  24 concurrent cold-catalog readers (pg_authid, pg_class, pg_statistic, timestamp
+    type), repeated 3x:
+      concurrent-24 result: OK=24 FAIL=0
+      concurrent-24 result: OK=24 FAIL=0
+      concurrent-24 result: OK=24 FAIL=0
+  No "unexpected zero page", no "type ... does not exist", guest alive throughout.
+
+================================================================================
+WALL 2 -- taskq_wait 8-worker-barrier bug : ROOT-CAUSED + FIXED  [#1423/OpenZFS]
+================================================================================
+ROOT CAUSE (gdb, symbolized against libsolaris.so @ 0x100000000000):
+  Under `pgbench -i -s 1000` the guest aborted in the ZFS sync taskqueue:
+    SPL PANIC dbuf.c:4976 VERIFY3U(dr->dr_dbuf->db_level == level)
+      <- dbuf_sync_list <- dbuf_sync_indirect <- dnode_sync <-
+         dmu_objset_sync_dnodes <- taskq_run (opensolaris_taskq.c:134)
+  i.e. a dirty record on the wrong level's sync list = dbuf-list corruption from
+  the syncing thread racing still-running dnode_sync taskq workers.
+
+  The old OSv taskq_wait (bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c):
+      TASK_INIT(&barrier,...); taskqueue_enqueue(tq, &barrier);
+      taskqueue_drain(tq, &barrier);       // waits ONLY for the barrier task
+  With system_taskq = taskq_create("system_taskq", 8, ...) (8 worker threads),
+  a free worker runs the lone barrier while the other 7 are still executing
+  earlier dnode_sync/dbuf_sync tasks -> taskq_wait returns EARLY. ZFS then reuses/
+  frees dirty records the workers are still touching. ZFS DOCUMENTS this exact
+  contract (module/zfs/dmu_objset.c ~L2841): "taskq_wait ... wait until no more
+  tasks are queued and no more tasks are active ... On platforms other than
+  illumos, taskq_wait may not have this property."
+
+THE FIX (committed as 51c147066 on gh-fork; equivalent in this tree):
+  bsd/sys/kern/subr_taskqueue.c : new taskqueue_drain_all(queue) -- waits until
+    tq_queue is empty AND tq_active is empty (no worker running any task), with a
+    wakeup(&tq->tq_active) added at the end of taskqueue_run_locked when the queue
+    goes idle. Correctly handles ZFS's recursive enqueue-from-within-a-task (the
+    enqueuing task is itself still "active", so tq_active never empties until the
+    whole recursion completes -- exactly the illumos property).
+  bsd/sys/sys/taskqueue.h : declare taskqueue_drain_all.
+  opensolaris_taskq.c : taskq_wait() now calls taskqueue_drain_all(tq->tq_queue)
+    (barrier trick + taskq_barrier_run removed).
+  No self-deadlock: the ZFS taskq_wait callers (dsl_pool_sync, dmu_objset_find,
+    spa_sync) run on threads that are NOT workers of the waited taskq.
+  Classification [#1423 / OpenZFS]: fixes OpenZFS-on-OSv correctness independent
+    of fork (a broken taskq_wait races the ZFS sync engine even single-process).
+  conf_fork unaffected (kernel taskqueue change, not fork-gated).
+
+EFFECT: the dnode-sync VERIFY corruption is gone; `pgbench -i -s 1000` progresses
+  from ~27% (pre-fix crash) to ~76% / completes at large RAM (see Wall 3).
+
+================================================================================
+WALL 3 -- ZFS write-pipeline lifetime corruption under sustained write : OPEN
+================================================================================
+After the taskq_wait fix, a SECOND class of crash remains. It is RACY (fires
+probabilistically, more likely with more write volume) and memory-pressure-
+sensitive. Multiple distinct SPL-panic / NULL-deref / preemptable-assert
+signatures, ALL in the txg_sync / zio-completion path, all under sustained write:
+
+ (a) txg_sync_thread, metaslab space_map flush -- NULL deref:
+     handle_mmap_fault(addr=0) <- arc_release(buf=0x0) [arc.c:6640]
+       <- dbuf_dirty [dbuf.c:2437: arc_release(db->db_buf, db)]  (db->db_buf==NULL)
+       <- dmu_write_impl <- space_map_write <- metaslab_flush
+       <- spa_sync_iterate_to_convergence <- spa_sync <- txg_sync_thread
+     A space_map dbuf is DB_CACHED with db_buf==NULL (broken invariant: DB_CACHED
+     must imply db_buf!=NULL). dbuf_read(DB_RF_MUST_SUCCEED) fast-path
+     (dbuf.c:1813) returns success for a DB_CACHED dbuf without repopulating a
+     cleared db_buf. Reproduced at -smp 1 (NOT an SMP race).
+
+ (b) sync taskq, dnode sync -- dbuf use-after-free (parent freed):
+     handle_mmap_fault(addr=0) <- dbuf_destroy [dbuf.c:3404: mutex_enter(&parent->db_mtx)]
+       <- dmu_objset_sync ; parent indirect dbuf points to freed memory.
+
+ (c) txg_sync_thread, metaslab_sync_done -- range-tree btree corruption:
+     SPL PANIC btree.c:1867 VERIFY3P(zfs_btree_find(...) != NULL)=0
+       <- zfs_range_tree_add_impl <- zfs_range_tree_vacate <- metaslab_sync_done
+       <- vdev_sync_done <- spa_sync <- txg_sync_thread
+     Removing a range-seg not present in the metaslab free-space btree.
+
+ (d) pool import / WAL replay -- range-tree segment bounds corruption:
+     SPL PANIC range_tree.c:873 VERIFY3U(start < end)  with start >> end
+       (e.g. 6021129076736 < 57529077760 FAILS) -- corrupt segment bounds.
+     Reproduces at -smp 1 during WAL redo of a pool a prior run poisoned.
+
+ (e) zio completion (sync=disabled surfaces it EARLY, ~1% into COPY):
+     Assertion failed: sched::preemptable() (mmu.cc page_fault:38)
+       <- memory::pool::free <- zio_destroy [zio.c:1053] <- __zio_execute
+       <- taskqueue_thread_loop
+     A free() in the zio-completion taskqueue faults on a page (preemption
+     disabled) -- i.e. an object reaching the completion free path lives on a
+     COW-protected page. THIS IS THE ORIGINAL pg-bench-kvm.txt signature
+     (memory::pool::free <- ZFS cb <- taskqueue_run_locked, preemptable assert).
+
+CONSISTENT PICTURE: under sustained write, ZFS write-pipeline metadata (dbuf
+  state, dirty records, metaslab range-trees, zio objects) gets corrupted /
+  prematurely freed in the txg_sync + zio-completion path, and the corruption
+  PERSISTS to disk (poisons the pool: a poisoned pool re-crashes on import via
+  ZIL/space-map replay). Every ZFS allocation audited (zfs_kmem_alloc,
+  kmem_cache_alloc for zio/zio_link/zio_buf/dbuf/btree-leaf/metaslab-trace) DOES
+  route through the fork identity kernel heap, so it is NOT a simple missing-
+  identity-heap-wrapper. Signature (e) (free faulting on a COW page in the
+  completion, preemption disabled) points to a remaining cross-AS coherence gap
+  in the OSv mempool<->fork-arena interaction on the ZFS write-completion free
+  path (per-CPU magazine / slab refilled in a forked-backend COW context, then
+  freed by the AS0 completion thread). Classification candidate:
+  [fork-stack / CONF_fork].
+
+SCALE / CONFIG DATA POINTS (all with the taskq_wait fix in the image):
+  * pgbench -i -s 100  (1.3GB), 8-32G RAM : COMPLETES clean (repeatable).
+  * pgbench -i -s 500  (7.5GB), 32G RAM   : COMPLETES clean (vacuum+PK ok).
+  * pgbench -i -s 1000 (15GB),  8G  RAM   : CRASH (a) ~42-76% (dbuf db_buf==NULL).
+  * pgbench -i -s 1000 (15GB),  32G RAM   : COPY completes, VACUUM read-EIO
+                                            (block reads back with an error;
+                                            guest survives) -- see note.
+  * pgbench -i -s 1000 (15GB),  96G RAM   : COMPLETES clean, RC=0, done in 116s.
+  * pgbench -i -s 1000 (15GB), recordsize=32k, 32G RAM : COMPLETES clean, RC=0.
+  * pgbench -c 16 -T 120 (sustained RW, s=1000 loaded, rs=32k, 32G): 304639 tx,
+    0 FAILED at 120s -- then the guest crashed post-run (signature c, range-tree
+    btree). So sustained RW does real work (0 failed txns) but eventually
+    corrupts the metaslab btree.
+  * pgbench -i -s 200 (3GB), 32G RAM : intermittently CRASHES (signature e,
+    preemptable/zio_destroy) -- confirms the wall is RACY, not a hard size
+    threshold.
+
+  The VACUUM read-EIO at s=1000/32G is a checksum failure on read-back
+  (zio_checksum -> EIO) of a block written during COPY; it is NOT a virtio-blk
+  error (no BLKERR ever logged -- the block layer is healthy) and NOT the
+  zio_checksum_verify path (that breakpoint never fired) -- it comes from the
+  read zio's io_error, consistent with the same write-pipeline corruption
+  (a wrong/torn block written).
+
+DELIBERATE KNOBS THAT WIDEN THE SURVIVING ENVELOPE (mitigations, NOT a fix):
+  * recordsize=32k (a standard PG-on-ZFS tuning) -> 4x fewer dbufs -> far less
+    dbuf-cache eviction pressure -> s=1000 init completes at 32G.
+  * adequate guest RAM (>= ~6x dataset) -> ARC/dbuf caches do not thrash ->
+    s=1000 init completes at 96G.
+  Neither knob is a correctness fix: sustained RW (-c16 -T120) still eventually
+  corrupts the range-tree btree even with rs=32k/32G. The underlying write-
+  pipeline lifetime bug must be fixed for a durable qualification.
+
+ALSO OBSERVED (secondary, intermittent, ~30% of boots): a ZFS-mount taskqueue
+  race hangs the guest at "ZFS: root mounted ok" before PG starts (a clean retry
+  boots to ready). Matches the pgb-kvm.txt "intermittent ZFS-mount taskqueue
+  race at high vCPU count". Not yet root-caused; worked around with boot-retry.
+
+================================================================================
+QUALIFICATION STATUS -- NOT YET QUALIFIED (honest)
+================================================================================
+PASS  : W-read catalog coherence (24 concurrent readers, 3x, OK=24 FAIL=0).
+PASS  : taskq_wait root cause fixed (dnode-sync VERIFY corruption gone).
+PASS  : pgbench -i -s 100 / -s 500 complete clean; -s 1000 completes at 96G RAM
+        or with recordsize=32k at 32G; -c16 -T120 does 304639 tx with 0 FAILED.
+OPEN  : sustained write at scale (`pgbench -i -s 1000` default 8k / sustained
+        -c16 RW to completion) still crashes via the Wall-3 write-pipeline
+        lifetime corruption. OSv+PG is NOT yet safe to benchmark a
+        dataset-exceeds-RAM sustained-write workload. DO NOT relaunch the
+        benchmark fleet for the heavy write matrix yet.
+
+NEXT (to close Wall 3): root-cause signature (e) with a full-speed catch (gdb
+  slows the guest enough to hide the race) -- instrument memory::pool::free /
+  the fork-arena to log the faulting VA + owning AS when the completion frees a
+  COW page; then extend the identity-heap coverage (likely the OSv per-CPU
+  mempool magazine/slab that a forked backend refilled) or serialize the zio
+  completion free onto AS0-owned memory. Same cross-AS class as the shipped
+  fork-stack fixes, on the ZFS write-completion free primitive.
+
+================================================================================
+ARTIFACTS
+================================================================================
+Box left UP. /build/osv tree has the taskq_wait fix (subr_taskqueue.c,
+taskqueue.h, opensolaris_taskq.c); virtio-blk diagnostic reverted.
+Bundle: /tmp/pg-qual2.bundle (taskq_wait fix) scp'd to floki.
+Scripts: /b/.local/ozfs-fixes/{seed,serve,boot,qualify}.sh, seed-{rs32k,nosync}.sh.
+================================================================================

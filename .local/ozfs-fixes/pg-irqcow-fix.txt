@@ -1,0 +1,302 @@
+================================================================================
+[W-irq-cow] PostgreSQL-on-OSv: the post-PM_RUN "COW page fault in INTERRUPT /
+non-preemptable context" wall -- ROOT-CAUSED (foreign-address-space timer node)
++ FIXED; the console/tsm cross-AS COW hazard also found + fixed; net-RX (b) does
+NOT assert; PG now advances to the FIRST REAL CLIENT BACKEND FORK.
+================================================================================
+Date:    2026-07-24   Host: floki (local, KVM)   Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena
+Branch:   integ/pg-fork-arena   HEAD at start: 12b4d8e43   after: 1041518e5
+Author:   Greg Burd
+Method:   KVM (-enable-kvm -cpu host) + gdb HARDWARE breakpoints (hbreak
+          __assert_fail / mmu::vm_sigsegv), qemu-monitor cr2/cr3 inspection, and
+          a python gdb bucket-walker that dumps the per-CPU timer_set buckets and
+          each timer node's address-space class at the fault -- the method that
+          pinned the exact foreign-AS timer node.
+
+================================================================================
+VERDICT (one line)
+================================================================================
+The wall is a KERNEL-STRUCTURE / ADDRESS-SPACE coherence bug, exactly angle (A):
+OSv's single per-CPU timer list threads timer_base nodes that live on
+per-address-space-private APPLICATION STACKS.  A timer armed by one forked
+process, walked from the timer IRQ while the CPU holds a DIFFERENT address space
+(another process, or the idle thread in AS0), dereferences that node at a stack
+VA that resolves to foreign physical memory -> a wild page fault taken in
+non-preemptable interrupt context -> assert(sched::preemptable()) in
+arch/x64/mmu.cc:38 -> the unikernel aborts.  The cure keeps such interrupt-
+reachable structures coherent per address space: park an app thread's timers off
+the shared per-CPU list whenever it is not the running thread, and drive a
+blocked thread's wakeup through a per-CPU IDENTITY-memory kernel timer instead.
+
+A SECOND, independent COW-in-cross-AS bug was found on the way (the console/tsm
+screen), and FIXED with the same identity-heap discipline.
+
+================================================================================
+TRIGGERS (a) + (c) ARE THE SAME BUG; (b) DOES NOT ASSERT
+================================================================================
+The handoff listed three observed triggers.  Proven here:
+
+  (a) timer path (idle CPU) and
+  (c) page-pool fill-thread path
+      are the SAME bug seen from two different victim threads.  In BOTH the
+      backtrace is:
+          __assert_fail
+          <- page_fault (arch/x64/mmu.cc:38, "assert(sched::preemptable())")
+          <- std::min<long> / timer_set::expire (include/osv/timer-set.hh:192)
+          <- sched::timer_list::fired (core/sched.cc)
+          <- idt::invoke_interrupt(vector=33) <- interrupt
+          <- {cpu::idle | page_pool::l2::refill | page_pool::l1::fill_thread ...}
+      The "victim" (idle thread, or the page-pool fill thread) is merely whoever
+      was running on the CPU when the timer IRQ fired; the FAULT is always in
+      timer_set::expire walking the per-CPU bucket list.
+
+  (b) net-RX path (inbound psql SYN -> epoll_wake_in_rcu):
+      does NOT reproduce the preemptable() assert.  With the timer fix in place,
+      an inbound psql connection is delivered, the listener's epoll wakes, and a
+      backend forks -- with ZERO "preemptable" asserts (grep -c preemptable = 0
+      across many connects).  The epoll_file object and its lock-free activity
+      ring are already on the identity kernel heap (make_file<> wraps the
+      allocation in fork_arena::kernel_heap_scope), so epoll_wake_in_rcu touches
+      only identity memory.  (b) as a COW-in-IRQ fault did not exist on this
+      build; the psql path is instead blocked later, in the backend itself --
+      see NEXT WALL.
+
+================================================================================
+EXACT MECHANISM (proven via KVM+gdb, not inferred)
+================================================================================
+1. THE FAULT: hbreak __assert_fail caught expr="sched::preemptable()",
+   file=arch/x64/mmu.cc line=38, inside timer_set::expire at timer-set.hh:192:
+        _next = std::min(_next, get_timestamp(timer));   // walks a bucket list
+   Disassembly at the faulting rip: `mov 0x30(%rdx),%rcx` then `mov (%rdx),%rdx`
+   -- reading a timer_base's _time (offset 0x30) and its intrusive hook next_
+   (offset 0). cr2 varied run-to-run: 0x30 (rdx==0, NULL next), 0x10000002f
+   (rdx==0xffffffff), 0x8942097, 0x1400000030 -- i.e. a garbage/foreign link.
+
+2. WHICH ADDRESS SPACE: cr3 at the fault was observed BOTH as AS0
+   (0x893a000 == mmu::kernel_pt_root_phys(), the idle thread) AND as a fork
+   child (0x10062a000 / 0x1002f3000).  So the per-CPU list is walked in whatever
+   AS the CPU currently holds -- and it contains timers from OTHER address
+   spaces.
+
+3. WHAT LIVES IN THE BUCKET (python gdb bucket-walk at the fault):
+        b29 node=0x400000120fa0 [IDENTITY(kern)] st=1  nx=...       <- fine
+        b33 node=0x200000200180 [APP-STACK(s64)]  st=4757128 nx=... <- garbage
+        b33 node=0x2000002001a0 [APP-STACK(s64)]  st=3       nx=...
+        b33 node=0x200000200a30 [APP-STACK(s64)]  st=0  nx=0x0      <- NULL next
+        b33 node=0x0 (deref FAULT <-- BAD)
+   The good nodes are at slot 128+ (identity kernel memory: the cpu's
+   preemption_timer, kernel-thread timers -- valid in every AS).  The BAD nodes
+   are at slot 64 (0x200000..., the APPLICATION STACK region) and slot 96
+   (0x300000..., the fork ARENA) -- app memory whose physical page differs per
+   address space.  Read through a foreign AS, their _state and hook links are
+   garbage, so the walk follows a wild next_ and faults.
+
+4. WHERE APP-STACK TIMERS COME FROM: every kernel-internal blocking wait an app
+   thread performs arms a `sched::timer tmr(*current())` ON ITS STACK, then
+   blocks: core/epoll.cc (epoll_wait timeout), core/poll.cc, libc/pthread.cc,
+   libc/sem.cc, libc/signal.cc, bsd/sys/kern/uipc_sockbuf.cc, etc.  PostgreSQL
+   aux processes (checkpointer/bgworker) arm a WaitLatch timeout this way, block,
+   the CPU idles (AS0), and the idle-CPU timer IRQ walks the child's stack timer
+   node in AS0 -> fault, within tens of ms of PM_RUN.
+   OSv's single-address-space timer model is simply not fork-aware: suspend/
+   resume_timers is only invoked on CPU MIGRATION (of a queued thread), never on
+   an ordinary blocking context switch, so a blocked thread's timer stays in the
+   shared per-CPU list at its private stack VA.
+
+================================================================================
+THE FIX (minimal, correct, #if CONF_fork; non-fork byte-identical) -- angle (A)
+================================================================================
+core/sched.cc + include/osv/sched.hh -- FORK TIMER-PARK:
+  * On every APP-thread switch-OUT (cpu::reschedule_from_interrupt, just before
+    n->switch_to(), while the outgoing thread's AS is still loaded so its
+    on-stack timers are valid to walk): cpu::park_timers(*p) removes the
+    outgoing app thread's timers from THIS cpu's per-CPU timer_set list (reusing
+    the existing timer_list::suspend, which also sets _timers_need_reload so a
+    concurrent migration suspend/resume of the same thread is a coherent no-op),
+    records the thread's earliest deadline, and links it on a per-CPU
+    identity-memory `parked_threads` list.  Kernel threads (!is_app) keep their
+    identity-memory timers, so they are never parked.
+  * On switch-IN (right after n->switch_to(), now running as the resumed thread
+    with ITS address space loaded): cpu::unpark_timers(current) re-inserts its
+    parked timers (timer_list::resume) -- safe, its AS is current.
+  * A BLOCKED parked thread still wakes on time: a per-CPU IDENTITY-memory kernel
+    timer, cpu::park_wakeup_timer (its own timer_base::client, so it never
+    collides with preemption_timer), is armed to the earliest parked deadline.
+    When it fires (from the timer IRQ, in ANY AS -- but it lives in identity
+    memory, so the walk that fires it never faults), cpu::park_timer_fired()
+    wakes every due parked thread by touching ONLY their identity thread objects
+    (wake_with_irq_disabled); it does NOT walk their foreign-AS stack timers.
+    A woken thread is scheduled in, and unpark_timers (in its own AS) re-inserts
+    its now-expired real timer, which fires there and completes the wait.
+  * cpu::handle_incoming_wakeups() skips the existing resume_timers() for a
+    parked thread (that call runs in whatever AS the waking CPU holds and would
+    walk the thread's foreign-AS stack timers); unpark_timers does the resume in
+    the thread's own AS on switch-in instead.
+  * thread::complete() drops a still-parked exiting thread from the per-CPU
+    parked list (defensive: the normal path unparks on switch-in first).
+
+  INVARIANT ESTABLISHED: the per-CPU timer_set list only ever contains (i) the
+  currently-running app thread's app-stack timers and (ii) kernel/identity
+  timers -- all valid in the loaded address space -- so the IRQ-context walk in
+  timer_set::expire never dereferences a foreign-AS node.
+
+drivers/console-multiplexer.cc -- CONSOLE/tsm cross-AS COW (found here, fixed):
+  * The console/tsm screen (`con` and its lines[]/cells[]) is SHARED kernel
+    infrastructure in the identity mempool, but tsm (re)allocates screen lines
+    lazily DURING a write (scroll/scrollback).  A write issued by a fork-child
+    APP thread routed those mallocs to the COW fork arena, so the shared
+    con->lines[y] ended up pointing at arena memory COW-private to that child.
+    The NEXT console write from another address space dereferenced a line
+    pointer resolving to a foreign/unmapped page -> NULL con->lines[y] -> fault
+    in screen_write (drivers/libtsm/tsm_screen.cc:405), cascading (the fault
+    printer itself re-faulted through tsm).  gdb proof: con->lines[22..24] were
+    at 0x30000027e360 / 0x300000466ae0 / 0x300000467360 (slot 96 = fork arena)
+    while lines[0..21] were at slot 192 (identity mempool).
+  * FIX: wrap console_multiplexer::write in a fork_arena::kernel_heap_scope so
+    every tsm allocation under the console lock goes to the identity kernel heap
+    (never the COW arena) -- the same discipline as struct file / thread objects
+    / signal waiters.  Inert on the non-fork path.
+
+================================================================================
+THE REGRESSION TEST -- tests/tst-fork-irq-cow.cc (author Greg Burd)
+================================================================================
+Registered in modules/tests/Makefile.  A fork child hammers ROUNDS=400 short
+nanosleep()s (each arms a sched::timer on the child's private stack, then
+blocks) while the PARENT also sleeps repeatedly, so the CPU continuously cycles
+parent-AS <-> child-AS <-> idle-AS0 and fires timer IRQs in an address space
+OTHER than the one whose timer is pending.  A broken kernel aborts the whole
+unikernel on the preemptable() assert (there is no in-process SIGSEGV to catch),
+so the failure shows up as the test never printing its final line / the run
+crashing.
+
+  HEAD 12b4d8e43 (fix reverted, test present):
+    -smp 1: the unikernel HANGS/dies right after "fork() returned child pid"
+            (the child's timer fired from the idle CPU in AS0 and aborted).
+    -smp 2: "Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault:
+            38)" with backtrace timer_list::fired <- invoke_interrupt <-
+            interrupt <- page_pool::l2::refill -- the EXACT PG wall.
+  With the fix (1041518e5): PASS x2 (-smp 1 and -smp 2), 0 failures.
+
+================================================================================
+VALIDATION -- ALL PASS
+================================================================================
+CONF_fork=1, fs=rofs, image=tests, -j$(nproc), KVM -smp 2 (and -smp 1 for the
+new test):
+  tst-fork-irq-cow          done: 0 failures  (reproduced on HEAD; passes w/fix, smp 1 & 2)
+  tst-fork                  done: 0 failures
+  tst-fork-cow              done: 0 failures
+  tst-fork-deep             done: 0 failures
+  tst-fork-preempt          done: 0 failures
+  tst-fork-arena-freelist   done: 0 failures
+  tst-execve                done: 0 failures
+  tst-pgfork                done: 0 failures
+  tst-fork-socket           PASS (parent socket survived child close)
+  tst-fork-file-mmap        PASS (child reads real file bytes)
+  tst-fork-sigchld-latch    PASS (SIGCHLD -> handler -> epoll woke -> reaped)
+
+Non-fork sanity (conf_fork=1 image):
+  tst-mmap                  mmap tests succeeded
+  tst-sleep                 SUMMARY: 2 tests, 0 failures (exercises the timer path)
+
+conf_fork=0 sanity (all new code is #if CONF_fork; non-fork path unchanged):
+  ./scripts/build conf_fork=0 fs=rofs image=tests -> rc=0 (clean link, CONF_fork==0)
+  conf_fork=0: tst-mmap succeeded; tst-sleep 2/0 failures.
+  (Note: switching conf_fork requires clearing build/*/. config +
+   gen/include/osv/kernel_config_fork.h so kconfig regenerates the header --
+   otherwise a stale CONF_fork=1 header leaves fork_arena refs unresolved at
+   link; that is a build-config caching quirk, not a code issue.)
+
+PG image rebuilt: ./scripts/build conf_fork=1 fs=ramfs image=pg18-fork -> rc=0.
+
+================================================================================
+THE PAYOFF -- PostgreSQL status (HONEST -- NO ROWS YET)
+================================================================================
+Boot: qemu -enable-kvm -cpu host -m 4G -smp 2 -nographic
+        -kernel build/last/loader.elf
+        -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data"
+        -drive .../usr.img,if=virtio,cache=none
+        -netdev user,hostfwd=tcp::5432-:5432 -device virtio-net-pci
+
+THE TIMER IRQ-CONTEXT COW WALL IS GONE.  PG reaches "ready to accept
+connections", the aux processes survive, and it NO LONGER aborts on
+assert(preemptable()) in timer_set::expire.  It now stays up for many seconds
+past PM_RUN.  An inbound psql connection is delivered and a client backend is
+FORKED with ZERO preemptable() asserts (net-RX trigger (b) confirmed not
+asserting).  Observed console:
+
+  LOG:  starting PostgreSQL 18.4 on x86_64-pc-linux-musl ...
+  LOG:  listening on IPv4 address "0.0.0.0", port 5432
+  LOG:  database system is ready to accept connections          <- PM_RUN, stays up
+  ERROR: could not open shared memory segment "/PostgreSQL.<n>": ENOENT
+  LOG:  background worker "logical replication launcher" (PID <n>) exited ...
+  ... (survives; periodic timer-driven bgworker restarts every 1s -- proving the
+       parked-timer wakeup path works) ...
+  FATAL: getsockname() failed: ENOTSOCK        <- the FORKED CLIENT BACKEND
+
+psql (from the container to the guest's hostfwd :5432):
+  $ psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -c 'select count(*) ...'
+  psql: error: connection to server ... failed: server closed the connection
+  unexpectedly  (backend exited on the FATAL below)
+  grep -c preemptable  = 0   (no timer/IRQ-COW assert on the connect path)
+
+psql ROWS: NOT YET.  I do NOT claim PG serves queries.  A real client backend
+now FORKS on the inbound connection (the milestone the timer wall previously
+blocked), but two NEW, DISTINCT walls block the first query:
+
+NEXT WALL (precisely symbolized, DISTINCT from the timer/console COW wall):
+  (1) FORKED-BACKEND SOCKET INHERITANCE:
+        FATAL: getsockname() failed: ENOTSOCK
+      The client backend, forked by the postmaster to serve the connection,
+      inherits the accepted connection socket fd but getsockname() ->
+      linux_getsockname() returns ENOTSOCK: the inherited fd's `file` is not
+      recognized as a socket in the child.  This is a fork SOCKET-FD-INHERITANCE
+      gap for the *connection* socket (distinct from the *listen* socket, whose
+      survival-across-child-close was handled by the earlier fd-inheritance
+      fix).  It is on the direct psql path and must be fixed to serve a query.
+  (2) POSIX SHARED MEMORY / PG DYNAMIC SHARED MEMORY (DSM):
+        ERROR: could not open shared memory segment "/PostgreSQL.<n>": ENOENT
+        ERROR: can't attach the same segment more than once
+      OSv's POSIX shm (shm_open/mmap of /dev/shm-style segments) does not back
+      PG's DSM, so bgworkers that need DSM fail and are restarted every second
+      (the "logical replication launcher" loop).  This is a FUNCTIONAL OSv gap,
+      not a crash; it also drives a heavy fork/reap CHURN under which two further
+      fork-lifecycle faults surface (not the timer wall):
+        - ~thread teardown releasing a shared_ptr whose control block is in the
+          COW arena (std::_Sp_counted_base::_M_release_last_use, control block
+          at slot 96), reaped from AS0;
+        - application::get_current() returning a stale/NULL application_runtime
+          during a fork-time thread construction (thread::thread -> get_shared
+          on this=0x0).
+      Both are the SAME class as the prior arena fixes (route cross-AS-shared
+      objects to identity memory) and are exposed only because PG now survives
+      long enough to churn bgworkers; they are SEPARATE investigations from the
+      IRQ-context COW wall fixed here.
+
+Do NOT read this as "PG works": no rows served.  But the specific wall handed
+off -- a COW page fault taken in interrupt / non-preemptable context after
+PM_RUN -- is root-caused (foreign-AS timer node in the shared per-CPU list) and
+FIXED, the console/tsm cross-AS COW hazard is fixed, the net-RX epoll path does
+NOT assert, and PG advances to forking its first real client backend.
+
+================================================================================
+FILES CHANGED (committed on integ/pg-fork-arena, author Greg Burd, 1041518e5)
+================================================================================
+  core/sched.cc                     fork timer-park: park/unpark on app-thread
+                                    context switch; per-CPU park_wakeup_timer;
+                                    park_timer_fired; complete()/handle_incoming
+                                    _wakeups coordination.  All #if CONF_fork.
+  include/osv/sched.hh              thread _parked_deadline/_parked_link/
+                                    _timers_parked; cpu park_client +
+                                    park_wakeup_timer + parked_threads + methods;
+                                    client earliest_active_deadline/
+                                    has_active_timers/timers_suspended.  #if CONF_fork.
+  drivers/console-multiplexer.cc    console_multiplexer::write under a
+                                    fork_arena::kernel_heap_scope (#if CONF_fork).
+  modules/tests/Makefile            register tst-fork-irq-cow.so.
+  tests/tst-fork-irq-cow.cc         new regression test (author Greg Burd).
+
+Bundle: git bundle create /tmp/fork-arena-progress.bundle 6594e93f0..HEAD
+        (/tmp/fork-arena-progress.bundle, includes 1041518e5)
+arena-dev: left UP.  On floki (KVM, no EC2).
+================================================================================

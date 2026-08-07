@@ -1,0 +1,7 @@
+CRACKER account (migrate to before ouch expires Aug 02 16:40 UTC):
+  AWS_PROFILE=cracker  account 316742357190  region us-east-2  expires Aug 09 14:33 UTC
+  keypair: osv-ec2 (~/.ssh/osv-ec2.pem, imported)
+  SG: sg-0a4b2ccc1b1a23c11 (osv-bench: SSH from egress + all intra-SG)
+  VPC: vpc-0494a3aa1c0cb29af (default)
+  subnets: 2c subnet-0b23d9fce5c936f38 / 2a subnet-0c5154dcd46696f5a / 2b subnet-081c0337fe09c0e8a
+  AMI: ami-028ba4d4ccb4b7b72 (AL2023 x86_64 k6.18, same public AMI as ouch - works in cracker)

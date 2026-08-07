@@ -1,0 +1,170 @@
+================================================================================
+DROP DATABASE / ProcSignalBarrier fix -- LANDING + VALIDATION REPORT
+================================================================================
+Author: Greg Burd (agent)   Box: bench-db 18.189.43.159 (m5d.metal, profile OUCH)
+Tree:   corruptor-fix, base c8f9c82b3, fix commit 3fcc23b365
+Bundle: /tmp/dropdb-fix.bundle (floki) == c8f9c82b..HEAD, contains 3fcc23b36
+
+--------------------------------------------------------------------------------
+BOTTOM LINE (read first)
+--------------------------------------------------------------------------------
+* The DROP DATABASE root cause in ckpt-diag.txt is CORRECT and the fix for it is
+  LANDED and correct (commit 3fcc23b36, libc/signal.cc). It routes a fork-child
+  self-signal's handler to the CALLER's own COW address space.
+* I CANNOT paste DROP DATABASE-returns evidence, and I will not claim it, because
+  PostgreSQL cannot currently reach "ready to accept connections" on this HEAD:
+  TWO SEPARATE, PRE-EXISTING signature-F/fork bugs wedge or crash startup, and
+  BOTH are present in PURE HEAD (no signal.cc change) -- so they are NOT caused
+  by, and NOT fixable by, the DROP DATABASE fix.
+* The prior "WIP hung startup" observation was a MISATTRIBUTION: pure HEAD
+  crashes/hangs at startup identically to the WIP. The signal.cc change is inert
+  during startup (its branch never fires before PG is up).
+
+  => The DROP DATABASE fix is landed and correct. The benchmark is still blocked,
+     but by the two startup bugs below, not by the DROP DATABASE wedge.
+
+--------------------------------------------------------------------------------
+1. THE FIX (what / where / why boot-safe / why conf_fork=0 identical)
+--------------------------------------------------------------------------------
+WHERE: libc/signal.cc, kill(), inside #if CONF_fork.
+
+WHAT: the fork-aware kill() routed a CROSS-backend signal to the target's AS via
+  as_for_pid(pid) but EXCLUDED the self case (pid == getpid()), leaving
+  target_as = nullptr so a self-signal handler ran in AS0 (kernel AS), not the
+  caller backend's own COW AS. New branch:
+
+    } else if (pid == getpid()) {
+        target_as = mmu::current_address_space();
+        if (target_as == mmu::kernel_address_space()) {
+            target_as = nullptr;   // top-level app / kernel: AS0, as before
+        }
+    }
+
+  Downstream (unchanged) code then runs the handler thread in target_as, and
+  uses that AS's private signal table.
+
+WHY it fixes DROP DATABASE (matches ckpt-diag.txt exactly):
+  EmitProcSignalBarrier() does kill(pid, SIGUSR1) to EVERY backend slot INCLUDING
+  the emitter's own; WaitForProcSignalBarrier() then blocks until every slot
+  (its own included) advances pss_barrierGeneration. A backend advances its own
+  generation only from ProcessProcSignalBarrier() run by CHECK_FOR_INTERRUPTS()
+  when ProcSignalBarrierPending is set -- and that flag is set by the SIGUSR1
+  handler (HandleProcSignalBarrierInterrupt). ProcSignalBarrierPending /
+  InterruptPending are process-global `volatile sig_atomic_t`, i.e. the backend's
+  COW-private copy in its own AS. With the handler in AS0 it set them in AS0's
+  copy; the emitting backend never saw ProcSignalBarrierPending, never absorbed
+  its own barrier, and WaitForProcSignalBarrier waited for its own PID forever
+  ("still waiting for backend with PID N", N == self). Running the handler in the
+  caller's own COW AS sets the flag in the copy the backend actually reads.
+
+WHY boot-safe: current_address_space() is cheap and side-effect free -- it is
+  sched::thread::current()->address_space() with a kernel_as fallback, NO lock,
+  NO fault, NO re-entry into as_for_pid. Empirically the branch NEVER fires
+  during PG startup: an instrumented build (debugf on entry to the branch)
+  printed ZERO [SELFSIG] lines across every boot, whether the boot reached PG or
+  wedged. EmitProcSignalBarrier is only called by DROP DATABASE and
+  DROP/CREATE TABLESPACE (dbcommands.c, tablespace.c) -- never at startup.
+
+WHY conf_fork=0 identical: the entire new logic is inside the #if CONF_fork
+  block. The #else (non-fork) path is textually unchanged, so a conf_fork=0
+  object is byte-identical. For the top-level app / postmaster (getpid()==OSV_PID,
+  current AS == kernel_as) the branch resets target_as to nullptr -> AS0 handler,
+  identical to today.
+
+--------------------------------------------------------------------------------
+2. THE WIP's "startup hang" -- WHAT IT REALLY WAS, AND HOW I AVOIDED IT
+--------------------------------------------------------------------------------
+The WIP (dropdb-wip.patch) was the SAME AS-routing change plus a debugf. It was
+reported to "hang startup". I reproduced it, and then reproduced the SAME
+crash/hang with PURE HEAD (signal.cc reverted to c8f9c82b, no change at all):
+
+  * The instrumented WIP printed ZERO [SELFSIG] lines before the wedge -> the new
+    branch is not even reached during startup.
+  * Pure HEAD crashes/hangs at the identical point (right after the
+    end-of-recovery checkpoint, before "ready to accept").
+
+So the startup failure is NOT the signal.cc change. The only real risk the WIP
+carried was using an AS accessor that might lock/fault on the hot self-kill path;
+I avoided that by using mmu::current_address_space() (lock-free, fault-free,
+verified in core/mmu.cc:229) and by dropping the debugf. The committed fix
+changes behavior ONLY for a fork-child self-signal whose current AS is a child
+COW AS; AS0 / non-fork / conf_fork=0 are unchanged.
+
+--------------------------------------------------------------------------------
+3. WHY VALIDATION IS BLOCKED: two pre-existing startup bugs (both in PURE HEAD)
+--------------------------------------------------------------------------------
+Method: fresh reseed of the pgdata pool (clean initdb via cpiod, clean export),
+then boot loops at -smp1/-smp4/-smp8, hp=off. Also isolated a single-disk pool.
+
+BUG A -- ZFS mount SEGV (raidz path), now ~deterministic
+  Boot -> import OK ("Pool 'pgdata' is up-to-date", ONLINE, no errors, read-only
+  `zfs get` works) -> `zfs mount pgdata` faults:
+     Aborted
+     handle_mmap_fault (libc/signal.cc:241)
+     mmu::vm_fault (core/mmu.cc:2318 == vm_sigsegv)
+     page_fault
+     ...zfs.so...  (zfs_mount -> zfs_mount_at -> sys_mount)
+     sys_mount (fs/vfs/vfs_mount.cc:195 == the VFS_MOUNT call into ZFS)
+  A wild-pointer SIGSEGV inside the ZFS VFS_MOUNT op. 8/8 raidz boots failed here
+  on a freshly-seeded, healthy pool. A SINGLE-DISK pgdata pool does NOT hit this
+  (mount succeeds, PG starts) -- so it is specific to the raidz1+log+cache mount
+  path, not the signal fix.
+
+BUG B -- PG-startup allocator-recursion wedge (both raidz and single-disk)
+  With a single-disk pool (Bug A avoided), PG starts and reaches
+  "checkpoint complete: end-of-recovery" but the postmaster never logs
+  "ready to accept connections". gdb on the wedged guest:
+     753 startup proc: exited
+     postmaster: epoll_file::wait (ServerLoop), _current_as == AS0 (correct)
+     checkpointer + bgwriter: blocked in switch_to, in CHILD COW AS
+  Checkpointer kernel-stack wait chain:
+     sigprocmask(SIG_SETMASK) -> unwait_for_signal / wait_for_signal
+        -> waiters_mutex + std::list node alloc (fork_arena::kernel_heap_scope)
+     -> memory::pool::alloc (deep self-recursion) -> pool::add_page
+     -> mmu::file_vma ctor / vn_lock  (a file-backed mmap allocation)
+  This is the SAME signature-F allocator-recursion-under-a-lock family that
+  commits 1ae2602f9 / f28570733 / c8f9c82b3 (F2a/F2b) were fixing; F2b even names
+  "assert(sched::preemptable()) at mmu.cc ... ~1-in-6 at -smp>1 under fork load".
+  A residual instance remains on the startup path (the list-node / file_vma
+  allocation inside sigprocmask's waiters_mutex critical section, NOT the
+  coherent_wait_record that F2b covered). It manifests two ways I saw:
+     - assert(sched::preemptable()) abort in page_fault (a COW write-fault in a
+       non-preemptable window), fault addr in a child COW AS (0x6001....), OR
+     - a plain hang (postmaster waits forever for the wedged checkpointer).
+  Boot-reliability measured with the FIX build: single-disk 0/11 reached ready
+  (all PG-start-then-hang); raidz 0/8 (all Bug A). Pure HEAD earlier: 1/5 reached
+  ready once (the race is intermittent; it has since degraded to ~0/N here).
+
+Neither Bug A nor Bug B is in kill()/signal.cc; the DROP DATABASE fix is inert
+until PG is up. ckpt-diag.txt captured a LUCKY boot (PG had reached ready, then
+DROP DATABASE hung) -- that same lucky window is what is currently not
+reproducing, because Bug A/Bug B now fire first almost every boot.
+
+--------------------------------------------------------------------------------
+4. EVIDENCE INDEX (raw, on the box)
+--------------------------------------------------------------------------------
+* SELFSIG=0 across all boots (instrumented WIP): /tmp/osv-ckpt.log per boot.
+* Pure-HEAD startup crash (page_fault preemptable assert, child-AS addr):
+  reproduced after reverting signal.cc to c8f9c82b and rebuilding the loader.
+* Bug A backtrace: sys_mount vfs_mount.cc:195 -> vm_sigsegv -> handle_mmap_fault.
+* Bug B wedge stack: gdb `osv info threads` + checkpointer kernel-stack walk
+  (sigprocmask -> unwait_for_signal + memory::pool::alloc recursion + file_vma).
+* Single-disk mount SUCCEEDS (isolates Bug A to raidz): PG reaches
+  "database system was shut down" / "checkpoint complete", then Bug B.
+
+--------------------------------------------------------------------------------
+5. RECOMMENDATION
+--------------------------------------------------------------------------------
+* KEEP the DROP DATABASE fix (3fcc23b36): it is the correct, minimal, boot-safe
+  fix for the fully-root-caused ProcSignalBarrier self-signal wedge.
+* The benchmark restart is STILL BLOCKED, now by Bug B (PG-startup allocator
+  recursion in sigprocmask's waiters_mutex path) and Bug A (raidz ZFS mount
+  SEGV). These are the next signature-F targets. Suggested next step for Bug B:
+  move the wait_for_signal/unwait_for_signal std::list node churn OFF the
+  waiters_mutex critical section (or pre-reserve nodes per-thread, mirroring the
+  F2b wait_record slot pool), so no allocation happens under the lock while a
+  fork-child AS is live. Suggested next step for Bug A: gdb the VFS_MOUNT SEGV on
+  raidz to find the wild deref in the ZFS mount op.
+* Do NOT treat DROP DATABASE as validated until a boot reaches "ready" and the
+  CREATE/DROP DATABASE x5 + DROP TABLESPACE evidence can be pasted.
+================================================================================

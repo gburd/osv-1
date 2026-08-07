@@ -1,0 +1,4 @@
+box-id: i-02f6e584754a0c39d (m5d.metal, 96 vCPU, 4x900G local NVMe, us-east-2, tag osv-roceiling)
+public IP: 3.21.242.207
+STATUS: TERMINATED. Root EBS vol-042e302535f8aac8c DELETED (InvalidVolume.NotFound confirmed).
+Parallel-agent boxes (solnix-*/nbm-*/osv-cwrite) untouched. No SG/S3/AMI changes.

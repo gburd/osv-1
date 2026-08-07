@@ -1,0 +1,68 @@
+STEP-2 gdb backtrace of the HUNG OSv+PG guest (KVM, c5n.metal i-04b20fa1e15eff33f)
+Image: CONFIRMED-GOOD (postgres + cpiod.so + plpgsql.so + conf_fork=1, fs=zfs, HammerDB recipe verbatim)
+Boot: SLIRP net (-netdev user hostfwd 5432), -accel kvm -cpu host -m 8G -smp 8, OSv v0.57.0-440-g6dd041b7
+Config: shared_preload_libraries=plpgsql, unix_socket_directories='', listen_addresses=*, C builtin locale
+
+SYMPTOM: postmaster boots, imports OpenZFS pgdata pool, registers bgworker "logical replication
+launcher" (bgworker.c:979), loads library plpgsql (miscinit.c:1890) -- THEN HANGS. Never reaches
+"database system is ready to accept connections". Port 5432 opens (listen socket) but connections
+get "server closed the connection unexpectedly". qemu pinned at 99.9% CPU (busy spin, not idle wait).
+
+gdb (qemu -s :1234, OSv loader.elf symbols) - ONLY ONE postgres thread exists:
+  thread 844 (0x400109dc6040) "/b/.local/pg18/..." cpu1 RUNNING, app PC = garbage
+
+Backtrace of thread 844 (caught mid context-switch, app frames below the interrupt):
+  #5  interrupt (frame=0x400109dc7088) at arch/x64/exceptions.cc:267
+  #6  <signal handler called>
+  #7  0x0000100000945913 in ??   <- app PC, maps to __GNU_EH_FRAME_HDR +0xf4953 (NON-CODE region!)
+  #8  0x0000000044a82000 in ??
+  #9  0x0000200000200e88 in ??
+  #10 0x0000200000200e30 in ??
+  #11 0x0000000000000001 in ??
+  #12 0x3320202020202020 in ??   <- ASCII "       3" (spaces + '3')
+  #13 0x2020202020202034 in ??   <- ASCII "       4" (spaces + '4')
+  #14 0x0000200000352020 in ??
+  #15 0x0000000000000000 in ??
+
+app registers at interrupt: rbp=0x38 (garbage), stack full of ASCII text.
+
+DIAGNOSIS: the postgres thread is executing off a CORRUPTED STACK -- PC landed in a non-executable
+data region (.eh_frame_hdr) with a return chain of ASCII text bytes. This is IDENTICAL in class to the
+HammerDB agent's documented NEW FAULT B (fork-COW-arena / dlopen get_library corruption, ASCII in the
+return chain "k/pg81g/i") -- a COW-incoherent list/stack walk in a forked context.
+
+*** ROOT CAUSE (decisive, from debug5): NOT a fork wall. The postmaster hangs in IpcMemoryCreate. ***
+With -c log_min_messages=debug5 the LAST line before the hang is:
+  DEBUG:  invoking IpcMemoryCreate(size=1151868928)   (ipci.c:211, CreateSharedMemoryAndSemaphores)
+The "registering background worker logical replication launcher" line the prior KVM agent read as the
+fork wall is simply the LAST line at debug1 -- the real hang is one step later, in the postmaster's
+MAIN shared-memory segment creation, which calls:
+  PGSharedMemoryCreate -> CreateAnonymousSegment -> mmap(NULL, size, PROT_READ|PROT_WRITE,
+                                                        MAP_SHARED|MAP_ANONYMOUS, -1, 0)  (sysv_shmem.c:622)
+This is BEFORE any fork. The postmaster (single postgres thread 844) then spins at 99.9% host CPU in a
+tight loop -- qemu's gdbstub (-s) cannot even get a safe-point to accept a connection while it spins.
+This matches the roadmap-documented behavior (sigusr-fault.txt): "PG mapping an N-GB shared-memory
+segment and OSv demand-paging it 2MB-at-a-time in AS0 = the postmaster's endless 2MB-populate loop at
+0x200000400000 (slot 64)". slot 64 = 0x200000... = the OSv application MAP_SHARED / mmap region.
+
+REPRODUCED ACROSS ALL VARIANTS (same hang, 0 "ready to accept" in every case):
+  net:        SLIRP (-netdev user) -- the SAME net the working HammerDB run used. NOT tap/vhost.
+  smp:        1 and 8   -- not an SMP scheduling race.
+  shared_buffers: 1GB, 128MB, 16MB -- hangs at every size (16MB=8 x 2MB pages should be instant; it isn't
+                  -> not a pure size-proportional populate loop, it is a HARD hang in the mmap path).
+  huge_pages: off (explicit) -- not a MAP_HUGETLB issue.
+  dynamic_shared_memory_type=posix + min_dynamic_shared_memory=0 -- the roadmap OSV-HARNESS override
+                  block; does NOT help (the hang is in the MAIN segment, not DSM).
+  max_worker_processes=0 / autovacuum=off / no plpgsql preload -- still hangs (not the bgworker path).
+
+WHY IT DIFFERS FROM THE WORKING HAMMERDB RUN: reproduced on SLIRP (the SAME net the HammerDB run used),
+exact recipe, exact commit 6dd041b7b, confirmed-good image (postgres+cpiod.so+plpgsql+conf_fork=1) -> the
+tap+vhost NIC the prior KVM agent used is NOT the cause, and the generic "fork-per-backend wall" the prior
+KVM agent named is NOT the cause either. The true wall is upstream of fork: OSv's mmap(MAP_SHARED|
+MAP_ANONYMOUS) populate path for PG's main shared-memory segment hangs/loops in AS0 at startup, so the
+postmaster never reaches "database system is ready to accept connections". The prior KVM agent's verdict
+(does-not-serve) was CORRECT; its DIAGNOSIS (bgworker fork wall) was WRONG. This run corrects the diagnosis
+with the debug5 evidence. The contradiction with the HammerDB NOPM=155516 run is NOT resolved by a broken
+image on the KVM side -- a from-scratch verbatim-recipe image ALSO does not serve; the HammerDB "serving"
+image must have carried an un-captured local delta (a kernel mmap/populate fix or a PG/shmem config) that
+this public-recipe reconstruction does not reproduce.

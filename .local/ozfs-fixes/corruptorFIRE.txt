@@ -1,0 +1,70 @@
+================================================================================
+WALL3_ARENA_DMA catcher result -- osv-cor-a (ec2-user@3.16.46.123, m5d.metal, KVM)
+Author: Greg Burd   Date: 2026-07-28 (UTC)
+Tree: /build/osv  HEAD=12f5bedf03d8eff993e612642c32c8131e6715db  (base tip dfed474b)
+Build: scripts/build -j96 fs=zfs conf_fork=1 conf_zfs=openzfs image=open_zfs,zfs,zfs-tools,pg18-fork
+Catcher: core/mmu.cc  #define WALL3_ARENA_DMA 1  (guard: #if WALL3_ARENA_DMA && CONF_fork)
+Repro: seed clean 8k lz4 pool (ashift=12, recordsize=8k, compression=lz4, sync=standard),
+       boot -smp4 -m32G KVM, pgbench -i -s1000.
+================================================================================
+
+VERDICT: CATCHER DID NOT FIRE.  Corruption REPRODUCED anyway (~78s, in the
+vacuum-analyze phase of pgbench -i -s1000).
+
+=> FALSIFIES the arena-VA-in-DMA theory.  No kernel/AS0 thread ever called
+   virt_to_phys() on a fork COW-arena VA, yet the pool corrupted on-disk. The
+   corrupting DMA does NOT gather from a fork COW-arena VA.
+
+--------------------------------------------------------------------------------
+CORRUPTION SIGNATURE (this run)
+--------------------------------------------------------------------------------
+2026-07-28 16:00:45.614 UTC [598] LOG:  could not read blocks 841294..841294 in file "base/5/16399": EIO
+2026-07-28 16:00:45.617 UTC [598] ERROR:  could not read blocks 841294..841294 in file "base/5/16399": EIO
+  (pgbench -i -s1000 rc=1; error during "vacuum analyze pgbench_accounts")
+
+--------------------------------------------------------------------------------
+PROOF THE CATCHER WAS LIVE (not compiled out, not stale)
+--------------------------------------------------------------------------------
+Disasm of mmu::virt_to_phys in the EXACT loader.elf that ran
+(loader.elf @ 15:56, usr.img @ 15:59; VM booted 15:59, corrupted 16:00):
+
+    402b7340:  call  40312970 <_ZN10fork_arena5readyEv>          # fork_arena::ready()
+    402b73bb:  call  4030a0b0 <_Z14backtrace_safePPvi>           # backtrace_safe()
+    402b73cf:  call  40358f80 <debug_ll>                         # "*** WALL3_ARENA_DMA ..."
+    402b7419:  call  40358f80 <debug_ll>                         # cur_as/tid/app
+    402b7428:  call  40358f80 <debug_ll>                         # backtrace header
+    402b7442:  call  40358f80 <debug_ll>                         # each frame
+
+  The guard (fork_arena::contains(virt) && fork_arena::ready()
+   && !cpu::current()->app_thread -> wall3_arena_dma_report -> cli_hlt loop) is
+  fully present in virt_to_phys. wall3_arena_dma_report's body was INLINED, so
+  `nm` shows no wall3_arena_dma_report symbol -- expected for a static fn; the
+  backtrace_safe + 4x debug_ll calls above ARE that inlined body.
+  The VM never halted and no "*** WALL3_ARENA_DMA virt_to_phys on arena VA ***"
+  dump appeared on the console before corruption.
+
+--------------------------------------------------------------------------------
+INTERPRETATION (consistent with prior 6-session notes /build/osv/.local/wall3.txt)
+--------------------------------------------------------------------------------
+The residual corruptor is NOT arena-VA-in-DMA. Combined with two prior findings:
+  (a) the write bounce buffer is stable in-flight (prior abd_return_buf
+      torn-in-flight check NEVER fired), and
+  (b) no fork-arena VA is ever DMA-translated by an AS0/kernel thread (THIS run),
+the wrong data is already present in the (coherent, identity-heap) SOURCE buffer
+BEFORE the write is checksummed. The source is a DIVERGED / CLOBBERED IDENTITY
+page, not an arena VA.
+
+That is: the gather logic is fine, the alloc PLACEMENT is fine (already on the
+identity heap), but the CONTENT of an identity-heap buffer is corrupted by a
+neighbour -- an identity-heap OVERFLOW or USE-AFTER-FREE on the 8k-record ZFS
+write path, exactly the prior notes' conclusion. It scales with the count of 8k
+ZFS buffers (recordsize=32k survives) and write concurrency, and is masked by
+large RAM (>=96G).
+
+NEXT STEP (not this session's arena-DMA fix): targeted redzones on the hot ZFS
+write-path kmem caches -- start with the abd_chunk cache and the dbuf cache
+(highest churn on 8k records) -- a guard word per object checked on free, to
+name the overflowing allocation at the moment of free with its freeing
+backtrace. (prior notes recommendation #1). No arena-DMA fix is warranted; the
+arena theory is dead.
+================================================================================

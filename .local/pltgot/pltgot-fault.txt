@@ -1,0 +1,25 @@
+== resolve_pltgot / GOT-write fault CAUGHT (elf PLT path, fork-coherence class) ==
+branch integ/pg-fork-zfs @9cdfec86 + WIP eager-bind fix ; box i-02ee57620084817db (3.19.61.154) -smp4 ramfs
+
+FAULT (triggered by eager resolve_all_plts() at first fork()):
+  page fault outside application, addr: 0x0000100000031e00
+  RIP: elf::object::arch_relocate_jump_slot(symbol_module&, void*, long)+26
+       -> *static_cast<void**>(addr) = sym.relocated_addr();  (WRITE to the .got.plt slot)
+  RBX = 0x0000100000031e00 = addr = _base + slot.r_offset  (the GOT slot being written)
+  0x1000_00000000 = app ELF load slot (slot 32).  The faulting addr is in the APP object's
+  writable .got.plt, but the page is NOT MAPPED/served -> "outside application" abort.
+  backtrace: arch_relocate_jump_slot <- object::resolve_pltgot_all+403 <- program::resolve_all_plts+87
+             <- fork+137 <- (app main).
+
+READING: eager-binding writes GOT slots whose demand-zero/COW app page was never faulted in yet;
+the write-fault during fork() (holding fork/atfork state) is refused.  The LAZY path did not hit
+this in my minimal single-child repro because the PLT stub's own initial read faulted the GOT page
+in first.  So the eager approach as written writes pages that fault at a bad time.
+
+This ALSO confirms the root class: the app .got.plt lives in COW app memory (slot 32); writes to
+it in the fork path are hazardous.  The LAZY resolver mutating that page + the shared
+_used_by_resolve_plt_got symbol set from a forked child's COW arena is the HammerDB fault.
+
+NEXT: either (a) pre-fault (populate) the app GOT pages before writing, or (b) run resolve_all_plts
+EARLIER (at app load / before ANY fork machinery / with the pages populated), or (c) fix the lazy
+resolver to be fork-coherent instead (kernel_heap_scope on the set insert + accept per-AS GOT).

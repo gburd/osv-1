@@ -1,0 +1,45 @@
+signature-F -- DEEPER: TWO switch-to-fork-child resume faults + a lost wake
+==========================================================================
+Author: Greg Burd  [fork-stack]  Base 6ccf4a92 + FPU fix (arch-switch.hh)
+
+After the FPU fix (F1) the intermittent "checkpoint starting" stall STILL
+reproduces (qualify run 2/10 STALL_F on the clean FPU-fixed build).  gdb on the
+clean-build wedge:
+
+PARKED SET (same as before):
+  588 postmaster  epoll_file::wait          (answers select 1)
+  590 CHECKPOINTER epoll_wait (its latch)   <- the wedge (checkpoint starting, no complete)
+  595 a backend   sys_read -> pipe_buffer::read
+  591/594/598     parked backends (switch_to, COW stacks)
+
+NATURAL stall = the checkpointer is NOT resumed at all (no crash, VM alive,
+select 1 answers).  So a wakeup meant for it is LOST.
+
+Instrumented counters (47 SIGURG to the checkpointer's pid before an unrelated
+crash): kill_urg_child=47 urg_dispatched=47 urg_sigdfl=0 kill_urg_noas=0
+=> SIGURG routing to the fork child is 100% reliable (handler thread always
+dispatched).  wake_epoll_call=22506 deliver=22390 noep=77 (77 poll_wakes found
+no epoll on that fd -- small residual, mostly non-latch fds).
+
+TWO resume faults exposed by POKING the wedged checkpointer (manual CHECKPOINT
+-> SetLatch -> kill(SIGURG) -> the thread IS woken -> switch_to resumes it):
+  F1 (FIXED): ldmxcsr #GP in switch_to -- FPU control words reloaded from a
+     %rbp-relative slot after the rsp/rbp/CR3 swap read the incoming child's
+     stack.  Fixed by init_fpu() (canonical CW) in the switch_as path.
+  F2 (OPEN):  page_fault at cr2=0x200000200258 (a same-VA COW STACK addr, same
+     0x2000002002xx region the checkpointer/T594 share) while !preemptable():
+       assert(sched::preemptable())  (arch/x64/mmu.cc:38) -> abort.
+     i.e. resuming a parked fork child touches a COW stack page not present in
+     the incoming AS, and the fault lands inside the non-preemptable scheduler
+     switch where vm_fault (which may sleep) is illegal -> the whole VM aborts.
+     T594's frame: 0x200000200258 <- 0x100000cb7408 <- 0x100000b6e6e4 (PG text).
+
+INTERPRETATION: the fundamental defect is in RESUMING a parked fork-child thread
+whose same-VA COW stack / FPU context is not coherently present under its own
+address space at the instant switch_to jumps to it.  F1 and F2 are two faces.
+The "lost wakeup" the benchmark sees is the checkpointer never making progress
+because when a wake reaches it the resume is unsafe (and often the wake path
+just leaves it parked).  Next: fix the same-VA COW stack resume so a switched-to
+fork child's stack pages are present/faulted-in BEFORE the non-preemptable
+switch, mirroring the FPU fix (make the resume read nothing that requires a
+COW fault under the incoming AS in a non-preemptable window).

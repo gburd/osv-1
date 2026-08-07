@@ -1,0 +1,21 @@
+-smp4 32G KVM, NO hugepages  (f2b-qualify.sh 12 4 32G; -c16 -j4 -T60):
+  run  1: CLEAN  tps=2864  failed=0
+  run  2: CLEAN  tps=2831  failed=0
+  run  3: CLEAN  tps=2903  failed=0
+  run  4: CLEAN  tps=2858  failed=0
+  run  5: CLEAN  tps=2814  failed=0
+  run  6: CLEAN  tps=2908  failed=0
+  run  7: CLEAN  tps=2862  failed=0
+  run  8: CLEAN  tps=2860  failed=0   <-- 8 CONSECUTIVE CLEAN (F2b milestone, -smp4)
+  run  9: CLEAN  tps=2846  failed=0
+  run 10: CLEAN  tps=2817  failed=0
+  run 11: CLEAN  tps=2824  failed=0   <-- 11 consecutive clean
+  run 12: EIO facet ("could not read blocks ... : EIO" during -c UPDATE)
+          == the SEPARATE read/write-path EIO facet (F2a report section 4),
+          NOT the F2b scheduler corruptor (no preemptable/bstree/wedge).
+  ==== F2b corruptor (preemptable assert / bstree / wedge) = 0 of 12 ====
+  ==== EIO read-path facet (distinct pre-existing bug) = 1 of 12 ====
+
+  => The F2b -smp>1 scheduler corruptor is ELIMINATED at -smp4 (was ~1-in-6).
+     11 consecutive F2b-clean runs; the lone non-clean run is the unrelated EIO
+     facet, not F2b.

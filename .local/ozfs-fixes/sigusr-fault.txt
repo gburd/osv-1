@@ -1,0 +1,35 @@
+
+--------------------------------------------------------------------------------
+UPDATE 1: HARNESS/CONFIG ROOT CAUSE for the "postmaster spins, no PG console log"
+--------------------------------------------------------------------------------
+The seeded data-init/postgresql.conf (copied from the bench box) had a
+BENCHMARK tuning block appended: shared_buffers=8GB, max_wal_size=16GB, etc.
+On an 8GB VM, PG mapping an 8GB shared-memory segment and OSv demand-paging it
+2MB-at-a-time in AS0 is what produced the postmaster's endless 2MB-populate
+loop at 0x200000400000 (slot 64). Overrode with shared_buffers=128MB,
+huge_pages=off, dynamic_shared_memory_type=posix in an OSV-HARNESS block.
+(Still had "server closed connection unexpectedly" after that override; the box
+was lost to a host shutdown before the next gdb pass could confirm whether the
+128MB config removes the spin entirely or whether a second issue remains.)
+
+Build recipe that reproduces the reports' boot-reliable loader size:
+  - fedora:39 container (GCC 13.3.1); AL2023 host GCC 11.5 gives a DIFFERENT
+    layout (loader 74,027,872 vs the reliable 73,100,264).
+  - deps in container: gcc gcc-c++ make autoconf automake libtool bison flex
+    boost-static libstdc++-static openssl-devel ncurses-devel libedit-devel
+    yaml-cpp-devel python3 python3-requests patch which findutils git tar xz
+    zlib-devel zlib-static libtirpc-devel libuuid-devel libblkid-devel
+    libaio-devel elfutils-libelf-devel qemu-system-x86 qemu-img
+  - build cpiod.so first (make build/release.x64/tools/cpiod/cpiod.so), then
+    ./scripts/build image=zfs-tools,pg18-fork fs=zfs conf_zfs=openzfs
+    conf_fork=1 fs_size_mb=1024
+  - host qemu needs slirp for the fresh-8k-pool seed forward; container qemu
+    (fc39) already has it.
+  - artifacts needed from the bench box (FILE COPY only): /b/.local/pg18/install
+    (90M PG18 PIE tree) + /b/.local/pg18/data-init (initdb'd cluster) +
+    apps/pg18-fork/module.py (identical to .local/ozfs-fixes/pg18-fork-module.py).
+
+BOX EVENT: the m5d.metal box (i-0b777ea5e320f5303) received a host-level
+"User initiated shutdown" at 13:02:33 GMT (not issued by this diagnosis) and
+terminated; instance-store /build (the GCC13 build) was lost. Root EBS had
+DeleteOnTermination=true -> auto-cleaned, no orphan volume.

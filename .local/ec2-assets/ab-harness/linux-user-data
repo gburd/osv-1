@@ -1,0 +1,60 @@
+#cloud-config
+# Linux guest B bootstrap: network on the tap NIC, PG18 from PGDG, matched config.
+password: osv
+chpasswd: { expire: false }
+ssh_pwauth: true
+write_files:
+  - path: /root/pg-setup.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      # PGDG repo for PostgreSQL 18
+      apt-get update -y
+      apt-get install -y curl ca-certificates gnupg lsb-release
+      install -d /usr/share/postgresql-common/pgdg
+      curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+      echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+      apt-get update -y
+      apt-get install -y postgresql-18
+      systemctl stop postgresql || true
+      # data dir on the SECOND virtio-blk disk (ext4) -- same role as OSv's ZFS pgdata backing
+      DEV=/dev/vdb
+      mkfs.ext4 -q -F "$DEV"
+      mkdir -p /data
+      mount "$DEV" /data
+      chown postgres:postgres /data
+      sudo -u postgres /usr/lib/postgresql/18/bin/initdb -D /data/pgdata -U postgres -E UTF8 --locale=C
+      # matched PG config (mirrors 21-pg-config.env)
+      cat >> /data/pgdata/postgresql.conf <<EOF
+      listen_addresses = '*'
+      port = 5432
+      shared_buffers = 8GB
+      effective_cache_size = 24GB
+      work_mem = 32MB
+      maintenance_work_mem = 1GB
+      max_connections = 256
+      max_wal_size = 16GB
+      min_wal_size = 4GB
+      checkpoint_timeout = 15min
+      checkpoint_completion_target = 0.9
+      synchronous_commit = on
+      huge_pages = off
+      max_parallel_workers = 8
+      max_parallel_workers_per_gather = 2
+      max_worker_processes = 16
+      random_page_cost = 1.1
+      autovacuum = on
+      shared_preload_libraries = 'plpgsql'
+      EOF
+      echo "host all all 0.0.0.0/0 trust" >> /data/pgdata/pg_hba.conf
+      echo "local all all trust" >> /data/pgdata/pg_hba.conf
+      sudo -u postgres /usr/lib/postgresql/18/bin/pg_ctl -D /data/pgdata -l /var/log/pg.log start
+      sleep 3
+      sudo -u postgres /usr/lib/postgresql/18/bin/psql -c "select 'PG_UP', version();" || true
+      touch /root/PG_READY
+runcmd:
+  - [ bash, -c, "systemctl disable --now systemd-networkd-wait-online.service || true" ]
+  - [ bash, -c, "N=$(ls /sys/class/net | grep -v lo | head -1); ip addr add 192.168.100.2/24 dev $N 2>/dev/null; ip link set $N up; ip route replace default via 192.168.100.1 || true" ]
+  - [ bash, -c, "/root/pg-setup.sh > /root/pg-setup.log 2>&1 &" ]

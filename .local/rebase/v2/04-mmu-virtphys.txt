@@ -1,0 +1,16 @@
+mmu: fix virt_to_phys for VMA-mapped DMA buffers
+
+mmu::virt_to_phys() was correct only for kernel-direct-mapped
+addresses.  When a driver called it on a VMA-mapped buffer (e.g., a
+DMA descriptor allocated via mmap with PROT_READ|PROT_WRITE), the
+function returned the linear-mapping offset of the page rather than
+the page's actual frame, producing silent DMA corruption when the
+buffer happened to be backed by a non-direct page.
+
+Walk the page tables instead and return the physical frame of the
+PTE that maps the address.  Fall back to the linear-map fast-path
+when the address is in the kernel direct-map range.
+
+This is the underlying cause of intermittent virtio-blk and
+Crucible DMA misalignment seen on systems where the block-layer
+buffer pool was relocated to a heap region.

@@ -1,0 +1,10 @@
+== MQ bench label=mq8 scale=50 dur=25s ==
+RO c8: 50966.051278 tps
+RO c16: 41848.815651 tps
+RO c32: 19283.011769 tps
+RO c48: 1051.025532 tps
+RW c8: 5468.695870 tps
+RW c16: 6257.666471 tps
+RW c32: 1194.820000 tps
+RW c48: 591.157396 tps
+== done label=mq8 ==

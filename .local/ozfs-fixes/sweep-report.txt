@@ -1,0 +1,309 @@
+================================================================================
+OSv PR-PROGRAM MAINTENANCE SWEEP  (gburd fork osv-1 -> upstream cloudius-systems/osv)
+Host: floki  Repo: /home/gburd/ws/osv  Generated: 2026-07-24 ~16:51 UTC
+Mode: READ + REPORT + LOCAL-TIDY only. No pushes, no PR edits (no creds here).
+Cutoff for "new reviewer activity": 2026-07-24T11:00:00Z
+DID NOT TOUCH: fork-arena worktree, arena-dev container, no heavy floki builds.
+================================================================================
+
+TL;DR
+- 26 open PRs by gburd. ALL MERGEABLE except #1424 (CONFLICTING, correctly blocked-draft).
+- NO new reviewer comments/reviews on ANY open PR since the cutoff. Parent's
+  2026-07-24 replies on #1425/#1429/#1439 STAND; nothing actionable to answer.
+- master 0/0 vs upstream. apps 0 behind. Deps clean.
+- OpenZFS: pinned zfs-2.4.2 (6330a45b). Upstream now has zfs-2.4.3. RECOMMEND a
+  future patch bump to 2.4.3 (not now, not mid-review). Details in section 3.
+- lwext4#100: still OPEN, 0 comments (dead-ish repo). No action.
+- All 4 drafts (#1424/#1444/#1445/#1447) correctly stay draft: every base still OPEN.
+  NONE unblockable this sweep.
+- Local tidy done: trimmed 32 stale OSv /tmp scratch files (left 55 other-project
+  libxtc/xtc files untouched). Worktree + size findings for PARENT below.
+- AWS: 0 osv-* instances (any state). 1 available EBS vol is NOT ours (left).
+
+================================================================================
+1. ALL OPEN PRs AUTHORED BY gburd  (26 total)
+================================================================================
+Per `gh pr list --author gburd --state open`. Mergeable unless noted.
+
+  #1457 libc SIGCHLD/SIGURG/SIGWINCH default-ignore     MERGEABLE  no-review
+  #1456 mm per-child COW address space (stk on #1455)   MERGEABLE  no-review
+  #1455 process thread-backed fork/vfork/execve/wait    MERGEABLE  no-review
+  #1451 fs ROFS metadata validate + symlink off-by-one  MERGEABLE  no-review
+  #1450 drivers validate device completion ids          MERGEABLE  no-review
+  #1449 libext ext_readlink/readdir heap overflow fix   MERGEABLE  no-review
+  #1448 vfs reject oversized iovcnt (panic fix)         MERGEABLE  no-review
+  #1447 libext ext4 seq-read perf   DRAFT (stk #1431)   MERGEABLE  no-review
+  #1445 mm per-NUMA-node L2 pools   DRAFT (stk #1441)   MERGEABLE  no-review
+  #1444 virtio-net IPv6 offload     DRAFT (stk #1442)   MERGEABLE  no-review
+  #1442 net IPv6 stack SLAAC+DHCPv6                      MERGEABLE  no-review
+  #1441 mm alloc_page_on_node                            MERGEABLE  no-review
+  #1440 fs inotify(2)                                    MERGEABLE  no-review
+  #1439 signal signalfd(2)                               MERGEABLE  CHANGES_REQUESTED (stale, see sec 2)
+  #1438 numa getcpu/get_mempolicy real topology          MERGEABLE  no-review
+  #1437 numa discover SRAT/SLIT                          MERGEABLE  no-review
+  #1436 fs close_range(2)                                MERGEABLE  no-review
+  #1435 libc setrlimit/getrlimit consistency             MERGEABLE  no-review
+  #1434 mm membarrier(2)                                 MERGEABLE  APPROVED
+  #1433 libaio Linux async I/O                            MERGEABLE  no-review
+  #1432 mm mremap(2)                                      MERGEABLE  no-review
+  #1431 libext real fsync + pagecache bridge             MERGEABLE  no-review
+  #1429 fs preadv2/pwritev2 + renameat2                  MERGEABLE  CHANGES_REQUESTED (stale, see sec 2)
+  #1425 libc splice/vmsplice/tee                         MERGEABLE  CHANGES_REQUESTED (stale, see sec 2)
+  #1424 drivers Crucible          DRAFT, BLOCKED         CONFLICTING (correct; see sec 5)
+  #1423 zfs selectable BSD/OpenZFS 2.4.2                  MERGEABLE  no-review
+
+NEW reviewer activity since 2026-07-24T11:00:00Z (excluding gburd + the
+copilot-pull-request-reviewer bot): NONE. Scanned comments AND reviews on all 26
+PRs. #1434 is APPROVED (was already, no new action). No human referenced Copilot
+in a new comment.
+
+ACTIONABLE: nothing new. All open PRs either await first maintainer review or have
+stale CHANGES_REQUESTED already answered by the parent (section 2).
+
+================================================================================
+2. CHANGES_REQUESTED PRs  (#1425, #1429, #1439) -- parent's replies confirmed posted
+================================================================================
+All three reviews that set CHANGES_REQUESTED are OLD (all <= 2026-07-15). The
+parent replied on all three on 2026-07-24 (this session). Verified NO reviewer
+counter-response after those replies. Nothing to handle.
+
+  #1439 signalfd:
+    - Last non-gburd review: nyh CHANGES_REQUESTED 2026-07-15T12:54Z (+ 2 Copilot
+      COMMENTED same day, + nyh comment 2026-07-15T11:43 "please squash").
+    - gburd replied 2026-07-15 (x3) AND again 2026-07-24 (last comment is gburd,
+      confirming extern"C" removed + first-match-and-return single-consumer + all
+      Copilot items already in tip). No code change needed; no new reviewer reply.
+  #1429 fs-syscalls:
+    - Review timeline: Copilot+nyh 07-13, nyh APPROVED 07-14T06:13, then nyh
+      CHANGES_REQUESTED 07-14T18:16 (2nd round). All Copilot findings were about a
+      merge-accident revert of #1428/#1446 -- since corrected.
+    - gburd replied 07-13/07-14/07-21 AND 07-24 (confirming pthread.cc 0-diff,
+      RWF_NOWAIT/RWF_APPEND -> EOPNOTSUPP, renameat2 single check, shared
+      fs_flags.h). No new reviewer reply. Nothing to handle.
+  #1425 splice:
+    - Last non-gburd review: nyh CHANGES_REQUESTED 2026-07-15T11:15Z (+ Copilot
+      07-15T11:07). All items (ponytail->TODO, ESPIPE, SSIZE_MAX, w==0 guard,
+      vmsplice nr_segs bound + direction, tee ENOSYS) addressed.
+    - gburd replied 07-15/07-21 AND 07-24 (tightened vmsplice GIFT/direction +
+      fd-type comment, amended into the single signed commit a7fa5d424 per
+      ROADMAP). No new reviewer reply. Nothing to handle.
+
+VERDICT: no counter-response on any of the three; all awaiting maintainer
+re-review. No quotes to surface -- nothing new arrived.
+
+================================================================================
+3. EXTERNAL DEPENDENCIES
+================================================================================
+.gitmodules on master (stock OSv): acpica, apps, swagger-ui, osv-gui,
+musl_0.9.12, musl_1.2.1, kbuild -- all upstream/unchanged. No new deps on master.
+
+DEP WE INTRODUCED (on pr/openzfs-draft = #1423):
+  submodule "open_zfs" -> modules/open_zfs/openzfs
+     url    = https://github.com/openzfs/zfs.git   (official OpenZFS, good)
+     branch = zfs-2.4.2
+     pinned commit = 6330a45b06d20125de679aae5f63ba14082671ef
+  This is the only extra submodule #1423 adds. Clean, points at upstream openzfs.
+
+OPENZFS BUMP QUESTION (2.4.2 -> 2.4.3):
+  Upstream openzfs tags now include: zfs-2.4.0/1/2/3 and zfs-2.4.99 (dev).
+  - zfs-2.4.3 = a PATCH release on the 2.4 line we already validated (2.4.2).
+  - zfs-2.4.99 = development, DO NOT use.
+  RECOMMENDATION (flag only, do not act): a bump to zfs-2.4.3 is WORTH DOING but
+  NOT NOW. It is a low-risk patch bump on a line we've already ported+validated
+  (mount fix, perf, O_DIRECT all against 2.4.2). Doing it mid-review of #1423
+  would (a) churn the submodule pin under the maintainer's eyes and (b) force a
+  re-validation of the whole ZFS-root boot + RW-persistence run for no functional
+  need. PLAN: land #1423 on 2.4.2 (already validated); do the 2.4.3 pin bump as a
+  clean follow-up commit once #1423 is merged (or if a 2.4.3 fix is one we need).
+  ACTION FOR PARENT: none now. Track "bump openzfs 2.4.2 -> 2.4.3 post-merge".
+
+STALE .gitmodules on #1424/pr/crucible (see also sec 5): that branch's
+.gitmodules still references the OLD layout -- external/openzfs ->
+codeberg.org/gregburd/zfs branch osv-2.4.3, and musl_1.1.24. This is the pre-
+restructure world and is exactly why #1424 needs a from-scratch rebase (already
+documented). NOT a live dep on any shipping branch; noted for completeness.
+
+================================================================================
+4. UPSTREAM ISSUES/PRs WE FILED
+================================================================================
+  gkostka/lwext4 #100 "Out-of-bounds read: ext4_ext_check() does not bound
+     eh_max/eh_entries to block capacity"
+     state=OPEN, comments=0, updatedAt=2026-07-14T14:24Z.
+     -> No maintainer response. Low-activity repo. No action (monitor only).
+     Our own fix ships as PR #1449 (OSv-side hardening); the upstream report is
+     just good-citizen disclosure.
+
+  No OTHER upstream issues/PRs found. ROADMAP records only lwext4#100 as filed
+  upstream. openzfs is consumed as-is (no upstream PR filed). musl/kbuild use the
+  osvunikernel forks (pre-existing OSv infrastructure, not ours to file against).
+
+================================================================================
+5. DRAFT PRs vs THEIR BASES  (stay-draft check + unblockability)
+================================================================================
+Base state drives correctness: base OPEN => draft correctly stays draft;
+base MERGED => draft should be un-drafted/rebased.
+
+  #1424 Crucible        base = #1423 (OpenZFS)  : base OPEN   -> stay draft (CORRECT)
+  #1444 virtio-net v6   base = #1442 (IPv6)     : base OPEN   -> stay draft (CORRECT)
+  #1445 NUMA L2 pools   base = #1441 (numa-alloc): base OPEN  -> stay draft (CORRECT)
+  #1447 ext4 perf       base = #1431 (ext4)     : base OPEN   -> stay draft (CORRECT)
+
+  ALL FOUR bases still OPEN => NONE unblockable this sweep. No draft to un-draft.
+
+  #1424 CRUCIBLE distance-from-master (requested):
+     - 39 commits BEHIND master (git rev-list master ^pr/crucible = 39).
+     - 19 commits ahead of its own base.
+     - Status MERGEABLE=CONFLICTING (as reported by gh).
+     - Blocked on #1423 (which is itself open); ALSO carries the stale old-layout
+       .gitmodules (external/openzfs @ codeberg, musl_1.1.24) -- see sec 3.
+     - CONCLUSION: #1424 needs a from-scratch rebase onto master AFTER #1423
+       merges (already the documented plan). Not touchable now.
+
+================================================================================
+6. WHAT REMAINS ON THE PLAN  (from ROADMAP.md + pg-osv-milestones.md)
+================================================================================
+MILESTONE 1 -- PG/OSv == PG/Linux apples-to-apples parity. Current position:
+  Stock UNMODIFIED PG (musl PIE) now, via the fork-arena integ branch, boots ->
+  runs crash recovery -> listens -> reaches PM_RUN "ready to accept connections"
+  -> aux procs (checkpointer/bgwriter/walwriter) SURVIVE. STILL NO psql rows.
+  Remaining fork-inheritance / context-safety WALLS (each bounded, gdb-isolable):
+    * [NEXT WALL] COW-page fault taken from IRQ / non-preemptable context ->
+      assert(sched::preemptable()). 3 triggers, one root: kernel structs reachable
+      from IRQ/RCU (epoll poll-list nodes, timer structs, net_channel pollers) sit
+      in COW-write-protected pages after fork; the COW break needs preemption ON.
+      FIX DIRECTION: keep interrupt-reachable kernel structs in shared never-COW'd
+      identity memory (same identity-heap-routing pattern used ~11 times already).
+    * [W-branch aux-proc] a 2nd wild-indirect-branch (0x13ff) in a separately-
+      forked aux proc, distinct from the file_vma one already fixed; needs a fresh
+      KVM+hbreak look (may be another file-backed VMA gap or a real writable-
+      indirection COW/preempt hazard).
+  Then: real rows (single+concurrent) -> /data on ZFS-over-EBS + local-NVMe L2ARC
+  (the #1423 stack) -> HammerDB A/B (PG/OSv vs PG/Linux), with a HYPERVISOR column:
+  KVM + Firecracker are the gating pair (qemu_microvm = local Firecracker stand-in;
+  early cheap signal = boot the fork test suite under qemu_microvm).
+  DEBT to erase before "unmodified" is honest: WAIT_USE_SELF_PIPE, neutered root/
+  dir-perm checks, unix_socket_directories='' (AF_UNIX fs sockets gap), setsid,
+  ps_status PS_USE_NONE. Each is a tracked OSv gap.
+  ARCHITECTURAL CEILING acknowledged: OSv's malloc heap lives in the shared kernel
+  identity map (can't be COW'd in place; virt_to_phys is arithmetic for DMA). The
+  fork-arena (option 3: COW-able app-slot heap for fork children, gated CONF_fork)
+  is the working path and now passes tst-pgfork 9/9 + full fork suite -- it is the
+  mechanism carrying PG this far. Isolated on integ/pg-fork-arena, NOT in any PR.
+
+MILESTONE 2 -- PGXN extension parity (every REL_19 extension + combos, under load,
+  categorize each FAIL as (a) OSv gap-we-fix or (b) not-ours). Prereq: M1 done.
+  NOT STARTED (correctly gated on M1).
+
+ARENA-INDEPENDENT FIXES TO FOLD INTO SHIPPING PRs (from the PG walls; each is a
+correct-on-its-own fork-inheritance fix and does NOT need the arena):
+  -> #1455 (fork base): fd-table inheritance/reference at fork (commit 0a874234f).
+  -> #1456 (COW AS):    file_vma type preservation in clone_address_space
+                         (commit d8f76829a) -- makes per-child COW correct for ANY
+                         file-backed mapping; ALSO the AS-aware mmap alloc path
+                         (W-mmap, commit 7c217c854) belongs here / own-PR-shaped.
+  -> #1457 (SIGCHLD):   per-fork-child signal_actions[] + sigwait-consumer
+                         refinement (commit c1c748da3); the sigwait-consumer part
+                         is a general correctness fix, not even fork-gated.
+  These are currently only on integ/pg-fork-arena (wip/fork-arena-wip). ACTION FOR
+  PARENT: cherry-pick / fold each into its shipping PR (they strengthen #1455/56/57
+  independent of the arena). This is the biggest concrete "unfinished plan" item.
+
+PENDING DRAFT REBASES / OTHER:
+  - #1424 Crucible: from-scratch rebase after #1423 merges (sec 5).
+  - #1444/#1445/#1447: un-draft + rebase after their bases (#1442/#1441/#1431) merge.
+  - openzfs 2.4.2 -> 2.4.3 bump as a post-#1423-merge follow-up (sec 3).
+
+WAITING-ON-MAINTAINER (no action, just queue): #1423 (ZFS, module-split + mount fix
+done per wkozaczuk), #1431-#1451 syscall/security fills, fork PRs #1455/56/57.
+
+================================================================================
+7. LOCAL TIDINESS
+================================================================================
+--- /tmp scratch (DONE by this agent, safe only) ---
+  /tmp had 18115 entries at maxdepth 1 (mostly a huge population from another
+  project). Today = 2026-07-24; "older than ~2 days" = mtime before ~07-22 16:51.
+  DELETED 32 clearly-OSv stale scratch files (>2 days old), e.g. ozfs_block.txt,
+  ozfs_userspace_block.txt, master_commits/changed.txt, zfs_touched.txt,
+  wip_differs.txt, initdb_tpl/tpl/tplr.log, wipe.log, review_diff{1,2}.txt,
+  commit_c/d.txt, 014_*.txt, mig2/probe_build.log, xml_out_new.txt, o1_*rows.txt,
+  m/w/hma_func.txt, mk_0001/meson_0001.txt, pg_fts-bug-*-2026-07-21.md.
+  KEPT: everything modified today (active-agent scratch). LEFT UNTOUCHED: 55
+  other-project stale files (libxtc-*, xtc_ab_*, tepid_*, surg_*, spinlock_*,
+  fiberctx*, thread_bound*, cinst.log, reinstall.log, schedule.txt) -- NOT ours,
+  another active project's scratch; not mine to delete.
+  Total OSv stale reclaimed: ~0.3 MB (scratch is tiny; the bulk of /tmp is the
+  other project). /tmp maxdepth1 now 18083.
+
+--- git worktrees (REPORT ONLY -- parent to remove; I removed none) ---
+  `git worktree list` = 30 worktrees. Removal candidates for the PARENT:
+
+  MERGED-upstream (branch's PR is MERGED; work is in master; safe to prune):
+    * .local/worktrees/block-mq   [pr/block-trim-mq]  = PR #1400 MERGED 2026-07-16.
+        Confirmed: drivers/virtio-balloon.cc + multiqueue in master; diff empty.
+        (~82M) -> REMOVE (git worktree remove + delete local branch pr/block-trim-mq).
+    * .local/worktrees/balloon    [pr/virtio-balloon] = PR #1420 MERGED 2026-07-20.
+        Confirmed: driver in master, `git diff master pr/virtio-balloon -- driver`
+        empty. (~82M) -> REMOVE.
+
+  STALE / ORPHAN (not a current open-PR branch tip):
+    * .local/worktrees/ext4       (detached HEAD c6fb7aa4a) -- matches NEITHER
+        pr/ext4-fsync-cache (6c7cd9aa6) NOR pr/ext4-perf (4e1fb8b78). Stale
+        detached checkout. (351M, 2nd biggest non-arena) -> candidate to REMOVE
+        (verify nothing uncommitted first).
+    * .local/worktrees/crucible-verify [pr/crucible] -- #1424's open head is now
+        pr/crucible-draft (NOT local); pr/crucible is the OLD branch. #1424 stays
+        open, but this worktree/branch is stale local state. (147M) -> candidate
+        to REMOVE once parent confirms pr/crucible-draft (the real #1424 head) is
+        safe on the remote; the work is reachable from gh-fork regardless.
+    * .local/worktrees/wbranch-wt (detached HEAD 99a21295b, 1.5G) -- W-branch
+        diagnostic scratch worktree. NOT a PR branch. Second-largest dir on disk.
+        -> candidate to REMOVE (it's diagnostic; commit 99a21295 is banked on
+        wip/fork-arena-wip + bundled per ROADMAP). Confirm no uncommitted work.
+
+  DO NOT REMOVE:
+    * .local/worktrees/fork-arena [integ/pg-fork-arena] -- ACTIVE (other agent
+        b838c20b, arena-dev container). 1.8G. LEAVE.
+    * All open-PR-branch worktrees (splice, fssc, signalfd, ipv6-port, vnet6,
+      numa*, sec-*, mremap, libaio, inotify, close-range, setrlimit, sigfills,
+      epoll2, syscall-fills=membarrier) -- each backs an OPEN PR. LEAVE.
+    * fork [feat/fork] = base of #1455 (10 commits ahead of master). LEAVE.
+    * zfs-move [zfs-move-submodule] (13 ahead) -- experimental, leave for owner.
+
+--- repo sizes ---
+  .git   = 1.3G  (reasonable for this history; a `git gc` could shave some but I
+                  did NOT run it -- would contend with the active arena build on
+                  floki. Leave gc to the parent at a quiet moment.)
+  .local = 6.1G, of which .local/worktrees = 5.5G. Biggest:
+     fork-arena 1.8G (ACTIVE, leave), wbranch-wt 1.5G (stale, candidate),
+     ext4 351M (stale detached, candidate), crucible-verify 147M (stale, candidate).
+     Removing wbranch-wt + ext4 + crucible-verify + the 2 merged worktrees
+     (block-mq, balloon) would reclaim ~2.2G without touching anything live.
+  No obviously-huge STRAY files under .local outside worktrees/bundles/reports:
+     .local/pg18 529M (PG build tree, expected), ozfs-fixes 31M (reports/bundles,
+     keep), osv-rewrite.bundle 23M, crucible-local 14M, cluster 13M -- all expected
+     artifacts, none stray.
+
+--- other LAN hosts ---
+  meh (192.168.1.185): OFFLINE / unreachable (ssh ConnectTimeout=5 -> failed).
+  Cannot inspect or clean. Consistent with prior sweeps (meh usually offline).
+
+================================================================================
+8. AWS  (profile numa, us-east-2)
+================================================================================
+  osv-* instances (running/pending filter): NONE.
+  osv-* instances (ANY state, broadened check): NONE. Parent's termination of
+     osv-zfsmount (i-08c2a9bfc7be6ff59) confirmed -- gone.
+  Old ipv6 "verify-later" root vol vol-00c0aeee79c20921b: NotFound (auto-deleted
+     as expected). Clean.
+  Available (unattached) EBS volumes:
+     * vol-0e2c3738f3ff2d6d4  20 GiB  untagged  created 2026-07-23.
+       NOT OURS: untagged + 20GB does not match our 60-150GB osv roots; parent
+       already flagged this same volume last sweep as not-ours. LEFT UNTOUCHED.
+     (vol-0512a62afaff55dd7 solnix-oi-seed from a prior sweep no longer appears in
+      the available list -- either attached or removed by its owner; not ours.)
+  ACTION FOR PARENT: none. AWS footprint is clean of osv-* resources. Do NOT
+     delete vol-0e2c3738f3ff2d6d4 (not ours).
+
+================================================================================
+END OF REPORT
+================================================================================

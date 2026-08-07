@@ -1,0 +1,190 @@
+================================================================================
+STOCK PostgreSQL DURABLY SERVING ON AN OpenZFS RAID-Z (NVMe + EBS) POOL ON OSv
+  + fork_arena rename-path cross-AS fix (RAID-Z checkpoint crash)
+================================================================================
+Date:   2026-07-26   Driver: floki (local) over ssh -> EC2 m5d.metal
+EC2:    ec2-user@3.145.108.149  (osv-build + osv-net containers, NOT terminated)
+Branch: integ/pg-fork-zfs   base 08dccbbb (== EC2 tree base)   HEAD dad7e075
+Author: Greg Burd
+Bundle: /tmp/pg-raidz.bundle  (08dccbbb..dad7e075) -- on EC2 + floki
+
+================================================================================
+PART A -- THE RAID-Z (NVMe + EBS) OpenZFS POOL
+================================================================================
+
+GEOMETRY + JUSTIFICATION
+------------------------
+Pool "pgdata", ONE pool spanning BOTH storage tiers:
+
+    raidz1  (4x 200GB EBS gp3)   <- durable data vdev, 1-disk fault tolerant
+    log     (1x 838GB local NVMe) <- SLOG (ZIL sync-write landing zone)
+    cache   (1x 838GB local NVMe) <- L2ARC (read cache)
+
+WHY this layout (durability + perf + replicable on Linux):
+  * Local NVMe is EC2 INSTANCE-STORE = EPHEMERAL: it is wiped on stop/terminate.
+    It must therefore NEVER hold the only copy of data.  It is ideal, however,
+    for SLOG + L2ARC: a lost SLOG only forfeits in-flight sync writes (ZFS
+    tolerates a missing/faulted log device), and L2ARC is pure cache -- both
+    ephemeral-safe.
+  * EBS is network-durable and survives an instance stop, so the durable DATA
+    lives on the 4 EBS as a raidz1 (survives one EBS failure; ~600GB usable,
+    560GB free after fs overhead).  raidz1 (not raidz2) because with only 4
+    members raidz2 spends half the capacity on parity; raidz1 gives the
+    meaningful "survive a disk loss" guarantee while the NVMe tier delivers the
+    speed via SLOG+L2ARC.
+  * Exactly replicable on Linux for the A/B control:
+      zpool create -o ashift=12 -O compression=lz4 -O atime=off \
+        -O recordsize=8k -O logbias=throughput -O primarycache=all \
+        -m /data pgdata raidz1 <4 EBS> log <nvme> cache <nvme>
+    Same devices, same vdev types, same props.
+
+OSv exposure: each vdev member is a separate virtio-blk device to the guest
+(one -drive per member).  Declaration/probe order = guest vblk index:
+    vblk0 = OS image (rootfs=zfs)
+    vblk1..vblk4 = 4x EBS  (/dev/nvme5n1 nvme6n1 nvme7n1 nvme8n1) -> raidz1
+    vblk5        = 1x NVMe (/dev/nvme0n1)                         -> log (SLOG)
+    vblk6        = 1x NVMe (/dev/nvme3n1)                         -> cache (L2ARC)
+The pool is created IN-GUEST by the OpenZFS userland (zpool.so) over those
+virtio-blk devices -- the multi-vdev raidz1 + log + cache path works on
+OpenZFS-on-OSv with NO new #1423 fix required (a single-file pool was proven
+before; the multi-disk raidz path imported/mounted/scrubbed clean here).
+
+ZFS PROPS (identical for the Linux A/B control):
+    ashift=12  recordsize=8K  compression=lz4  atime=off
+    logbias=throughput  primarycache=all
+(sync=disabled is set by the functional serve script for the smoke run, matching
+ the proven single-file baseline; the SLOG is present and carries the ZIL when
+ sync=standard -- see the remaining-wall note.)
+
+AUTHORITATIVE zpool status (freshly imported, post-pgbench):
+--------------------------------------------------------------------------------
+  pool: pgdata
+ state: ONLINE
+config:
+	NAME        STATE     READ WRITE CKSUM
+	pgdata      ONLINE       0     0     0
+	  raidz1-0  ONLINE       0     0     0
+	    vblk1   ONLINE       0     0     0
+	    vblk2   ONLINE       0     0     0
+	    vblk3   ONLINE       0     0     0
+	    vblk4   ONLINE       0     0     0
+	logs
+	  vblk5     ONLINE       0     0     0
+	cache
+	  vblk6     ONLINE       0     0     0
+errors: No known data errors
+
+NAME    PROPERTY      VALUE        SOURCE
+pgdata  ashift        12           local
+pgdata  compression   lz4          local
+pgdata  recordsize    8K           local
+pgdata  atime         off          local
+pgdata  logbias       throughput   local
+pgdata  primarycache  all          local
+pgdata  sync          disabled     local
+NAME     USED  AVAIL  REFER  MOUNTPOINT
+pgdata   639M   560G   638M  /data           <- PG /data IS a dataset on the raidz
+--------------------------------------------------------------------------------
+A prior `zpool scrub pgdata` reported: "scrub repaired 0B in 00:00:00 with 0
+errors" -- the raidz is self-consistent on disk.
+
+--------------------------------------------------------------------------------
+THE RAID-Z WALL I HAD TO FIX FIRST: forked-backend checkpoint crash
+  [fork-stack / CONF_fork]  commit dad7e075
+--------------------------------------------------------------------------------
+Symptom: PG served on the raidz and small writes round-tripped, but a checkpoint
+that recycled WAL segments (a checkpoint reporting "2 recycled") aborted the
+guest:
+    Assertion failed: h->magic == chunk_magic (core/fork_arena.cc: recover: 257)
+
+gdb root cause (break on __assert_fail, walk the stack):
+    #0 __assert_fail  expr="h->magic == chunk_magic" line=257 func=recover
+    #3 fork_arena::free (p in arena VA 0x30...)          fork_arena.cc:267
+    #4 drele (dp=0x6001071ce700) at fs/vfs/vfs_dentry.cc:229   <- free(dp->d_path)
+    #8 vfs_file::close  <- close(fd)   (a forked backend closing a renamed file)
+  (the OTHER running thread was mid clone_address_space, walking mmu::cow_range
+   -- confirming the fork/COW context.)
+
+  dentry_alloc() ALREADY wraps its dentry + d_path allocations in a
+  fork_arena::kernel_heap_scope so shared dentry-cache memory stays OFF the
+  per-address-space COW fork arena.  dentry_move() (the RENAME path) did NOT: its
+  `dp->d_path = strdup(path)` ran unguarded, so a rename issued by a forked
+  PostgreSQL backend put the new d_path in that backend's COW-PRIVATE arena.
+  When the last dentry ref later dropped in a DIFFERENT address space (AS0
+  postmaster / a sibling backend), free(dp->d_path) read the chunk header at
+  that arena VA through the freeing AS's page tables -- where, post-COW-divergence,
+  a different physical page lives -- so the header magic mismatched and aborted.
+  PG hits this precisely on WAL-segment recycling (rename of a pg_wal file)
+  during a checkpoint -- the "N recycled" checkpoint.
+
+Fix (fs/vfs/vfs_dentry.cc, #if CONF_fork): wrap dentry_move's d_path strdup in
+the same kernel_heap_scope as dentry_alloc.  The renamed path now lands on the
+identity kernel heap -- one object at one VA/content in every address space,
+freeable from any AS.  conf_fork=0 compiles the plain strdup (byte-identical).
+Classification: SAME cross-AS class as the four shipped walls (a shared object
+that must be identical in every AS routed off the COW arena).
+
+================================================================================
+PART A -- DURABLE-SERVE EVIDENCE ON THE RAID-Z (all pasted, all on the raidz)
+================================================================================
+
+--- (1) block WRITE counter MOVES (real virtio-blk I/O to the raidz members) ---
+BEFORE:  g_blk_wr_submitted = 499 ; g_blk_wr_completed = 499
+SQL:     create table wtest as select ... generate_series(1,100000); checkpoint;
+         select count(*) from wtest;  ->  100000
+AFTER:   g_blk_wr_submitted = 741 ; g_blk_wr_completed = 741
+         (+242 VIRTIO_BLK_T_OUT writes; submitted==completed = all durably issued)
+
+--- (2) DURABILITY across a guest crash (kill -9) + reboot + raidz re-import ---
+PHASE 1 (write + checkpoint, then kill -9 the qemu after a 12s txg settle):
+    create table durx(id int primary key, tag text);
+    insert into durx values (1,'RAIDZ-DURABLE-MARKER'); checkpoint;
+     id |         tag
+    ----+----------------------
+      1 | RAIDZ-DURABLE-MARKER
+PHASE 2 (reboot, re-import the SAME raidz, PG crash-recovers, read back):
+    LOG: database system was not properly shut down; automatic recovery in progress
+    LOG: redo starts at 0/1714F88
+    LOG: redo done at 0/17150A8
+    LOG: database system is ready to accept connections
+    select * from durx;
+     id |         tag
+    ----+----------------------
+      1 | RAIDZ-DURABLE-MARKER    <=== DURABLE: survived crash+reboot on the raidz
+
+--- (3) pgbench -i -s 100 (10,000,000-row init) on the raidz ---
+    10000000 of 10000000 tuples (100%) of pgbench_accounts done (elapsed 7.76 s)
+    vacuuming... creating primary keys...
+    done in 12.59 s.
+
+--- (4) pgbench -c 8 -T 60 (TPC-B read/write) on the raidz ---
+    transaction type: <builtin: TPC-B (sort of)>
+    scaling factor: 100
+    number of clients: 8
+    duration: 60 s
+    number of transactions actually processed: 219902
+    number of failed transactions: 0 (0.000%)      <=== 0 FAILED
+    latency average = 2.162 ms
+    tps = 3699.428835 (without initial connection time)
+NOTE: tps is over qemu user-net loopback with sync=disabled ZIL -- a CORRECTNESS
++ liveness-under-write check on the RAID-Z, NOT the reported benchmark number.
+The real benchmark is external HammerDB TPROC-C on this layout.
+
+--------------------------------------------------------------------------------
+REMAINING WALL noted (bounded, characterized): ZIL replay on the SLOG after crash
+--------------------------------------------------------------------------------
+With sync=standard (ZIL active on the SLOG vblk5), a kill -9 mid-txg followed by
+a re-import panicked in OpenZFS ZIL replay:
+    SPL PANIC at .../module/zfs/abd.c:220:abd_alloc_linear():
+      VERIFY3U(size, <=, SPA_MAXBLOCKSIZE) failed (18446744073709535232 <= 16777216)
+i.e. a ZIL log record replayed with a wild (~18 EiB, 0xFFFFFFFFFFFF8000) size, so
+abd_alloc_linear tried an impossible allocation.  The POOL ITSELF is clean
+(scrub 0 errors); this is a ZIL-replay validation issue on the OpenZFS-on-OSv
+SLOG path -- a [#1423 / OpenZFS] candidate.  The durable-serve proof above uses
+sync=disabled (matching the proven baseline); the SLOG is present in the
+geometry and the sync policy is per-run tunable.  Next to fix if the benchmark
+wants sync=standard durability through the ZIL.
+
+================================================================================
+PART B -- PG PARALLEL-QUERY WALL  (in progress -- see below)
+================================================================================

@@ -1,0 +1,157 @@
+=== WALL3_PAGE_QUAR page-level UAF — RUN 3 RESULT (POSITIVE / FIRED) ===
+Author: Greg Burd
+Box: osv-cor-a m5d.metal (3.16.46.123), branch wall3c-diagnostics, /build/osv
+Redirect: prior cache quarantine (5 metadata caches abd_chunk/dbuf/arc_buf_hdr x2/
+  dbuf_dirty_record) ALL CLEAN.  Corruptor is a PAGE-granularity wild write that
+  clobbers the OSv physical page allocator free-list (boost intrusive assert in
+  page_range_allocator::alloc via page_pool::l2::refill).  New instrument:
+  WALL3_PAGE_QUAR in core/mempool.cc — poison + FIFO-quarantine every freed
+  page_range out of circulation (bitmap keeps it "allocated" so alloc/coalesce
+  skip it); verify poison intact on eviction; gated on fork_arena::ready() so the
+  zfs image-builder VM is unaffected.  N=4096, park ranges <=256K.
+Build: WALL3_PAGE_QUAR=1 conf_zfs=openzfs conf_fork=1 -j96 (loader 20:08).
+Repro: fresh clean 8k lz4 pool, boot -smp4 -m32G KVM, pgbench -i -s1000.
+
+RESULT: *** FIRED at ~7s into pgbench -i (during first checkpoint) ***
+2026-07-28 20:11:36.277 UTC [2] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-07-28 20:11:36.469 UTC [592] LOG:  database system was shut down at 2026-07-27 11:08:15 UTC
+2026-07-28 20:11:36.478 UTC [2] LOG:  database system is ready to accept connections
+2026-07-28 20:11:43.921 UTC [590] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-07-28 20:11:43.921 UTC [590] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-07-28 20:11:43.925 UTC [590] LOG:  checkpoint starting: wal
+2026-07-28 20:11:50.255 UTC [590] LOG:  checkpoint complete: wrote 97 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.842 s, sync=0.322 s, total=6.330 s; sync files=40, longest=0.317 s, average=0.009 s; distance=538123 kB, estimate=538123 kB; lsn=0/40621E78, redo lsn=0/22470348
+
+*** WALL3_PAGE_QUAR UAF: page-range=0x400126238000 size=4096 first-mismatch-off=1128 ***
+    pattern=d041474531561ac6  (a whole freed page was written after free)
+    expected(8-byte pat): c6 1a 56 31 45 47 41 d0 
+    found   : 28 84 23 26 01 50 00 00 c6 1a 56 31 45 47 41 d0 c6 1a 56 31 45 47 41 d0 c6 1a 56 31 45 47 41 d0 
+    FREEING backtrace (who returned this page to the page_pool):
+      #0 0x4036c849
+      #1 0x4036ca3b
+      #2 0x4036e8c0
+      #3 0x40371a7c
+      #4 0x403883a8
+      #5 0x4030ce32
+    CURRENT backtrace (page_range_allocator::free, evicting now):
+      #0 0x4036d395
+      #1 0x10000001f3f2
+      #2 0x100000021ef3
+      #3 0x10000003896c
+      #4 0x100000038d7a
+      #5 0x100000038fa7
+      #6 0x403883a8
+      #7 0x4030ce32
+*** WALL3_PAGE_QUAR halt for gdb ***
+WALL3_PAGE_QUAR: page-level UAF
+[backtrace]
+0x000000004036c68e <memory::page_range_allocator::free(memory::page_range*)+878>
+0x000000004036d394 <free+340>
+0x000010000001f3f1 <???+127985>
+0x0000100000021ef2 <???+138994>
+0x000010000003896b <???+231787>
+0x0000100000038d79 <???+232825>
+0x0000100000038fa6 <???+233382>
+
+scp -> floki done below
+
+=== SYMBOLICATION + ANALYSIS ===
+Page VA (freed)     : 0x400126238000  = mem_area::main  (area 0, base 0x400000000000)
+Written pointer VA  : 0x500126238428  = mem_area::page  (area 1, base 0x500000000000)
+  -> SAME physical page (offset 0x126238xxx), two OSv identity aliases.
+  OSv mem_area layout (include/osv/mmu-defs.hh):
+    base = 0x400000000000 | (area<<44); size = 1<<44
+    area0 main=0x400.. area1 page=0x500.. area2 mempool=0x600..
+Mismatch: exactly 8 bytes clobbered at offset 1128 (a single pointer);
+  poison intact before and after -> a lone stray POINTER STORE, not a struct memset.
+  found  @1128: 28 84 23 26 01 50 00 00  = little-endian 0x0000500126238428
+  i.e. someone stored a mem_area::page pointer INTO an already-freed page.
+
+FREEING backtrace (who legitimately returned the page to the pool):
+  #0 page_pool::l2::free_batch(page_batch&)         core/mempool.cc:1842
+  #1 (atomic load, inlined)                          l2::fill_thread path
+  #2 page_pool::l2::fill_thread()                    core/mempool.cc:1767
+  #3 std::_Function_handler<... l2()::lambda#1 ...>  (thread trampoline)
+  #4 thread_main_c                                   arch/x64/arch-switch.hh:474
+  -> the page went back via L2's background fill_thread unfill/free_batch. NORMAL.
+CURRENT backtrace (thread that was in page_range_allocator::free at eviction):
+  #0 page_range_allocator::free                      core/mempool.cc (quarantine)
+  #1..#5 0x1000000xxxxx  = APPLICATION / fork (PG) address space frames
+  -> the eviction (and thus the run) is driven by a PG/fork-space thread.
+
+CLASSIFICATION (preliminary): [fork-stack], NOT [#1423/OpenZFS].
+  The wild write is a mem_area::page-aliased pointer store into a physical page
+  that OSv's page_pool had already freed.  page_batch::nr_pages=32 (256B header),
+  so offset 1128 is NOT a page_batch header write -> the stale writer is some
+  OTHER holder of an alloc_page()/mem_area::page pointer to this recycled page.
+  The 0x500 (mem_area::page) alias + PG-space current stack points at the fork
+  page-sharing / COW path handing a still-referenced page back to the page_pool.
+
+NEXT (to name the exact writer): hardware watchpoint on the poisoned page's 0x500
+  alias @off 1128 while quarantined -> trap the store, dump the writer's stack.
+
+=== MECHANISM (page-pool cross-CPU free path; CONF_fork/fork-arena era) ===
+The wild write is an 8-byte mem_area::page pointer stored into a page that
+page_pool::l2 had already recycled.  The pool small-object allocator
+(core/mempool.cc) frees cross-CPU objects through an intrusive lock-free MPSC
+queue (lockfree::unordered_queue_mpsc<free_object>, garbage_sink) whose `next`
+links live INSIDE the freed objects' pages:
+  push():  item->next = old; CAS(_head,...)          // writes link into object/page
+  pop():   r=_head.exchange(0); _poll_list=r->next    // reads link from object/page
+collect_garbage() pops and calls pool::free_same_cpu(obj); when a page's nalloc
+hits 0 and other full pages exist, free_same_cpu does untracked_free_page() ->
+the whole page goes back to page_pool::l2.  The MPSC internals (_poll_list, or a
+concurrent producer's item->next store) can still reference an object on that
+page -> stale 8-byte pointer store/read into the recycled page = the page-level
+UAF that later trips the boost intrusive assert in page_range_allocator::alloc.
+
+Recent commits on this branch are the fork stack (594e759c fork COW arena,
+07cc861d cross-AS ZFS I/O coherence).  The fork arena moved *application* heap
+out of the shared kernel pool for exactly this "child scribbles shared heap"
+reason; the cross-CPU page-reclaim path in the shared pool is the same hazard
+class, still open.  CLASSIFICATION: [fork-stack] (CONF_fork), not [#1423/OpenZFS].
+
+STATUS: corruptor NAMED (page_pool cross-CPU free/reclaim of shared pool pages).
+Two candidate write sites (concurrent producer item->next store; or _poll_list
+stale traversal).  To pin the exact store before fixing: hardware watchpoint on
+the poisoned page @off 1128 (0x500 alias) — next step.  Candidate fix: stop
+pool::free_same_cpu from returning pages to page_pool while cross-CPU frees to
+that pool may be in flight (keep empties on the pool _free list; bounded, reused).
+
+=== FIX ATTEMPT #1 + DECISIVE CONFIRMATION (fork-stack, not OpenZFS) ===
+Candidate fix: under CONF_fork, make pool::free_same_cpu NOT return emptied pool
+pages to page_pool (keep them on the pool _free list).  Rebuilt clean, reseeded,
+re-ran -smp4 -m32G 8k pgbench -i -s1000.
+
+RESULT: WALL3_PAGE_QUAR went SILENT (0 fires) and pgbench ran WELL PAST the ~7s
+point where RUN 3 fired (multiple checkpoints completed) -> the page-level UAF is
+GONE with the reclaim removed.  BUT a NEW assert surfaced:
+    Assertion failed: sched::preemptable() (arch/x64/mmu.cc: page_fault: 38)
+i.e. a PAGE FAULT happened while preempt_lock was held.  Retaining pool pages
+means a later pool::alloc() (under preempt_lock) hands out an object on a page
+that is COW-shared from the fork parent; the first write COW-faults while
+non-preemptable -> assert.
+
+=> DECISIVE: the shared kernel small-object POOL pages are COW-shared across
+fork().  This is the SAME hazard the fork arena (594e759c) was built to remove
+for the *application* heap, still open for the *pool cross-CPU reclaim* path:
+  - Original corruptor: kernel recycles a pool page (untracked_free_page in
+    free_same_cpu) while a forked child / cross-CPU producer still holds a
+    mem_area::page (0x500) reference -> stale 8-byte pointer store into the
+    recycled page -> page_range_allocator free-list corruption.
+  - Fix#1 stopped the recycle but exposed that those same pool pages are COW
+    parent/child shared -> write-fault-under-preempt-lock.
+Both are one root: pool pages living in shared kernel memory participate in fork
+COW.  CLASSIFICATION: [fork-stack] (CONF_fork), NOT [#1423/OpenZFS] — confirmed
+twice (quarantine data + the COW-fault the reclaim-removal exposed).
+
+CORRECT FIX DIRECTION (not yet landed; needs the fork-arena author call):
+  Route the small-object pool (or at least pages backing objects a forked child
+  can touch) through the SAME per-child COW arena / app-slot VA the fork stack
+  already uses for the app heap, OR make cross-CPU pool reclaim fork-COW-aware
+  (defer untracked_free_page until no address space still maps the page).  A
+  blanket "never reclaim" is wrong: it just relocates the COW hazard to alloc().
+
+STATE: tree reverted to the faithful (unfixed) build + WALL3_PAGE_QUAR
+instrument retained in core/mempool.cc (gated on fork_arena::ready()).  The
+corruptor is NAMED and CLASSIFIED; the fix is a fork-stack change, not a cache
+or one-liner.

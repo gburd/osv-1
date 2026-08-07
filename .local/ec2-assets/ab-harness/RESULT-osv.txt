@@ -1,0 +1,4 @@
+OSv A-side (real tap+vhost NIC, inet_server_addr=192.168.100.2 NOT loopback), scale=5 dur=15s TCG:
+RW c1=101.08 c8=224.07 c16=199.55 c32=103.28 tps
+RO c1=721.38 c8=1999.98 c16=1109.46 c32=710.15 tps
+c16 AND c32 COMPLETED (slirp wedge CLEARED).

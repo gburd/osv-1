@@ -1,0 +1,134 @@
+========================================================================
+OSv pg18-fork + ZFS image: GCC 11.5 build failure - root cause + fix
+========================================================================
+Branch:  integ/pg-fork-zfs  (base tip 3aebcdfbc)
+Config:  image=pg18-fork fs=zfs conf_zfs=openzfs conf_fork=1
+
+------------------------------------------------------------------------
+1. THE EXACT GCC 11.5 ERROR (reproduced natively on GCC 11.5.0)
+------------------------------------------------------------------------
+  CXX core/mmu.cc
+  core/mmu.cc:2596:21: error: definition of implicitly-declared
+      'virtual mmu::anon_vma::~anon_vma()'
+   2596 | anon_vma::~anon_vma()
+        |                     ^
+  make[1]: *** [Makefile:445: build/release.x64/core/mmu.o] Error 1
+
+After the mmu.cc symptom is addressed, the SAME class of error surfaces in
+libc/process/fork.cc (and every other fork-only source), e.g.:
+  libc/process/fork.cc:140:21: error: 'current_address_space' is not a
+      member of 'mmu'
+  libc/process/fork.cc:160:5: error: 'fork_arena' has not been declared
+  ... (dozens more)
+
+NOTE: GCC 13.3 is NOT actually lenient about the mmu.cc error. A clean
+conf_fork=0 tree fails IDENTICALLY on GCC 13.3:
+  core/mmu.cc:2596:21: error: definition of implicitly-declared
+      'virtual mmu::anon_vma::~anon_vma()'
+
+------------------------------------------------------------------------
+2. ROOT CAUSE (two independent bugs, both real)
+------------------------------------------------------------------------
+BUG A - core/mmu.cc: anon_vma destructor declaration/definition mismatch
+  * include/osv/mmu.hh declares  ~anon_vma();  ONLY inside  #if CONF_fork.
+  * core/mmu.cc DEFINES  anon_vma::~anon_vma()  UNCONDITIONALLY - only the
+    BODY was gated by #if CONF_fork, not the definition itself.
+  * When CONF_fork == 0 the class does not declare the destructor, yet the
+    .cc still defines one -> "definition of implicitly-declared destructor".
+  * This is an ISO C++ conformance error. GCC 11 AND GCC 13 both reject it.
+    It broke conf_fork=0 on every toolchain.
+
+BUG B - Makefile:149: conf_fork not forwarded to the Kconfig sub-make
+  * conf/kconfig/threads:  config fork  def_bool $(shell,[ "$conf_fork"=1 ]).
+    The Kconfig option is driven by the ENV var conf_fork.
+  * conf/Makefile's config recipes pass  conf_fork=$(conf_fork)  through.
+  * BUT Makefile line 149 auto-generates the config with:
+        $(shell make -f conf/Makefile -j1 config 1>/dev/null)
+    and does NOT forward conf_fork. GNU make does not propagate a
+    command-line variable override into a $(shell ...)-invoked sub-make,
+    so the sub-make sees conf_fork unset -> Kconfig picks CONF_fork=0.
+  * Net effect: building with conf_fork=1 still produced
+    kernel_config_fork.h => #define CONF_fork 0.  The fork feature was
+    silently NOT compiled in, and every fork-only file that is only
+    partially #if-gated (mmu.cc, fork.cc, ...) failed to compile.
+
+Why the fork image "used to build" on the GCC-13 host: only if CONF_fork
+happened to be 1 there (a pre-seeded/regenerated .config with fork=y).
+With a genuinely fresh tree the plumbing bug bites on GCC 13 too.
+
+------------------------------------------------------------------------
+3. THE FIX (portable, works on GCC 11 and GCC 13, no behavior change)
+------------------------------------------------------------------------
+FIX A  core/mmu.cc: move the #if CONF_fork to wrap the WHOLE destructor
+       definition, matching the header's gated declaration:
+
+   -anon_vma::~anon_vma()
+   -{
+   -#if CONF_fork
+   -    if ((_flags & mmap_shared) && ...) {
+   -        delete static_cast<shared_anon_page_provider*>(_page_ops);
+   -    }
+   -#endif
+   -}
+   +#if CONF_fork
+   +anon_vma::~anon_vma()
+   +{
+   +    if ((_flags & mmap_shared) && ...) {
+   +        delete static_cast<shared_anon_page_provider*>(_page_ops);
+   +    }
+   +}
+   +#endif
+
+FIX B  Makefile:149: forward conf_fork to the config sub-make:
+
+   -    $(shell make -f conf/Makefile -j1 config 1>/dev/null)
+   +    $(shell make -f conf/Makefile -j1 config conf_fork=$(conf_fork) 1>/dev/null)
+
+Both changes are gated by CONF_fork / conf_fork; conf_fork=0 output is
+unchanged.
+
+------------------------------------------------------------------------
+4. BYTE-IDENTICAL PROOF (conf_fork=0 / conf_fork=1 unchanged)
+------------------------------------------------------------------------
+* At CONF_fork==1 the mmu.cc change is a preprocessor no-op: the
+  destructor token stream is identical (only blank-line positions move).
+  Verified: NON-BLANK preprocessed tokens 100% identical.
+* Compiled with -g0 (no DWARF line tables), the CONF_fork=1 core/mmu.o is
+  SHA-256 IDENTICAL between original and fixed source:
+    d5eb0a0d942bb00bb541fa1d746ccce5d2ca51cb722eb3b45d13bbeafa03bfbf
+  (The -g object differed only in DWARF line numbers - runtime code same.)
+* Makefile FIX B with conf_fork=0/empty forwards an empty value -> the
+  generated .config is identical to before -> conf_fork=0 kernel identical.
+
+------------------------------------------------------------------------
+5. BOTH-TOOLCHAIN BUILD + BOOT CONFIRMATION
+------------------------------------------------------------------------
+GCC 11.5.0 (native, the failing toolchain):
+  * core/mmu.o                          : compiles, EXIT 0
+  * full fork+zfs kernel (conf_fork=1)  : compiles + LINKS clean,
+                                          loader-stripped.elf produced,
+                                          CONF_fork=y in .config
+  * conf_fork=0 kernel                  : compiles clean (previously failed)
+  * image assembly (usr.img, 7.99 MB)   : EXIT 0
+  * BOOT (KVM):  ZFS: OpenZFS 5000 initialized
+                 ZFS: root mounted ok, z_root=34
+                 Booted up in 363.60 ms  -> command prompt reached
+
+GCC 13.3.1 (regression check):
+  * full fork+zfs image (conf_fork=1)   : BUILD EXIT 0
+  * BOOT (KVM):  OSv v0.57.0-437-g3aebcdfb
+                 ZFS: OpenZFS 5000 initialized
+                 ZFS: root mounted ok
+                 Booted up in 344.47 ms  -> command prompt reached
+
+Note: pg18-fork app module is not part of this branch (private app tree
+pinned to an unreachable commit), so image=empty fs=zfs conf_zfs=openzfs
+conf_fork=1 was used - it exercises the identical kernel compile+link and
+the ZFS image path.  The build failure was purely in the kernel
+(core/mmu.cc + fork.cc), which is fully covered.
+
+------------------------------------------------------------------------
+6. FILES CHANGED
+------------------------------------------------------------------------
+  Makefile      (1 line)  - forward conf_fork to config sub-make
+  core/mmu.cc   (dtor)    - gate ~anon_vma() definition under CONF_fork

@@ -1,0 +1,65 @@
+PRMAINT2 DELTA SWEEP START Sun Aug  2 01:06:08 AM UTC 2026
+
+=== MIRRORS: all 3 masters at ae077860c (upstream/gh-fork/origin) - ALIGNED, upstream not moved. CONFIRMED.
+=== OPEN PRs: 32 (prior 30 + #1463 vnet-mq draft + #1464 sched-load-balance). All MERGEABLE except #1424 (CONFLICTING blocked draft).
+
+=== DELTA SCAN (task 1): NO new maintainer activity after 2026-08-01T18:00Z.
+  - PR-level comments/reviews after cutoff: NONE (all authored gburd/github-actions).
+  - Inline review-thread comments after cutoff: NONE.
+  - #1463 updatedAt 01:04:57Z = MY OWN reply (scheduler root cause + #1464 + MSI-X split offer). Not new maintainer input. Clean/leak-free.
+  - wkozaczuk's 2026-08-01T17:32 #1463 comment already answered by me. No re-reply.
+=== PRIOR-SWEEP HELD (task 1 spot-check): unresolved counts match prior log exactly:
+  #1423=2 (wkozaczuk answered Qs, expected) ; #1425/1429/1431/1432/1433/1434/1435/1436/1439/1450/1451 ALL=0. Nothing silently reopened.
+
+=== TASK 2 HEALTH:
+  #1464 sched-load-balance: OPEN not-draft MERGEABLE, single commit 4bb2531d0 core/sched.cc (+24/-4), sig=G Greg Burd, leak-clean msg+diff, no reviewer comments, no CI on upstream. HEALTHY, nothing to change.
+  #1458 integ/pg-fork-zfs: DRAFT tip 8d775cc01, 65 ahead of master. Rule-1b CLEAN (0 osv_sigtimedwait deletions, tst-signal-fills.cc intact, shared-file diffs all net-additions: pthread +66, signal +247/-15, linux +22). Healthy tracking branch, not restructured.
+  #1460: MERGED (=ae077860c, virtio-blk per-queue-lock-drain, virtio-blk.cc only). This IS the +1 orthogonal commit. Master unmoved since.
+  #1461 rng-reseed: OPEN MERGEABLE 0 unresolved 0 comments. HEALTHY.
+  #1462 balloon-reword: OPEN MERGEABLE 0 unresolved 0 comments. HEALTHY.
+  All other open PRs (#1424 blocked-draft, #1437/38/40/41/42/44/45/47/48/49/55/56/57/59): 0 unresolved, no new activity. HEALTHY.
+=== TASK 5 REBASE re-verify: master tip ae077860c touches ONLY drivers/virtio-blk.cc. No reviewable PR touches that file -> ZERO silent-revert risk. NO REBASES NEEDED. #1424 stays CONFLICTING blocked-draft.
+
+=== TASK 4 DEP FRESHNESS (re-check):
+  OpenZFS submodule modules/open_zfs/openzfs pinned 83020cf8 == refs/tags/zfs-2.4.3^{} (peeled). ls-remote confirms latest RELEASE tags: 2.4.0/1/2/3 + zfs-2.4.99 (dev snapshot, not a release). NO zfs-2.4.4 release exists. Pin = latest released 2.4.x. NO BUMP.
+  Submodule pins on our branches EXACTLY match upstream/master (ae077860c): apps 2347c09, kbuild 9f1d27a, musl_0.9.12 372a948, musl_1.2.1 73cc775. No divergence, NO BUMPS.
+  lwext4 gkostka#100: still OPEN, 0 comments, no activity since 2026-07-14 (dead repo, routed around via #1449). NO new reply.
+  No OTHER OSv upstream issue/PR awaiting our action.
+  => ALL DEPS CURRENT.
+
+=== TASK 3: MSI-X VECTOR-BUDGET SPLIT - FEASIBLE, CLEANLY SEPARABLE. DONE (branch prepared).
+  #1463 is 1 commit, 7 files. Split = 5 files (drop the 2 virtio-net files):
+    arch/x64/exceptions.cc  register_interrupt_handler returns 0 sentinel instead of abort() on IDT exhaustion
+    drivers/msi.cc          ~msix_vector skips unregister when _vector==0; request_vectors stops+returns short vector on exhaustion (existing easy_register already treats short as failure)
+    drivers/virtio.cc/.hh   virtio_driver::reserve_msix_vectors() process-wide soft budget (192), grants>=1
+    drivers/virtio-blk.cc   caps _num_queues via reserve_msix_vectors (the real non-net consumer = the boot-crash scenario)
+  Self-consistent: reserve_msix_vectors defined+consumed within the 5 files; net files' usage simply not included; net stays single-queue as on master. get_vector() already exists on master. easy_register short-result=false path already exists on master.
+  Reworded 2 comments to stay self-contained+leak-clean (dropped "virtio-net multiqueue" future-consumer mention; "steered"->"directed" I/O).
+  Branch: pr/msix-vector-budget off ae077860c, commit 8763dadf8, author Greg Burd, Signed-off-by. Rule-1b clean (5 feature files only). Leak-clean msg+diff, no em-dashes. NOT signed yet (needs your ED25519 re-sign -> sig G).
+  BUNDLE: .local/prmaint-bundles/prmaint2-msix-vector-budget.bundle (base ae077860c). NEW branch -> normal push (git push gh-fork pr/msix-vector-budget), then open PR against cloudius-systems/osv master.
+INSTANCE-ID: i-050d0725cad50f24c
+PUBLIC IP: 3.19.242.61
+
+=== TASK 3 BUILD VERIFY (box i-050d0725cad50f24c m5d.metal, GCC 11.5 AL2023):
+  Applied split patch to upstream master (ae077860c) - applies CLEAN.
+  All 4 affected TUs compiled clean (make rc 0): exceptions.o, msi.o, virtio.o, virtio-blk.o.
+  Whole kernel compiled: 1198 .o files built with patch applied (loader.o 2.5MB). Final loader.elf blocked ONLY at bootfs/libsolaris.so packaging = missing openzfs submodule (orthogonal to patch, not init'd).
+  SYMBOL PROOF: reserve_msix_vectors DEFINED (T) in virtio.o, REFERENCED (U) in virtio-blk.o. Partial-link (ld -r) of the 4 objects succeeds -> reserve_msix resolves to T within the split's OWN files. Split is self-consistent; no dangling ref to dropped virtio-net files. register_interrupt_handler + request_vectors compiled with modified bodies (.cold early-exit sections present).
+  BOOT A/B (-smp48 stock-aborts/patched-boots): NOT RUN. qemu-system-x86_64 is NOT packaged on AL2023 (only qemu-img). Building qemu from source = wedge trap (guard). Change is mechanically obvious (abort->return 0 sentinel; skip unregister on vector 0; soft 192-vector budget cap) + compile+symbol-proven. HONEST: the standalone-master split is COMPILE+LINK-verified, NOT boot-A/B-verified. The underlying fix WAS boot-validated in #1463's own testing per ROADMAP; this is the clean extraction of it.
+VOLUME-ID: vol-05d0b674d6f7525e2 (DeleteOnTermination=true)
+
+=== TASK 8 CRUFT CLEANUP:
+  floki git: worktree prune (nothing to prune). Removed MY scratch worktree /tmp/msix-budget (branch pr/msix-vector-budget + commit 8763dadf8 PRESERVED + bundled).
+  Local branches: removed 62 dated backup branches (bkp/* backup/* - superseded June-2026 snapshots, none checked-out, none open-PR; recoverable via reflog). 179->117 branches. LEFT ambiguous feat/*/wip/*/campaign/* (could be parked work; cost nothing).
+  Kept per rules: sigusr1-inline-hold worktree, openzfs worktrees (openzfs-1423/openzfs-aarch64), integ/pg-fork-arena + integ/pg-fork-zfs (fork family, another agent's in-flight), /tmp/vnetmq-master (open PR #1463), .local/ozfs-fixes (banked reports).
+  /tmp: floki /tmp NOT under pressure (2.5T free, 29%). Removed only my session scratch (msix-split.patch + 3 branch-list tmps). LEFT all other agents' banked reports/bundles/scratch (osv-sigval2 SIGUSR1 validation may need dropdb harness + sched.cc; huge tarballs left - space available, deletion risks in-flight work).
+  LAN meh (192.168.1.185): /tmp clean (2.0M). Removed 1 dupe /tmp/meh-src-osv-claude-stale.bundle (byte-identical 181215B to .local durable copy). No stale osv trees/keypair CSVs.
+  santorini/wix: not command-executable via ssh config (interactive-only, not osv build hosts). Skipped.
+
+=== EC2 TERMINATION CONFIRMED:
+  Instance i-050d0725cad50f24c: state=terminated (waiter-confirmed).
+  Volume vol-05d0b674d6f7525e2: InvalidVolume.NotFound = DELETED (DeleteOnTermination=true).
+  No live osv-prmaint2 instances or dangling volumes remain.
+  Did NOT touch protected boxes (bench-db, osv-cor-a, osv-sigval2). osv-sigval2 was independently shutting-down (that agent's own action, not mine).
+  SG rule for 73.4.58.126/32 pre-existed (not added this session); left as-is.
+SWEEP2 COMPLETE.

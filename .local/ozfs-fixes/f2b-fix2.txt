@@ -1,0 +1,52 @@
+F2B FIX (bank b) -- break the wait_record allocator recursion
+=============================================================
+Author: Greg Burd  Class: [fork-stack] (CONF_fork-gated)  Base: corruptor-fix @ f2857073
+
+DOMINANT ROOT CAUSE (see f2b-root2.txt): coherent_wait_record (the fork
+Stage-2 cross-AS coherence helper, include/osv/wait_record.hh) allocated its
+identity-heap wait_record via aligned_new<wait_record> (a malloc) INSIDE the
+lock/wait path (mutex::lock / condvar::wait / rcu) whenever a fork child AS was
+live.  When that lock is the allocator's own free_page_ranges_lock (held during
+page-pool refill), the malloc re-enters the allocator, which re-takes the lock,
+which allocates another wait_record -> unbounded recursion -> kernel-stack
+overflow (OSv runs kernel code on the app-thread stack) -> the scribbled
+thread objects / intrusive lists / allocator free-list seen in every F2b
+backtrace (wake_impl garbage _cpu, posix_memalign free-list write, boost
+list_node set_next/set_previous on a near-null node).
+
+THE FIX (3 files, all CONF_fork-gated):
+  1. include/osv/sched.hh: thread gains a small reusable pool of identity-heap
+     wait_record slots:
+        static constexpr unsigned _coherent_wr_slots = 4;
+        void *_coherent_wr_buf = nullptr;   // _coherent_wr_slots x 128B
+        unsigned _coherent_wr_depth = 0;
+        void *coherent_wr_take();     // reserve a free slot, or nullptr
+        void  coherent_wr_release();  // LIFO release
+  2. core/sched.cc: thread ctor allocates _coherent_wr_buf ONCE on the identity
+     kernel heap (fork_arena::kernel_heap_scope), in a NORMAL allocation
+     context -- never in the wait path; ~thread frees it.
+  3. include/osv/wait_record.hh: coherent_wait_record hands out one of the
+     waiter's OWN preallocated identity slots (placement-new, no malloc)
+     instead of aligned_new<wait_record>.  If a fork child needs a coherent
+     record and a slot is free -> use it; else (AS0 fast path, or slots
+     exhausted by deep nesting) fall back to the on-stack record, which
+     allocates nothing.  Either branch does ZERO allocation in the wait path,
+     so the recursion can no longer occur.  static_asserts guard slot size
+     (<=128B) and alignment (<=64B).
+
+WHY BOUNDED / CORRECT:
+  - A thread is BLOCKED in at most one wait at a time; depth 4 covers legit
+    nesting (a wait predicate locking a fork-shared mutex, the allocator
+    re-entering a lock) with no allocation.
+  - Beyond depth, the on-stack fallback allocates nothing -> recursion stays
+    bounded regardless.
+  - _coherent_wr_buf is a pointer (not an inline over-aligned member), so
+    thread's own alignment is unchanged (new sched::thread still fine).
+  - conf_fork=0: entire change is #if CONF_fork -> compiles to the original
+    zero-overhead on-stack wait_record path, byte-identical behaviour.
+
+FIX ATTEMPT #1 (complete() irq_lock erase of parked_threads) and the prototyped
+park_timers terminating-guard are NOT part of this fix: the park subsystem is
+not the dominant corruptor (thread::complete() runs after the thread function
+unwound its stack, so a dying thread has no active timers -> it is never
+re-parked).  Dropped as unnecessary.

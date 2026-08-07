@@ -1,0 +1,114 @@
+=== same-VA COW stack fix REBASED onto PR #1456 (origin/wip/fork-stage2-pr @ a0e9fd81) ===
+Date: 2026-07-22   Author: Greg Burd   Instance: i-024e4b8ab844f4e96 (m5d.metal, KVM)
+
+RESULT: rebased, conflicts resolved keeping BOTH, re-validated, committed, bundled.
+Final HEAD: add08faf  "mm/fork: same-VA COW stack for deep call chains (opt-in)"
+
+--------------------------------------------------------------------------
+COMMIT STACK (git log --oneline cb8c7205..HEAD;  origin/wip/feat-fork does
+not exist on this remote, cb8c7205 is the pre-fork feature base):
+--------------------------------------------------------------------------
+  add08faf  mm/fork: same-VA COW stack for deep call chains (opt-in)   <-- my fix, rebased
+  a0e9fd81  mm: per-child copy-on-write address space for fork() (opt-in, stacked)  [Stage 2 COW]
+  2f125e91  process: fix execve()/fork() new-namespace exec hanging OSv shutdown   [lifecycle fix]
+  9f4b483b  process: implement thread-backed fork()/vfork()/execve()/waitpid()     [Stage 1]
+=> Stage2-COW + execve/lifecycle + guard preserved UNDERNEATH; same-VA on top. Correct.
+
+--------------------------------------------------------------------------
+CONFLICTS RESOLVED (git cherry-pick 705a4aa34..7a2a788 onto a0e9fd81; the
+3-way merge auto-merged all 8 files WITHOUT conflict markers, but I verified
+each semantically kept BOTH sets of changes):
+--------------------------------------------------------------------------
+libc/process/fork.cc   -> KEPT BOTH: my 4-arg fork_thread(...,&ctx,...) +
+                          fork_resume_ctx capture, AND a0e9's detached-child
+                          reap cleanup [cpid,stack_to_free,child,child_as] with
+                          the guard `if (child->address_space()==child_as)
+                          destroy_address_space(child_as)` + dispose(child).
+arch/x64/fork.cc       -> KEPT BOTH: my same-VA fork_resume_ctx full callee-saved
+                          register-restore trampoline, AND a0e9's .detached() attr.
+arch/aarch64/fork.cc   -> KEPT BOTH: my 4-arg resume_ctx param (ignored; aarch64
+                          keeps bias-copy, same-VA is x86-64), AND .detached().
+arch/x64/arch-switch.hh -> MINE ONLY overlapped a0e9's early write_cr3: replaced
+                          the early CR3 write with the deferred in-asm `mov %cr3`
+                          at the rsp/rbp swap (a0e9's early write was the bug).
+core/mmu.cc            -> MINE: privatize stack VA range + live_child_address_spaces
+                          counter (inc in clone_address_space, dec in
+                          destroy_address_space), layered on a0e9's clone/destroy.
+core/lfmutex.cc        -> MINE: heap wait_records when any child AS is live.
+include/osv/fork.hh    -> MINE: osv::fork_resume_ctx struct (x86-64).
+libc/process/execve.cc -> RESOLVED THE DELICATE PART (see below).
+
+--------------------------------------------------------------------------
+destroy_address_space(child_as) EXACTLY ONCE  (the delicate invariant):
+--------------------------------------------------------------------------
+Two paths a fork child can take; the child AS must be destroyed once, never
+zero (leak) or twice (double-free GP-fault / ~rwlock assert at reap).
+
+The reap cleanup (libc/process/fork.cc) is guarded:
+    if (child->address_space() == child_as) mmu::destroy_address_space(child_as);
+
+PATH A - child exits normally (_exit / falls off end):
+  thread never enters execve's AS switch; child->address_space() stays == child_as
+  => reap cleanup destroys it.  ONCE.  (counter dec once.)
+
+PATH B - child execs (fork+execve):
+  a0e9's execve destroyed child_as INLINE while still on the child's stack -- fine
+  for the old malloc'd/biased stack, but FATAL for same-VA (that stack IS the
+  child AS's private page; freeing it pulls the rug, and reloading CR3 to AS0
+  aliases the parent's page).  My execve instead:
+    1. pre-check target exists (access F_OK) so a failed exec returns -1 to caller;
+    2. set_address_space(AS0);
+    3. rsp-switch onto the thread's OWN kernel stack (global-heap, valid in every AS);
+    4. on that kernel stack: switch_to_runtime_page_tables() (CR3=AS0), THEN
+       mmu::destroy_address_space(s_old_as)  <-- destroys child_as HERE, ONCE,
+       safely (no longer running on the child's app stack);
+    5. run the target, join, _exit.
+  Because step 2 set child->address_space()=AS0, the later reap cleanup sees
+  AS0 != child_as and SKIPS its destroy.  => destroyed ONCE by execve.  (counter
+  dec once.)  No leak, no double-free.
+
+  [The bug the merge would have reintroduced without this fix: my original
+  execve set AS0 but deferred destroy to the reaper; combined with a0e9's guard
+  (AS0 != child_as -> skip) the AS would have LEAKED on every fork+exec.  Fixed
+  by destroying in execve on the kernel stack, matching the guard's design.]
+
+--------------------------------------------------------------------------
+BUILD (fedora:39 docker, --device /dev/kvm):
+--------------------------------------------------------------------------
+conf_fork=1  (CONF_fork=y): build EXIT=0, images produced, all fork tests present.
+conf_fork=0  (CONF_fork=n): build EXIT=0; gen kernel_config_fork.h => CONF_fork 0;
+             loader.elf has ZERO fork symbols (fork_thread/clone_address_space/
+             live_child_address_spaces/fork_resume_ctx/privatize all absent) ->
+             fork code fully excluded.
+
+--------------------------------------------------------------------------
+VALIDATION (KVM disk boot, loader-stripped.elf, --power-off-on-abort):
+--------------------------------------------------------------------------
+conf_fork=1:
+  tst-fork        10/10  (incl. fork+exec: payload ran, exit 7 reaped)   PASS
+  tst-fork-cow     6/6   (private stays private, shared stays shared)    PASS
+  tst-fork-deep    PASS  (12-frame deep chain unwinds, r=156, corrupt=0) PASS
+  tst-execve       3/3   (launch payload, reap exit 7, missing->ENOENT)  PASS + CLEAN SHUTDOWN
+  Clean shutdown (RUN_EXIT=0, no hang, no double-free GP-fault/~rwlock assert):
+    - tst-execve x5 repeat (smp1): 5/5 clean
+    - tst-fork   x5 repeat (smp1): 5/5 clean   (fork+exec double-free path)
+    - all 4 tests x3 (smp4): clean
+    - full suite smp1 + smp4 once more: 0 failures each, RUN_EXIT=0
+  (Note: a "bad=1" flag in one automated sweep was a false positive -- the grep
+   matched "unc-HANG-ed" in the PASS line "parent's private global unchanged";
+   the run was a clean 6/6 with RUN_EXIT=0, verified by hand.)
+
+conf_fork=0:
+  build EXIT=0, fork excluded (verified via nm), fork() stubbed.
+  tst-mmap: PASS ("mmap tests succeeded") at smp=4.
+    (smp=1 hits the test's own precondition assert `sched::cpus.size() >= 2`,
+     unrelated to fork -- ran at smp=4 as the test requires.)
+
+--------------------------------------------------------------------------
+ARTIFACTS (ec2-user-owned):
+--------------------------------------------------------------------------
+  /tmp/fork-sameva-rebased.bundle   (git bundle of branch sameva-rebased @ add08faf)
+  /tmp/sameva-rebased-result.txt    (this report)
+
+No crash reintroduced by the merge. PR-ready.
+Instance NOT terminated.

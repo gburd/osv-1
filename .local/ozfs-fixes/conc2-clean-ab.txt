@@ -1,0 +1,16 @@
+=== BASELINE (stock load_balance) ===
+c=1 tps=12469
+c=4 tps=41926
+c=8 tps=68543
+c=16 tps=28113
+c=32 tps=17015
+c=48 tps=14341
+c=64 tps=13139
+=== FIX (aggressive load_balance) ===
+c=1 tps=11480
+c=4 tps=37435
+c=8 tps=64294
+c=16 tps=31892
+c=32 tps=26075
+c=48 tps=24692
+c=64 tps=22698

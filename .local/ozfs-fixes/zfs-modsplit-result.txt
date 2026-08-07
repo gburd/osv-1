@@ -1,0 +1,147 @@
+ZFS module split refactor - result report
+==========================================
+Author: Greg Burd
+Branch: wip/zfs-module-split (off pr/openzfs-draft #1423, tip 40ff412e)
+Commit: b22f6cd5  "zfs: split in-kernel ZFS into bsd_zfs / open_zfs modules that provide zfs"
+Instance: i-0631bc15dd77bdf00 (m5d.metal, us-east-2, AWS_PROFILE=numa) - LEFT RUNNING, NOT terminated
+Bundle:   /tmp/zfs-modsplit.bundle  (also on EC2 at /tmp/zfs-modsplit.bundle)
+
+
+GOAL
+----
+Restructure PR #1423's in-kernel ZFS into the module layout wkozaczuk requested
+(issue #1201): a `zfs` placeholder module plus `bsd_zfs` and `open_zfs` modules
+that each PROVIDE `zfs`, mirroring how `java` is provided by
+openjdk8-from-host / openjdk9_1x-from-host. Build-structure refactor only; the
+same objects build for each ZFS mode. conf_zfs=bsd (default) -> bsd_zfs;
+conf_zfs=openzfs -> open_zfs.
+
+
+THE PROVIDE / PLACEHOLDER MECHANISM (as found in the codebase)
+-------------------------------------------------------------
+scripts/osv/modules/resolve.py:require() registers a module under its own name,
+then, if it declares `provides = [...]`, ALSO registers it under each provided
+name (raising if that name is already taken). A "placeholder" module (e.g.
+modules/java/module.py) carries NO `provides`; instead its module.py calls
+api.require(<concrete provider>). Because the placeholder requires its provider
+DURING its own import - before resolve assigns the placeholder's own name - the
+provider's `provides=['zfs']` claims the `zfs` name first (guard passes), then
+the placeholder overwrites _modules['zfs'] with itself. No collision. This is
+exactly how `java` works, and it is what I reused for `zfs`.
+
+conf_zfs is selected on the make/build command line and scripts/build exports
+every `name=value` arg into module.py's environment (scripts/build ~line 276),
+so module.py reads os.environ.get('conf_zfs','bsd') - the same way the existing
+modules/zfs-tools/module.py already does.
+
+An important structural fact: OSv's build has two stages. Stage 1 is the kernel
+Makefile, which compiles the ZFS objects and links libsolaris.so (a kernel-side
+artifact, a bootfs_dep). Stage 2 is scripts/module.py, which orchestrates the
+`modules` (module.py + manifests). Module app-Makefiles do NOT build kernel .so
+objects. So the ZFS object/link RULES cannot literally live in a module
+app-Makefile; the faithful move is to extract them into .mk fragments OWNED BY
+each module and `include`d by the top-level Makefile. That is what was done.
+
+
+WHAT MOVED WHERE
+----------------
+modules/zfs/  (PLACEHOLDER)
+  - module.py (NEW): reads conf_zfs; api.require('open_zfs') if openzfs else
+    api.require('bsd_zfs'). Carries no `provides`.
+  - usr.manifest (unchanged): still ships /usr/lib/fs/libsolaris.so - the one
+    manifest entry BOTH implementations share.
+
+modules/bsd_zfs/  (PROVIDES zfs; conf_zfs=bsd)
+  - module.py (NEW): provides = ['zfs'].
+  - bsd_zfs_sources.mk (NEW): the legacy BSD/Illumos ZFS build rules moved
+    verbatim out of the top-level Makefile - the `solaris` compat-object list,
+    the `zfs` core-object list (both shared/base), and the conf_zfs=bsd
+    object/flag selection (solaris += $(zfs); the avl/nvpair/unicode/fm/list
+    objects BSD needs its own copies of; the BSD $(zfs)/$(solaris) CFLAGS +
+    ASFLAGS). Included UNCONDITIONALLY by the top-level Makefile because it
+    defines the shared solaris/zfs lists both modes build on.
+
+modules/open_zfs/  (PROVIDES zfs; conf_zfs=openzfs)
+  - module.py (NEW): provides = ['zfs'].
+  - open_zfs_sources.mk (RENAMED from bsd/sys/cddl/openzfs_sources.mk via
+    git mv, + EXTENDED): keeps all the OpenZFS 2.4.x object lists
+    (openzfs-zfs/icp/lua/zstd/... = $(openzfs-all)) and the OPENZFS_INCLUDES /
+    OPENZFS_CFLAGS / OPENZFS_LUA_CFLAGS definitions, and now ALSO carries the
+    conf_zfs=openzfs object/flag selection that used to sit in the top-level
+    Makefile: solaris += $(openzfs-all); filter-out the ABI-incompatible
+    opensolaris_kstat.o stub; the OpenZFS -fPIC/-DBUILDING_ZFS CFLAGS; the
+    zfs_initialize_osv.o -fPIC rule; the Lua/ZSTD include tweaks; the
+    openzfs-icp-asm ASFLAGS override.
+  - openzfs/ (submodule, unchanged) + patches/ (unchanged, applied at build).
+
+
+TOP-LEVEL Makefile CHANGES (~207 lines removed, replaced by includes)
+---------------------------------------------------------------------
+1. The big ZFS object/flags block (was ~lines 766-970) is replaced by:
+       include modules/bsd_zfs/bsd_zfs_sources.mk        # always: defines solaris/zfs
+       ifeq ($(conf_zfs),openzfs)
+       include modules/open_zfs/open_zfs_sources.mk      # swaps in $(openzfs-all)
+       endif
+   Ordering is correct: bsd_zfs defines `solaris` first, then (for openzfs) the
+   open_zfs fragment appends $(openzfs-all) and sets OpenZFS flags. Nothing
+   between the header and the object block references any openzfs-* variable, so
+   moving the OpenZFS include down from the header to here is safe (verified).
+2. The header's inline `include bsd/sys/cddl/openzfs_sources.mk` was removed
+   (relocated as above). The OpenZFS patch-apply $(shell ...) block and the
+   `$(out)/tools/mkfs/mkfs.o: CXXFLAGS += -DCONF_ZFS_OPENZFS` redirect STAY in
+   the top-level Makefile (kernel plumbing, not module-owned build rules).
+
+KERNEL IMPL-AGNOSTIC BITS - LEFT IN PLACE (unchanged)
+-----------------------------------------------------
+openzfs_cv_timedwait, the -DCONF_ZFS_OPENZFS per-object redirect, pagecache
+bridge symbols, drivers/zfs.o, fs/zfs/zfs_null_vfsops.o, and the OpenZFS
+userspace region (OZFS/libuutil/libzutil/libzfs/zpool/zfs, ~line 2536+) all
+remain in the kernel/top-level Makefile. These are kernel/userspace plumbing,
+not the BSD-source-list or openzfs-object-list build rules wkozaczuk named, and
+the same loader.elf serves both implementations.
+
+
+VALIDATION (fedora:39 docker, --device /dev/kvm --privileged, -v osv:/b)
+------------------------------------------------------------------------
+conf_zfs=bsd (default):
+  ./scripts/build fs=zfs image=zfs,zfs-tools conf_zfs=bsd OSV_NO_JAVA_TESTS=1 -j$(nproc)
+  -> BUILD_EXIT=0
+  -> module resolution: "Importing modules/zfs/module.py" then
+     "Importing modules/bsd_zfs/module.py"  (placeholder -> bsd_zfs)
+  -> in-guest builder ran: "cpiod finished", pool populated
+     (Adding /usr/lib/fs/libsolaris.so, /zpool.so, /zfs.so, /libzfs.so, ...)
+  -> libsolaris.so built (4.4 MB)
+  -> ships NO openzfs-only libs (libzfs_core/libtpool count = 0), as expected
+
+conf_zfs=openzfs:
+  ./scripts/build fs=zfs image=zfs,zfs-tools conf_zfs=openzfs OSV_NO_JAVA_TESTS=1 -j$(nproc)
+  -> BUILD_EXIT=0
+  -> module resolution: "Importing modules/zfs/module.py" then
+     "Importing modules/open_zfs/module.py"  (placeholder -> open_zfs)
+  -> patches applied: modules/open_zfs/openzfs/.osv-patches-applied present
+  -> libsolaris.so built (16 MB, the full OpenZFS 2.4.x kernel)
+  -> impl-agnostic symbol confirmed: openzfs_cv_timedwait is UND in
+     libsolaris.so (imported from loader.elf) - kernel stays impl-agnostic
+  -> ships the OpenZFS-only userspace libs libzfs_core.so/libzutil.so/
+     libshare.so/libtpool.so; "cpiod finished"
+
+No-drift check: every `solaris +=` / `zfs +=` line from the original top-level
+Makefile block is present across the two new .mk files (union diff shows only
+the openzfs-zfs list additions, which already lived in the renamed
+openzfs_sources.mk, never in the Makefile block). The EXIT=0 builds for both
+modes are the authoritative proof the same objects compile.
+
+
+DIFF SUMMARY
+------------
+ Makefile                              | 220 +---   (net ~-207 lines)
+ modules/bsd_zfs/bsd_zfs_sources.mk    | 171 +++    (new; BSD build rules)
+ modules/bsd_zfs/module.py             |   9 +++    (new; provides=['zfs'])
+ modules/open_zfs/module.py            |  12 +++    (new; provides=['zfs'])
+ modules/open_zfs/open_zfs_sources.mk  |  61 +      (renamed + openzfs branch)
+ modules/zfs/module.py                 |  13 +++    (new; placeholder selector)
+
+This matches the module plan wkozaczuk asked for so #1423 lines up with his
+java/openjdk-from-host provide analogy. The provide mechanism was NOT more
+involved than moving rules - it is the exact resolve.py `provides` +
+placeholder-require pattern already used by java, reused verbatim for zfs.

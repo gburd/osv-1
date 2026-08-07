@@ -1,0 +1,63 @@
+================================================================================
+OSv+PG CHECKPOINT/DROP-DATABASE "hang forever" -- DIAGNOSIS (live wedge captured)
+================================================================================
+Author: Greg Burd   Box: bench-db (18.189.43.159), image corruptor-fix @ c8f9c82b
+Date: captured on the halted parity run's live qemu (PID 399628, -smp4, hp=off)
+
+SYMPTOM (as reported): explicit CHECKPOINT; hangs forever under write load while
+`select 1` serves instantly.
+
+WHAT THE LIVE WEDGE ACTUALLY SHOWS (this qemu had been wedged ~1h20m):
+  pg_stat_activity:
+    pid 751 checkpointer   idle   wait=CheckpointerMain     (HEALTHY)
+    pid 803 client backend ACTIVE wait=IPC/ProcSignalBarrier  q="drop database if exists bench;"
+                                                            age = 01:18:xx  (STUCK)
+  PG server log (repeating every 5s for the whole 1h20m):
+    [803] LOG: still waiting for backend with PID 803 to accept ProcSignalBarrier
+    [803] STATEMENT: drop database if exists bench;
+  * The stuck backend (803) is waiting for ITS OWN PID (803) to accept the barrier.
+  * An explicit CHECKPOINT issued RIGHT NOW completed in 0.077s (rc=0):
+      [751] checkpoint starting: immediate force wait
+      [751] checkpoint complete: wrote 0 buffers ... total=0.077 s
+    => the checkpointer is NOT the wedge. ZFS spa_sync/txg is fine.
+  * `select 1` returns instantly.
+
+So the reported "CHECKPOINT hangs" is one face of a broader wedge: ANY command
+that calls EmitProcSignalBarrier()+WaitForProcSignalBarrier() (DROP DATABASE,
+DROP TABLESPACE, and CHECKPOINT via its smgr barrier path under some conditions)
+hangs, because the EMITTING backend waits for its OWN slot's barrier generation
+to advance and it never does.
+
+MECHANISM (PG side, procsignal.c):
+  EmitProcSignalBarrier():
+    - sets pss_barrierCheckMask on every slot
+    - bumps psh_barrierGeneration
+    - for EVERY slot (including its own): kill(pid, SIGUSR1)
+  Each backend's SIGUSR1 handler -> procsignal_sigusr1_handler ->
+    HandleProcSignalBarrierInterrupt(): InterruptPending=true; ProcSignalBarrierPending=true;
+  WaitForProcSignalBarrier(gen): for each slot, sleep on pss_barrierCV until
+    slot->pss_barrierGeneration >= gen.  A backend bumps its OWN
+    pss_barrierGeneration only from ProcessProcSignalBarrier(), which runs from
+    CHECK_FOR_INTERRUPTS() when ProcSignalBarrierPending is set.
+  InterruptPending / ProcSignalBarrierPending are PROCESS-GLOBAL
+    `volatile sig_atomic_t` (NOT __thread) -> under OSv fork they are the
+    backend's COW-private copy of that global in its own address space.
+
+ROOT CAUSE (OSv side, libc/signal.cc kill(), CONF_fork):
+  When a fork-child backend signals ITSELF -- kill(getpid(), SIGUSR1), exactly
+  what EmitProcSignalBarrier does for the emitter's own slot -- the fork-aware
+  kill() leaves target_as = nullptr (because pid == getpid() is excluded from
+  the as_for_pid() lookup), then runs the handler thread in:
+      t->set_address_space(target_as ? target_as : mmu::kernel_address_space());
+  i.e. in AS0 (the kernel/top-level address space), NOT in the caller backend's
+  own COW address space.  So HandleProcSignalBarrierInterrupt() sets
+  InterruptPending/ProcSignalBarrierPending in AS0's copy of those globals, not
+  in backend 803's copy.  Backend 803's own ProcSignalBarrierPending stays false
+  -> its CHECK_FOR_INTERRUPTS never calls ProcessProcSignalBarrier ->
+  it never bumps its own pss_barrierGeneration -> WaitForProcSignalBarrier waits
+  for PID 803 forever.  Permanent, single-backend, no crash, select 1 fine.
+
+CLASSIFICATION: [fork-stack] -- fork self-signal address-space mis-routing.
+  Same family as signature-F (SIGURG cross-backend routing) but a DISTINCT bug:
+  the SELF-signal (pid==getpid()) case, which the prior kill() fork logic never
+  handled (it only routed CROSS-backend kills via as_for_pid).

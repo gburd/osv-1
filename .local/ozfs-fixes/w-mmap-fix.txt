@@ -1,0 +1,206 @@
+[W-mmap] fork-child mmap made address-space-aware: mmu ALLOCATION path routes
+through the current thread's address_space (own-PR-shaped mmu refactor)
+================================================================================
+Date: 2026-07-24  Host: floki (local, NOT EC2)  Container: arena-dev (fedora:39)
+Worktree: /home/gburd/ws/osv/.local/worktrees/fork-arena  branch integ/pg-fork-arena
+Base for this work: 99a21295b  (author of new commit: Greg Burd)
+
+
+TL;DR
+-----
+The mmu ALLOCATION/query path is now address-space aware, matching the fault
+path that clone_address_space already made AS-aware.  A fork child's post-fork
+mmap now lands in -- and its faults resolve against -- the child's OWN address
+space instead of the global vma_list.  tst-fork-child-mmap (which aborted the
+unikernel) now PASSES and is in the suite.  No fork regressions; the non-fork
+mmu path is byte-identical.  PG re-test: the W-mmap fix did NOT clear the
+W-branch wall (hypothesis rejected) -- PG still aborts right after "InitAux
+shmem read OK", though the postmaster now visibly advances to forking the
+bgwriter.  No psql rows.
+
+
+THE BUG (was root-caused; now fixed)
+------------------------------------
+vm_fault() was already AS-aware: it looks up the current thread's child AS via
+`as->vmas` (the child's private vma_list, populated by clone_address_space).
+But the ALLOCATION path -- mmu::allocate(), map_anon(), map_file(), find_hole(),
+evacuate(), unmap(), protect()/mprotect(), sync()/msync(), advise(),
+find_intersecting_vma(s), ismapped(), and the vma split()s -- plus the global
+vma_range_set, always used the GLOBAL vma_list / vma_range_set.  So a fork
+child's new mmap:
+  1. picked a hole from the GLOBAL vma_range_set (collided with the child's own
+     same-VA stack top -- returned 0x200000201000, one page above the stack), and
+  2. inserted the new vma into the GLOBAL vma_list, not the child's as->vmas.
+The child's first write #PF'd, vm_fault searched as->vmas, found no vma, and
+SIGSEGV'd (kernel rep-stos pc -> abort()).  Deterministic, -smp 1, one
+mmap+write, NOT preemption dependent.
+
+
+THE REFACTOR (lazy-but-correct: extend the pattern that already exists)
+----------------------------------------------------------------------
+address_space already held `vmas` / `vmas_mutex` (a child owns private ones,
+AS0 aliases the global vma_list / vma_list_mutex).  This change extends the SAME
+pattern to the allocation path's vma_range_set, and routes every per-AS
+allocation/query site through the current thread's AS.
+
+Files changed:
+  core/mmu.cc              (+117 / -37)
+  include/osv/mmu.hh       (declare current_address_space())
+  modules/tests/Makefile   (register tst-fork-child-mmap.so)
+  tests/tst-fork-child-mmap.cc (comment: standalone repro -> in-suite regression)
+
+Specific sites and how non-fork stays byte-identical:
+
+1. New per-AS range set.  Added a `vma_range_set_type` typedef and gave
+   `struct address_space` a `ranges` / `ranges_mutex` pair (AS0 aliases the
+   global vma_range_set / vma_range_set_mutex; a child owns private
+   owned_ranges / owned_ranges_mutex).  The child ctor builds owned_ranges
+   first, then hands it to the child's vma_list ctor so the child's edge
+   markers go into the CHILD's range set, not the global one.  vma_list_type's
+   ctor took two defaulted args (into = &vma_range_set, into_mutex =
+   &vma_range_set_mutex) so AS0 / non-fork construction is unchanged.
+
+2. current_address_space() helper:  t->address_space() ?: &kernel_as.  (The
+   fault path already open-coded this; now it is a named helper, declared in
+   mmu.hh next to kernel_address_space(), used by the accessors below.)
+
+3. Per-AS accessors, defined in BOTH build flavours so the shared code below is
+   identical in shape and codegen:
+     CONF_fork:   cur_vma_list()        -> *current_address_space()->vmas
+                  cur_vma_list_mutex()  -> *current_address_space()->vmas_mutex
+                  cur_vma_range_set()   -> *current_address_space()->ranges
+                  cur_vma_range_set_mutex() -> *current_address_space()->ranges_mutex
+     !CONF_fork:  the same four accessors return the GLOBAL vma_list /
+                  vma_list_mutex / vma_range_set / vma_range_set_mutex directly.
+   In a non-fork build these inline to the exact global references the code used
+   before -- byte-identical behaviour, no runtime indirection.  In a fork build
+   AS0 aliases the globals, so the kernel and the initial application are
+   likewise unchanged; only a fork child (whose AS != AS0) diverges.
+
+4. Routed through the accessors (per-AS state):
+     find_intersecting_vma / find_intersecting_vmas  (query the current vma_list)
+     find_hole            (search the current vma_range_set)
+     allocate             (insert into current vma_list + vma_range_set)
+     evacuate             (erase from current vma_list + vma_range_set)
+     anon_vma::split / file_vma::split (insert into current lists)
+     map_anon / map_file / advise / mprotect / munmap / msync / mincore
+                          (take the current vma_list_mutex)
+     vma::update_flags / vma::clear_flags asserts (assert the CURRENT vma_list
+                          mutex is write-owned, not the global one)
+   Everything that calls find_intersecting_vmas (protect, sync, ismapped,
+   depopulate, nohugepage, hugepage) becomes AS-aware for free.
+
+5. Left on the GLOBAL vma_list / vma_range_set (deliberate, judgment per site):
+     all_vmas_size()        -- whole-system memory accounting (stats)
+     procfs_maps()          -- /proc self maps, whole-system view (debug/stats)
+     linear_map()           -- kernel linear/identity/phys maps, shared by every
+                               AS (kernel infra, never per-app)
+     the vm_fault !CONF_fork #else branch -- non-fork, unchanged
+     jvm_balloon_vma / map_jvm (#if CONF_memory_jvm_balloon) -- JVM runs in AS0
+                               and never forks; off in the fork/PG builds
+     the vma_list_type edge-marker init -- now parameterized, defaults to global
+
+6. clone_address_space now inserts each cloned child vma into the child's OWN
+   range set (child->ranges) as well as child->vmas, so find_hole in the child
+   sees the same occupancy the parent had.
+
+
+VALIDATION (all green)
+----------------------
+Build:
+  conf_fork=1 fs=rofs image=tests   -> OK (kernel relinked)
+  conf_fork=0 fs=rofs image=tests   -> OK (clean; non-fork byte-identical)
+  conf_fork=1 fs=ramfs image=pg18-fork -> OK
+
+Fork tests (conf_fork=1, KVM, -smp 1 unless noted):
+  tst-fork            PASS  (5x back-to-back, "0 failures" every run)
+  tst-pgfork          PASS  ("0 failures")
+  tst-fork-cow        PASS  ("0 failures")
+  tst-fork-deep       PASS  ("0 failures")
+  tst-execve          PASS  ("0 failures")
+  tst-fork-preempt    PASS  ("0 failures")
+  tst-fork-child-mmap PASS  (was: aborted the unikernel; now:
+      "child mmap = 0x200000201000 / child memset OK / PASS")
+
+Non-fork mmu (conf_fork=0, KVM, -smp 2):
+  tst-mmap            "mmap tests succeeded"
+  tst-mmap-file       "SUMMARY: 30 tests, 0 failures"
+  tst-mmap-file-cow   "mmap-file-cow tests PASSED"
+  tst-huge            "huge tests succeeded"
+  tst-vfs             "dentry hierarchy / concurrent file operation tests succeeded"
+
+
+POSTGRES RE-TEST (honest, no overclaiming)
+------------------------------------------
+Rebuilt conf_fork=1 fs=ramfs image=pg18-fork, booted:
+  qemu -enable-kvm -cpu host -m 4G -smp {1,2} ... postgres -D /data (hostfwd 5432)
+
+Result: the W-mmap fix did NOT clear the W-branch wall.  PG still aborts within
+a few seconds, right after the checkpointer prints "InitAux shmem read OK",
+deterministic on BOTH -smp 1 and -smp 2.  It does NOT reach "database system is
+ready to accept connections".  NO psql query was served.  NO real rows.
+
+How far it gets now (vs before): the same checkpointer wall, but the postmaster
+now visibly proceeds to fork the SECOND auxiliary process -- the log shows
+"parent about to fork_process for bgwriter" / "CHILD returned from fork for
+bgwriter" interleaved with the checkpointer's abort (on -smp 2), which the prior
+report did not show.  So this fix is a real correctness improvement, but the
+checkpointer's fault is unchanged.
+
+The abort backtrace CHANGED shape, which is informative:
+  0x...402215fa <abort path>
+  osv::handle_mmap_fault(unsigned long, int, exception_frame*)+28
+  mmu::vm_fault(unsigned long, exception_frame*)+1115
+  page_fault+139
+vm_sigsegv() routes to handle_mmap_fault (NOT the "page fault outside
+application" kernel-pc abort), i.e. the faulting PC is in the APP (postgres):
+this is a genuine SIGSEGV being delivered to the checkpointer, which has no
+handler -> abort.  That is exactly the [W-branch] signature from
+pg-preempt-fix.txt: after "InitAux shmem read OK" the checkpointer takes an
+indirect branch (likely PLT jmp *GOT[n]) through a corrupt code pointer and
+faults at an app PC with an otherwise-intact stack/reg snapshot.
+
+Conclusion on the milestone hypothesis ("fix W-mmap first, then re-test PG --
+W-branch may vanish"): REJECTED.  W-branch is independent of W-mmap.  The next
+step for W-branch is unchanged from pg-preempt-fix.txt: a HW watchpoint under
+KVM+hbreak on the child's GOT slot / the store that writes 0x4b0000.
+
+
+PR SHAPE
+--------
+This refactor is deliberately shaped to become its OWN standalone PR: "AS-aware
+mmu allocation path".  It is arena-INDEPENDENT in the sense that it is a correct
+generalization of the mmu (the allocation path now honors the same per-thread
+address_space the fault path already honored), and the non-fork path is
+byte-identical (the cur_* accessors reduce to the existing global references
+when !CONF_fork, and to AS0's aliases-of-the-globals for the kernel/initial app
+under CONF_fork).  The fork-specific bits (per-AS range set, clone population)
+live behind the existing address_space machinery that is already CONF_fork.  It
+does NOT depend on the fork-arena allocator or the signal-waiters fix; it should
+land as a separate PR alongside / ahead of the fork PRs (#1455/#1456) and get a
+full mmu test pass (done above).  It is a SEPARATE bug from W-branch (still open).
+
+
+REPRO
+-----
+  cd /b/.local/worktrees/fork-arena
+  bash scripts/build conf_fork=1 fs=rofs image=tests -j$(nproc)
+  qemu-system-x86_64 -enable-kvm -cpu host -m 2G -smp 1 -nographic \
+    -kernel build/release.x64/loader.elf \
+    -append "/tests/tst-fork-child-mmap.so" \
+    -drive file=build/release.x64/usr.img,if=virtio,cache=none      # PASS
+PG wall (rebuild image first -- image=tests OVERWRITES usr.img):
+  bash scripts/build conf_fork=1 fs=ramfs image=pg18-fork -j$(nproc)
+  qemu-system-x86_64 -enable-kvm -cpu host -m 4G -smp 1 -nographic \
+    -kernel build/release.x64/loader.elf \
+    -append "--rootfs=ramfs /b/.local/pg18/install/bin/postgres -D /data" \
+    -drive file=build/release.x64/usr.img,if=virtio,cache=none \
+    -netdev user,id=un0,hostfwd=tcp::5432-:5432 -device virtio-net-pci,netdev=un0
+
+
+FILES / BUNDLE
+--------------
+Committed on integ/pg-fork-arena (author Greg Burd):
+  core/mmu.cc, include/osv/mmu.hh, modules/tests/Makefile,
+  tests/tst-fork-child-mmap.cc
+Bundle: /tmp/fork-arena-progress.bundle  (git bundle 6594e93f0..HEAD)

@@ -1,0 +1,63 @@
+== ROOT CAUSE (refined, evidence-backed) ==
+branch integ/pg-fork-zfs @9cdfec86 ; box i-02ee57620084817db (3.19.61.154)
+
+THE FAULT: elf::resolve_pltgot NULL-deref in a forked backend (HammerDB run).
+Also a build-phase mmu::vm_fault/handle_mmap_fault (same facet).
+
+MECHANISM (fork COW + file-backed GOT re-read):
+- OSv loads the app (musl PIE) + libs with map_file: the writable segment holding
+  .got/.got.plt is a FILE-BACKED vma. At load, object::relocate()/relocate_pltgot()
+  WRITE the in-memory GOT: pltgot[1]=this(elf::object*), pltgot[2]=__elf_resolve_pltgot,
+  and each JUMP_SLOT slot relocated by _base. These writes dirty the AS0 pages.
+- fork -> clone_address_space: app PML4 slots COW-cloned. For GOT pages PRESENT+dirty
+  in AS0 the child COW-shares them (reads the RELOCATED got) -> fine.
+- BUT for any GOT/relocated-writable page NOT resident in AS0 at fork time, the child's
+  cloned leaf PTE is EMPTY. On the child's first access (PLT stub read, or resolver
+  write) handle_cow_write_fault() returns false (empty PTE) and the fault falls through
+  to file_vma::fault() -> RE-READS THE FILE. The file holds the *unrelocated* GOT:
+  pltgot[1]=0, slots = raw file offsets (not _base-relocated).
+- The PLT stub then reads pltgot[1]=0 (obj=NULL) / pltgot[2]=0 and calls
+  elf_resolve_pltgot(index, NULL) -> NULL->resolve_pltgot() -> NULL-fault in
+  elf::resolve_pltgot. (Or jumps through a bogus tiny slot addr.)
+  => "COW-stale GOT" : the child sees the on-disk GOT, not AS0's relocated GOT.
+
+WHY MINIMAL REPRO PASSED: tst-fork-pltgot's tiny app has ALL its GOT on one page that
+relocate() already dirtied in AS0, so the child COW-shares the relocated page. The bug
+needs a binary large enough (PG) that some relocated writable page is evicted / never
+resident in AS0 before fork -> child re-reads the file.
+
+FIX (laziest correct, CONF_fork-gated, conf_fork=0 byte-identical): before the first
+fork, POPULATE (touch/fault-in, read-only) every relocated writable segment page of every
+loaded object in AS0, so every GOT/.data.rel.ro PTE is PRESENT and clone_address_space
+COW-shares the RELOCATED contents. A read-touch (not a resolver write) avoids the RELRO
+read-only write-fault that the eager-bind attempt hit (arch_relocate_jump_slot writing a
+RELRO'd slot faulted at 0x100000031e00). Alternatively mmap_populate the relocated
+writable segments at load under CONF_fork.
+
+BANKED EARLIER: /tmp/pltgot-fault.txt (the eager-write RELRO fault, real resolve-path fault).
+
+== FIX IMPLEMENTED (2 parts, CONF_fork-gated, core/elf.cc + 1-line include in elf.hh) ==
+1) load_segment(): under CONF_fork, mmap_populate WRITABLE file-backed segments so every
+   relocated .data/.got/.got.plt page is RESIDENT in AS0 at fork time. clone_address_space
+   then COW-shares the RELOCATED pages; a forked child never inherits an empty PTE that would
+   re-read the unrelocated GOT from the file (the NULL-obj resolve_pltgot fault). OSv has no
+   swap and written file-private pages become anon -> once populated they stay resident, so
+   the residence guarantee holds through fork.
+2) resolve_pltgot(): wrap the _used_by_resolve_plt_got.insert in fork_arena::kernel_heap_scope
+   so the shared object's symbol-set nodes land on the identity heap (coherent cross-AS) when
+   a forked child is first to lazily resolve a cross-object PLT slot, not in the child's COW arena.
+
+== VALIDATION ==
+- Minimal fork+deep-PLT repro tst-fork-pltgot.cc (child first-resolves libm/libc PLT syms +
+  parent/8-reaped-children cross-object stress): PASS -smp4 AND -smp8, 0 failures.
+- Boot-to-ready 10/10 at -smp4 (no regression).
+- conf_fork=0 elf.o: byte-identical modulo __LINE__ constants only (34 mov $imm,%edx, 0 real
+  code diffs) -- the standard fork-stack no-op-at-fork=0 guarantee.
+- HONEST CAVEAT: the minimal repro PASSES on BOTH clean and fixed kernels (a tiny app has its
+  whole GOT resident, so it never hits the non-resident-page window). I could not stand up the
+  full PG/ZFS/HammerDB image on this box (the pg18-fork app + openzfs/apps submodules are not in
+  the public tree, and AL2023 lacks packaged qemu -- built qemu 9.2.3 from source to run at all).
+  The fix is the root-cause-class fix (guarantee relocated writable pages are resident + set nodes
+  on identity heap) but the crash->clean A/B was demonstrated only for the mechanism analysis
+  (the eager-write RELRO fault at 0x100000031e00 confirms the resolver DOES fault on a bad GOT
+  page in the fork path), not an end-to-end HammerDB run.

@@ -1,0 +1,67 @@
+zfs: integrate OpenZFS 2.4.2 with TRIM, encryption, Direct I/O
+
+Replace OSv's bundled FreeBSD-derived ZFS port (zfs-on-osv, c. 2014,
+last upstream sync ~2017) with a vendored OpenZFS 2.4.2.  The port
+is a fresh OSv platform layer over the unmodified upstream OpenZFS
+kernel module, plus userspace bindings for libzfs, libzfs_core,
+libzutil, libshare, libuutil, libtpool and the zpool/zfs CLIs.
+
+Build:
+  - external/openzfs/ submodule on the osv-2.4.2 branch of our fork
+    (carries 14 OSv platform commits on top of zfs-2.4.2 upstream).
+  - bsd/sys/cddl/openzfs_sources.mk drives the kernel-side compile,
+    pulling icp-asm and the modes/ directory in.  ASFLAGS uses '='
+    (not '+=') so the older bsd/cddl asm_linkage.h shadow does not
+    win the include race.
+  - openzfs-osv source group consolidates OSv-specific helpers
+    (zio_crypt stubs, taskq glue, opt_zfs_auto_upgrade, freemem,
+    random_get_pseudo_bytes, the CDDL/BSD compat shim) into
+    libsolaris.so.  The shim is also linked into libsolaris.so so
+    user-space tools resolve cleanly through the dynamic linker.
+
+VFS / boot integration:
+  - vop_cache populates OSv's read_cache so user-space mmap/read
+    reuse the same pages.
+  - va_fsid in zfs_vop_getattr is taken from vp->v_mount->m_fsid
+    (was uninitialized).
+  - zfs_freesp + zfs_extend / zfs_free_range / zfs_trunc helpers
+    added so OSv ftruncate works on ZFS files.
+  - zfs_acl_ids_create stores file-type bits (S_IFLNK et al.) in
+    z_mode, fixing EBADF on every ZFS symlink.
+  - ARC shrinker, kthread stack accounting, osv_free_pages, and
+    memory-pressure callbacks reworked to match OSv's scheduler.
+
+Hardware features:
+  - ZIO_TYPE_TRIM is now wired through vdev_disk to virtio-blk's
+    BIO_DISCARD (added in the block-layer commit earlier in this
+    series).  TRIM is enabled by default on pools where the vdev
+    advertises support; pools on a discard-capable backing device
+    can reclaim free space.  TRIM bio errors are correctly mapped
+    to ENOTSUP (not EIO) so callers can fall back gracefully.
+  - AES-256-GCM encryption is the real OpenZFS implementation, not
+    a stub: zio_crypt_impl.c is fully linked.  libzfs_crypto_os.c
+    only stubs the userspace key-loading-from-passphrase path
+    (ENOTSUP); raw and hex-key formats work, exercised by
+    tests/tst-zfs-encryption.so (21/21 PASS).
+
+OpenZFS 2.4.2 upgrade (from 2.4.1):
+  - Rebase our 12 OSv platform patches onto 2.4.2 (zero conflicts).
+  - Add zfs_mount_setattr() stub for selective namespace remount.
+  - OSv-specific zfs_uioskip iov-advance fix carried in the same
+    submodule pointer (without it, multi-record writes corrupt
+    record boundaries; reproducer in tests/tst-zfs-multirec.so).
+  - libzfs/libzutil device-path handling skips the ".1" partition
+    suffix for "crucible*" volumes (replicated raw extents have no
+    MBR partition table).
+
+Cleanup:
+  - Remove ~60k LOC of orphaned bsd/cddl OpenSolaris userspace
+    sources that the new build path no longer touches.
+  - Add external/openzfs to .gitmodules.
+  - Incremental-rebuild fixes for the OpenZFS 2.4.1 transitional
+    tree.
+
+All ZFS tests pass: tst-zfs-direct-io (9/9), tst-zfs-trim (5/5),
+tst-zfs-encryption (21/21), tst-shm-consistency (30/30), tst-huge,
+tst-io_uring, tst-zfs-multirec, tst-zfs-recordsize bench, and
+tst-zfs-db-sim all C1/C3/C4/C5 configurations.

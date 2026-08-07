@@ -1,0 +1,191 @@
+================================================================================
+OSv + PostgreSQL  --  EXTERNAL-DRIVER GO/NO-GO GATE  (recordsize=8k)
+Full corruptor/scheduler fix stack (branch corruptor-fix @ c8f9c82b)
+================================================================================
+Date:    2026-07-30  (us-east-2, profile OUCH / ouch)
+Author:  external-driver reliability gate per user brief
+Purpose: prove OSv+PG serves heavy concurrent load RELIABLY end-to-end under an
+         EXTERNAL driver (real VPC network, NOT loopback) at recordsize=8k,
+         BEFORE launching the full parity benchmark fleet.
+
+********************************************************************************
+*** VERDICT:  GO  ***
+********************************************************************************
+Reliable external serving at recordsize=8k is CONFIRMED. The prior benchmark's
+startup-handoff wall (PG hung at "logical replication launcher" on ~98% of
+boots; 1 success in ~50) is ELIMINATED by the fix stack: 4 of 4 boots reached
+"ready to accept connections", every external heavy run completed with 0 failed
+transactions, 0 scheduler-corruptor signatures, 0 EIO-facet hits, the guest
+stayed alive throughout, and a crash+reboot re-imported the pool with clean WAL
+recovery and a scrub of 0 errors. The full parity fleet is cleared to launch.
+
+--------------------------------------------------------------------------------
+IMAGE UNDER TEST (the full 6-fix stack)
+--------------------------------------------------------------------------------
+OSv v0.57.0-447-gc8f9c82b3   (branch corruptor-fix, tip c8f9c82b)
+Built on bench-db osv-build container: ./scripts/build image=pg18-fork fs=zfs
+  conf_zfs=openzfs conf_fork=1 -j96   (loader.elf 73M, usr.img 65M)
+Fix stack verified present on the tree (c8f9c82b3 .. back to 66571d38 merge):
+  c8f9c82b  F2b   sched: preallocate per-thread coherent wait_record slots
+                  (break allocator recursion = the -smp>1 scheduler corruptor)
+  f2857073  F2a   virtio-blk: drop per-queue lock in req_done (full-ring deadlock)
+  1ae2602f  F1    FPU-control-word reload after CR3 swap in switch_to (#GP)
+  6ccf4a92  corr#2 quarantine page-pool reclaim (page-path free_object UAF)
+  41c360da  mount-0031 guard vnode_pager_setsize vs NULL vnode (ZIL-replay mount)
+  14667a8d  corr#1 keep cross-CPU pool-page reclaim off lock-free garbage path
+PostgreSQL 18.4 (x86_64-pc-linux-musl PIE), OpenZFS 2.4.3 (zfs-2.4.3).
+Fetched from osv-cor-a:/b (container osv-build, branch corruptor-fix) via git
+bundle -> bench-db osv-build /b, checked out c8f9c82b, existing pg18-fork app +
+openzfs@zfs-2.4.3 submodule reused (unchanged).
+
+--------------------------------------------------------------------------------
+TOPOLOGY (external driver over the REAL VPC network, not loopback)
+--------------------------------------------------------------------------------
+DB HOST : bench-db  i-021082207c9170294  m5d.metal  172.31.38.177 (ENI enp125s0)
+          Guest OSv+PG on tap0 (192.168.100.2), virtio-net.  Host DNAT:
+            enp125s0:5432  --iptables PREROUTING DNAT-->  192.168.100.2:5432
+          Pool pgdata = raidz1(4x200G EBS nvme5-8) + SLOG(nvme0) + L2ARC(nvme3),
+          ashift=12 lz4 atime=off logbias=throughput recordsize=8k, sync=standard.
+DRIVER  : osv-cor-a  i-0c2e653ec8461e6df  m5d.metal  172.31.34.22  (SEPARATE box,
+          same VPC/subnet, SG sg-0f71bed6221459cc0 intra-SG :5432).  pgbench 16.14
+          + psql 16.14 (stock Amazon Linux 2023 postgresql16 packages).
+          Driver hits 172.31.38.177:5432 across the VPC -> DNAT -> tap0 ->
+          virtio-net -> guest.  A genuine cross-instance network hop.
+
+EXTERNAL-PATH PROOF (verified every connection):
+    driver$ psql -h 172.31.38.177 -c "select inet_server_addr()"  => 192.168.100.2
+    (guest's real virtio-net IP, NOT 127.0.0.1)
+    server-side inet_client_addr()                                => 172.31.34.22
+    (driver's real VPC IP -> proves a real cross-instance TCP path, not loopback)
+    server banner: PostgreSQL 18.4 on x86_64-pc-linux-musl
+
+================================================================================
+1) pgbench -i -s300  (init ~30G, over the external network)
+================================================================================
+  30,000,000 tuples loaded; vacuum + primary keys.
+  done in 40.76 s (client-side generate 28.62 s, vacuum 0.75 s, pkeys 11.36 s).
+  rc=0.  0 errors.  Guest ALIVE.  corr=0  eio=0.
+
+================================================================================
+2) pgbench -c16 -j4 -T120  (heavy concurrent RW, external network)  <-- HEADLINE
+================================================================================
+  transaction type: TPC-B (sort of);  scaling factor 300;  clients 16; threads 4
+  number of transactions actually processed: 392080
+  number of FAILED transactions:            0  (0.000%)
+  latency average = 4.841 ms
+  tps = 3304.775225  (without initial connection time)
+  initial connection time = 1377.417 ms
+  rc=0.  Guest ALIVE after run.  corr=0  eio=0.  No ERROR/FATAL/PANIC in PG log.
+
+================================================================================
+2b) STAGED STARTUP TIMELINE  (boot -> first successful EXTERNAL query)
+================================================================================
+Instrumented ONE clean OSv-KVM launch (-smp4 -m32G, hp=off) on the raidz1 8k
+pool.  T0/T7 = host & driver wall-clock (both EC2 NTP-synced); every guest
+console line stamped with host epoch at emit; PG lines also carry PG's own UTC.
+
+  ---- CLEAN POOL (fresh import, database was cleanly shut down -> NO WAL redo) ----
+  STAGE                                   ABS (epoch)        DELTA
+  T0  qemu launch                         1785411403.047      --
+  T1  OSv "Booted up in 368.11 ms"        1785411403.655     T1-T0 = 0.608 s   (BIOS/iPXE + kernel boot)
+  T2  ZFS "Pool 'pgdata' ... version 5000"1785411404.360     T2-T1 = 0.705 s   (root-fs up -> data pool import begins)
+  T3  ZFS "root mounted ok" (/data)       1785411404.369     T3-T2 = 0.009 s   (import+mount /data)
+  T4  postgres process start (1st PG line)1785411411.067     T4-T3 = 6.697 s   (ZFS mounted -> PG PIE map + process init)  <-- DOMINANT
+      (PG "listening on 5432"             1785411411.069     +0.002 s after T4)
+  T5  WAL recovery / redo                 --                 0.000 s           (CLEAN: "database system was shut down"; no redo)
+  T6  PG "ready to accept connections"    1785411411.347     T6-T4 = 0.280 s   (PG start -> ready)
+  T7  first ext "select 1" returns 1      1785411414.796     T7-T6 = 3.449 s   (ready -> driver's first query round-trip*)
+
+  TOTAL  T0 -> T7  launch-to-first-query = 11.749 s
+
+  Breakdown of interest:
+    kernel boot (T1-T0)          0.608 s
+    ZFS import+mount (T3-T1)     0.714 s
+    PG spawn+startup (T4-T3)     6.697 s   <-- the bulk; musl PG PIE mmap of the
+                                              install tree + process init before
+                                              its first log line
+    PG startup->ready (T6-T4)    0.280 s
+    ready->first ext query       3.449 s   (*inflated by the poller: it made two
+                                              separate psql connections; pgbench
+                                              measured the real first-conn cost at
+                                              1.377 s. True ready->query is ~1.4 s.)
+
+  ---- POST-CRASH REBOOT (dirty import, WAL replay) -- the T5 cost contrast ----
+  A reboot after a hard stop (crash sim) needs WAL recovery + an end-of-recovery
+  checkpoint before "ready":
+    PG start -> redo start                0.311 s
+    T5  WAL redo replay                    9.741 s   (redo 0/16ED458 -> 0/F3F42BA8)
+    end-of-recovery checkpoint            64.201 s   (581,353 buffers = 55.4%)
+    PG start -> ready (crash-recovery)    74.253 s   vs 0.280 s clean
+  => A post-crash reboot adds ~74 s (mostly the end-of-recovery checkpoint) on
+     top of clean.  Clean-import ready = 0.28 s; crash-recovery ready = ~74 s.
+     Benchmark implication: after each write-heavy cell, CHECKPOINT + clean
+     export before reboot, or budget ~60-75 s recovery for a dirty restart.
+
+================================================================================
+3) REBOOT DURABILITY + SCRUB  (crash-consistency of 8k heavy-write data)
+================================================================================
+  Hard-stopped the serving guest under load (crash sim), rebooted, imported -f:
+    LOG: database system was not properly shut down; automatic recovery in progress
+    LOG: redo starts at 0/16ED458 ... redo done at 0/F3F42BA8 (elapsed 9.74 s)
+    LOG: checkpoint complete: wrote 581353 buffers ... (end-of-recovery)
+    LOG: database system is ready to accept connections
+  Data intact after recovery (verified from EXTERNAL driver):
+    select count(*) pgbench_accounts = 30,000,000   pgbench_branches = 300
+  Scrub (dedicated import + zpool scrub pgdata):
+    scan: scrub repaired 0B in 00:00:03 with 0 errors on Thu Jul 30 11:15:48 2026
+    errors: No known data errors ; pool ONLINE ; all 6 vdevs ONLINE 0/0/0
+  => Pool re-imports clean, WAL crash-recovery works, scrub = 0 errors.
+
+================================================================================
+4) RELIABILITY SAMPLING  (boot reliability + EIO-facet frequency, external path)
+================================================================================
+BOOTS to "ready to accept connections":  4 of 4  (main serve, cold-boot A,
+  cold-boot B, + the instrumented timeline boot).  The old ~98%-hang wall did
+  NOT recur on any boot.  NOTE: ready-time varies with WAL to replay -- a clean
+  pool is ready in <1 s of PG time; a dirty pool with accumulated WAL took up to
+  ~196 s (dominated by the end-of-recovery checkpoint), but ALWAYS reached ready
+  (no lost-wakeup hang).  This is normal PG crash-recovery, not the OSv wall.
+
+EXTERNAL HEAVY pgbench runs (all -c16 -j4), 0 failed tx every run:
+  run          duration  processed   failed  tps      corr  eio  guest
+  main -T120   120 s      392,080    0       3304.78   0     0    ALIVE
+  cycle 1 -T40  40 s      115,646    0       2990.36   0     0    ALIVE
+  cycle 2 -T40  40 s      129,119    0       3345.00   0     0    ALIVE
+  cycle 3 -T40  40 s      132,709    0       3437.81   0     0    ALIVE
+  cold-A  -T40  40 s      111,346    0       2878.13   0     0    ALIVE
+  cold-B  -T40  40 s      101,469    0       2622.69   0     0    ALIVE
+
+  F2b/scheduler corruptor (assert(preemptable) / bstree / page-fault / wedge):
+      0 of 6 external heavy runs  (and 0 across every boot log)
+  EIO read/write-path facet ("could not read/write blocks ... : EIO"):
+      0 of 6 external heavy runs
+  => Under the EXTERNAL/network path at 8k, the EIO facet did NOT reproduce
+     (0 of 6).  The full benchmark does NOT appear to need run-retry tolerance
+     for EIO on this path, though the prior local-loopback qualify saw it ~1-in-12
+     at -smp4; keep a light retry as cheap insurance but it was not needed here.
+
+================================================================================
+GO CRITERIA CHECKLIST
+================================================================================
+  [x] PG serves the external driver end-to-end (inet_server_addr=192.168.100.2)
+  [x] pgbench -i -s300 completes (30M tuples, rc=0, 0 errors)
+  [x] pgbench -c16 -j4 -T120 completes: 392,080 tx, 0 failed (0.000%), 3305 tps
+  [x] NO F2b / preemptable / bstree / wedge signature (0 across all runs)
+  [x] Guest stays alive (ALIVE after every run)
+  [x] Reboot -> pool re-imports clean; WAL recovery clean; scrub 0 errors
+  [x] EIO-facet frequency measured: 0 of 6 external heavy runs
+  [x] BONUS: staged startup timeline captured (clean + crash-recovery contrast)
+
+  NOTE: HammerDB TPROC-C was NOT run here (bonus, not required for GO); the
+  pgbench external heavy path fully satisfies the GO gate.  The full fleet
+  harness has HammerDB and will produce those rows.
+
+--------------------------------------------------------------------------------
+VERDICT:  GO  -- reliable external serving at recordsize=8k CONFIRMED.
+          Cleared to launch the full parity benchmark fleet.
+--------------------------------------------------------------------------------
+CLEANUP: launched NO new driver instance (reused osv-cor-a as the external
+  driver over the VPC).  bench-db + osv-cor-a left running (user-managed).
+  All qemu reaped.  No new EBS created.
+================================================================================

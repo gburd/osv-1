@@ -1,0 +1,44 @@
+config	smp	netqp	metric	clients	value	raw_iters	notes
+osv-kvm-mq	16	16	pgbench-rw-tps	1	232.977880	232.977880 245.614929 232.056229	MQ-on nqp=16 fresh-pool 0failed
+osv-kvm-mq	16	16	pgbench-rw-tps	8	1636.275708	1616.149338 1636.275708 1657.045842	MQ-on nqp=16 fresh-pool 0failed
+osv-kvm-mq	16	16	pgbench-rw-tps	16	0	0 0 0	MQ-on RESEED-EIO invalid
+osv-kvm-mq	16	16	pgbench-rw-tps	32	0	0 0 0	MQ-on RESEED-EIO invalid
+osv-kvm-mq	16	16	pgbench-rw-tps	64	2220.795430	2135.944756 2220.795430 2337.259464	MQ-on nqp=16 fresh-pool 0failed
+osv-kvm-mq	16	16	pgbench-ro-tps	8	24085.239497	13688.695366 24085.239497 27868.806670	MQ-on nqp=16 0failed
+osv-kvm-mq	16	16	pgbench-ro-tps	16	25273.733934	25273.733934 25100.394178 25383.638233	MQ-on nqp=16 0failed
+osv-kvm-mq	16	16	pgbench-ro-tps	32	23773.710063	23376.610713 23773.710063 23802.632294	MQ-on nqp=16 0failed
+osv-kvm-mq	16	16	pgbench-ro-tps	64	22636.459646	22532.164706 23118.850528 22636.459646	MQ-on nqp=16 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	8	32805.524883	17990.330697 32805.524883 35348.743490	CONTROL nqp=1 mq=off 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	16	63213.194561	63250.830188 63213.194561 62520.688799	CONTROL nqp=1 mq=off 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	32	29597.715832	29597.715832 30210.747811 27811.715591	CONTROL nqp=1 mq=off 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	64	21751.512682	21578.125925 21751.512682 23035.746913	CONTROL nqp=1 mq=off 0failed
+osv-kvm-mq	4	4	pgbench-rw-tps	1	265.334129	271.094776 265.334129 263.450042	MQ-on nqp=4 fresh-pool 0failed
+osv-kvm-mq	4	4	pgbench-rw-tps	8	0	0 0 0	MQ-on RESEED-EIO invalid
+osv-kvm-mq	4	4	pgbench-rw-tps	16	0	0 0 0	MQ-on RESEED-EIO invalid
+osv-kvm-mq	4	4	pgbench-rw-tps	32	2323.312099	2162.187884 2323.312099 2496.548697	MQ-on nqp=4 fresh-pool 0failed
+osv-kvm-mq	4	4	pgbench-rw-tps	64	2258.405982	2184.925384 2258.405982 2334.100436	MQ-on nqp=4 fresh-pool 0failed
+osv-kvm-mq	4	4	pgbench-ro-tps	8	23706.326905	13713.677305 23706.326905 29418.364363	MQ-on nqp=4 0failed
+osv-kvm-mq	4	4	pgbench-ro-tps	16	25058.831979	25399.238008 24519.207962 25058.831979	MQ-on nqp=4 0failed
+osv-kvm-mq	4	4	pgbench-ro-tps	32	22993.359826	21845.524152 23275.548412 22993.359826	MQ-on nqp=4 0failed
+osv-kvm-mq	4	4	pgbench-ro-tps	64	22958.824143	22570.251992 22958.824143 23718.319256	MQ-on nqp=4 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	8	32587.715376	16326.408561 32587.715376 35342.654280	CONTROL nqp=1 run2 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	16	66795.312948	58429.806915 66997.236467 66795.312948	CONTROL nqp=1 run2 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	32	27765.021584	27530.358472 27765.021584 30130.990120	CONTROL nqp=1 run2 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	64	20252.171919	20252.171919 22108.893721 0	CONTROL nqp=1 run2 0failed
+osv-kvm-mq	16	1	pgbench-rw-tps	1	0	0 0 0	CONTROL nqp=1 RESEED-EIO invalid
+osv-kvm-mq	16	1	pgbench-rw-tps	8	1722.498858	1664.940855 1755.082152 1722.498858	CONTROL nqp=1 fresh-pool 0failed
+osv-kvm-mq	16	1	pgbench-rw-tps	16	2261.820059	2228.282237 2261.820059 2380.421448	CONTROL nqp=1 fresh-pool 0failed
+osv-kvm-mq	16	1	pgbench-rw-tps	32	2496.364419	2281.420455 2496.364419 2617.588061	CONTROL nqp=1 fresh-pool 0failed
+osv-kvm-mq	16	1	pgbench-rw-tps	64	2304.752376	2173.822200 2304.752376 2369.872280	CONTROL nqp=1 fresh-pool 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	8	27265.673492	14681.142226 27265.673492 31105.961004	CONTROL nqp=1 postRW 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	16	27886.512007	27933.793561 27886.512007 26942.660152	CONTROL nqp=1 postRW 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	32	25641.160271	25641.160271 25590.517090 26314.390963	CONTROL nqp=1 postRW 0failed
+osv-kvm-mq	16	1	pgbench-ro-tps	64	23829.464848	23790.493439 24379.508329 23829.464848	CONTROL nqp=1 postRW 0failed
+osv-kvm-mq	48	31	pgbench-ro-tps	8	26168.660095	8687.165515 26168.660095 26811.084034	MQ-on nqp=31 no-reseed 0failed
+osv-kvm-mq	48	31	pgbench-ro-tps	16	49141.018402	49141.018402 48389.001956 52423.190122	MQ-on nqp=31 no-reseed 0failed
+osv-kvm-mq	48	31	pgbench-ro-tps	32	38042.127140	38281.535381 38042.127140 37623.039704	MQ-on nqp=31 no-reseed 0failed
+osv-kvm-mq	48	31	pgbench-ro-tps	64	0	0 0 0	MQ-on nqp=31 c64 conn-fail (guest alive 0 EIO)
+osv-kvm-mq	48	1	pgbench-ro-tps	8	20968.649655	9017.608579 20968.649655 28559.346904	CONTROL nqp=1 48c no-reseed 0failed
+osv-kvm-mq	48	1	pgbench-ro-tps	16	52120.037205	52047.278358 53861.362406 52120.037205	CONTROL nqp=1 48c no-reseed 0failed
+osv-kvm-mq	48	1	pgbench-ro-tps	32	33824.100022	33824.100022 34128.404754 0	CONTROL nqp=1 48c no-reseed 0failed
+osv-kvm-mq	48	1	pgbench-ro-tps	64	18564.401833	20207.314830 18055.089966 18564.401833	CONTROL nqp=1 48c no-reseed 0failed

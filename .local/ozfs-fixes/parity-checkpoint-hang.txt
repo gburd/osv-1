@@ -1,0 +1,132 @@
+================================================================================
+OSv + PostgreSQL 18.4  --  RELIABILITY FINDING (benchmark HALTED to fix this)
+DROP DATABASE / ProcSignalBarrier wedges forever; explicit CHECKPOINT is FINE
+================================================================================
+Date:    2026-07-30 (us-east-2, profile ouch)
+Context: M1 parity benchmark halted per user decision -- fix this first, because
+         the fix changes the signal/sync path the benchmark measures, so any
+         numbers taken now are throwaway. This file preserves the repro so the
+         finding can be routed to a fix. NO benchmark numbers were banked (0
+         cells) -- the very first data-load step (drop+recreate the bench DB)
+         tripped this wedge before any workload cell ran.
+
+********************************************************************************
+*** CORRECTED DIAGNOSIS (the earlier "CHECKPOINT hangs" guess was WRONG) ***
+********************************************************************************
+The stuck operation is NOT a checkpoint. Explicit CHECKPOINT COMPLETES on OSv+PG
+(twice, verbatim below, in ~0.03s). What hangs forever is:
+
+    DROP DATABASE  ->  EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SMGRRELEASE)
+                   ->  WaitForProcSignalBarrier(...)  <-- never returns
+
+The issuing backend (PID 803) logs, every 5s, indefinitely:
+    LOG:  still waiting for backend with PID 803 to accept ProcSignalBarrier
+i.e. it is waiting for ITS OWN backend to acknowledge a global ProcSignalBarrier.
+The self-directed barrier interrupt/ack is never processed on OSv, so the
+per-backend pss_barrierGeneration never catches up to the emitted generation and
+WaitForProcSignalBarrier() spins forever. A concurrent lightweight query
+(`select 1`) returns INSTANTLY -- it never touches the barrier machinery -- which
+is why the guest looks "alive" while the DROP DATABASE session is wedged.
+
+This is the SAME lost-signal / cross-fork-AS wakeup-coherence class as the
+documented startup-handoff wall and the logical-replication-launcher hang, but
+on the ProcSignalBarrier delivery path. PostgreSQL uses ProcSignalBarrier for
+global invalidations: DROP DATABASE, DROP TABLESPACE, and SMGR-release events
+broadcast a barrier and WAIT for every backend (including the emitter) to ack it
+via the ProcSignal SIGUSR1 -> ProcessProcSignalBarrier() path. On OSv's
+thread-backed forked backends, the emitter's own barrier-ack does not fire.
+
+--------------------------------------------------------------------------------
+EXACT REPRO (verbatim from the guest console)
+--------------------------------------------------------------------------------
+Image/branch/commit under test (give this to the fix agent to reproduce):
+  OSv branch fork-stack (a.k.a. corruptor-fix), HEAD
+    c8f9c82b3b5cc4cfc37c358ee381f8462988302f
+    "sched: preallocate per-thread coherent wait_record slots ... (F2b)"
+  Full 6-fix stack present (F1/F2a/F2b + corr#1/#2 + mount-0031), same image the
+  GO gate (bcheck-external.txt) passed at.
+  PostgreSQL 18.4 (x86_64-pc-linux-musl PIE), OpenZFS 2.4.3 (zfs-2.4.3).
+  DB host: bench-db m5d.metal, guest -smp4 -m32G hugepages=off, KVM.
+  Pool: pgdata = raidz1(4x200G EBS nvme5-8) + SLOG(nvme0) + L2ARC(nvme3),
+        ashift=12 lz4 atime=off logbias=throughput recordsize=8k sync=standard.
+  Serve script: /tmp/osv-serve-8k.sh inside privileged container osv-net
+    (NET=host, /dev + ~/osv:/b bound), tap0 + host DNAT enp125s0:5432 ->
+    192.168.100.2:5432.  NO gdbserver (-s) on this launch.
+
+Timeline (guest console, UTC):
+  11:45:16.145  LOG:  database system is ready to accept connections   [CLEAN]
+  11:46:49.583  LOG:  checkpoint starting: immediate force wait
+  11:46:49.612  LOG:  checkpoint complete: wrote 3 buffers ... total=0.029 s
+                      ^^^ EXPLICIT CHECKPOINT COMPLETES FINE (0.029 s)
+  11:46:54.620  LOG:  still waiting for backend with PID 803 to accept ProcSignalBarrier
+  11:46:54.620  STATEMENT:  drop database if exists bench;
+      ... (repeats every 5 s, unchanged) ...
+  13:16:25.110  LOG:  still waiting for backend with PID 803 to accept ProcSignalBarrier
+                      ^^^ still wedged ~1h30m later; guest qemu (PID 1020) ALIVE,
+                          `select 1` from the external driver still returns
+                          instantly the whole time.
+
+An earlier end-of-recovery checkpoint at 11:45:16 also completed (0.045 s), and a
+prior serve run's WAL redo was clean -- so the write/sync/checkpoint path itself
+is healthy; only the ProcSignalBarrier ack path is broken.
+
+--------------------------------------------------------------------------------
+WHAT TRIGGERED IT IN THE HARNESS
+--------------------------------------------------------------------------------
+Not the workload. During external-path setup the driver hit a musl-locale snag
+(client tried locale "C.UTF-8", which musl PG lacks -> ENOENT), so the bench DB
+was being drop+recreated with an explicit C locale. That routine `DROP DATABASE
+IF EXISTS bench;` is what wedged. So the wedge is reachable by ANY DROP DATABASE,
+not a heavy-write corner. (The GO gate's pgbench -c16 -T120 never ran DROP
+DATABASE, which is why it completed cleanly with background checkpoints -- it
+simply never exercised the ProcSignalBarrier broadcast path.)
+
+Note the locale snag separately (harness, not a bug): musl PG on OSv has no
+"C.UTF-8" locale data; create benchmark DBs with template0 + LC_COLLATE=C
+LC_CTYPE=C (encoding SQL_ASCII or LATIN1), and avoid clients that force C.UTF-8.
+
+--------------------------------------------------------------------------------
+WHERE TO LOOK (fix pointers)
+--------------------------------------------------------------------------------
+PostgreSQL side:
+  src/backend/storage/ipc/procsignal.c
+    EmitProcSignalBarrier() / WaitForProcSignalBarrier() / ProcessProcSignalBarrier()
+    CheckProcSignalBarrier() -- called from CHECK_FOR_INTERRUPTS().
+  The emitter sets ProcSignalBarrierPending for all backends (itself included)
+  and waits on pss_barrierGeneration. The ack is driven by SIGUSR1 (procsignal_
+  sigusr1_handler -> sets the flag) and then ProcessProcSignalBarrier() runs at
+  the next CHECK_FOR_INTERRUPTS(). If OSv does not deliver the self-SIGUSR1 (or
+  the forked-backend's signal state / latch does not observe it), the emitter
+  never runs ProcessProcSignalBarrier() on itself -> its own generation never
+  advances -> WaitForProcSignalBarrier spins.
+
+OSv side (most likely root, same class as the known walls):
+  - Self-directed signal delivery to a forked (thread-backed) backend: does
+    kill(getpid(), SIGUSR1) / the ProcSignal SetLatch reach the emitter's own
+    signal-handling in the OSv fork_arena model?
+  - Latch/SetLatch wakeup coherence across the fork COW AS boundary (same
+    lost-wakeup family as pg-zfs-validate.txt "THE NEXT WALL" and the
+    logical-replication-launcher startup hang).
+  Reproduce with a tiny case: boot the guest, `psql -c 'CHECKPOINT'` (works),
+  then `psql -c 'DROP DATABASE IF EXISTS x'` on a nonexistent DB still emits the
+  barrier? -- if not, `CREATE DATABASE x TEMPLATE template0; DROP DATABASE x;`
+  wedges deterministically. Attach gdb via qemu `-s` and break in
+  WaitForProcSignalBarrier to inspect pss_barrierGeneration vs the backend's
+  pss_barrierGeneration and whether ProcSignalBarrierPending is still set.
+
+--------------------------------------------------------------------------------
+IMPACT ON THE BENCHMARK
+--------------------------------------------------------------------------------
+Blocking: the harness reseeds/cleans between cells and would issue DROP DATABASE
+(and CREATE DATABASE cleanup). More importantly it is a correctness/reliability
+bug for real PG-on-OSv use (any DROP DATABASE / DROP TABLESPACE wedges). Since a
+fix touches the signal/latch path -- the exact machinery the parity benchmark is
+meant to measure -- the benchmark is halted and will be re-run clean after the
+fix. No numbers were fabricated; 0 cells banked.
+
+Workaround for the eventual benchmark (once past this / if needed): reseed
+between cells by IMPORTING A FRESH POOL COPY (re-run the cpiod seed onto a
+freshly created pool) instead of DROP DATABASE + reload, and skip explicit
+pre-reboot CHECKPOINT (checkpoint works, but dirty reboot recovers cleanly
+anyway: the GO run proved WAL redo + scrub-0-errors on a hard stop, ~75s budget).
+================================================================================

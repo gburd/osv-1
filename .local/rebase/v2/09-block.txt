@@ -1,0 +1,19 @@
+block: TRIM/DISCARD support and multiqueue I/O
+
+Two block-layer features that the ZFS and Crucible drivers depend on:
+
+  - BIO_DISCARD: a new request type plumbed through the block layer
+    and into virtio-blk's request descriptor (VIRTIO_BLK_T_DISCARD).
+    Maps to ZFS's ZIO_TYPE_TRIM and to Crucible's protocol-level
+    discard.  Drivers that don't support discard return ENOTSUP and
+    the caller falls back to overwrite-with-zero.
+  - Multiqueue: per-CPU queue dispatch in virtio-blk so that a
+    16-vCPU guest can submit I/O on 16 queues concurrently.  Adds
+    a scripts/run.py helper that wires up QEMU's num-queues option,
+    a per-queue locking-race fix (the per-queue completion-notifier
+    lock was being released too early under preemption), removed
+    next_queue_idx (became unused after dispatch was hashed by CPU),
+    and a sys/dev device_delete_child return-type fix that surfaced
+    while threading the multi-queue tear-down path.
+
+Verified: tst-vblk-multiqueue, tst-zfs-trim, tst-zfs-direct-io.

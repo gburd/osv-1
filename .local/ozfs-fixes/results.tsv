@@ -1,0 +1,47 @@
+# PG/OSv-vs-PG/Linux benchmark results  2026-07-29  us-east-2 m5d.metal
+# config	recordsize	hugepages	workload	clients/vusers	metric_primary	metric_secondary	raw_iters
+# HammerDB: metric_primary=NOPM(median) metric_secondary=TPM(median)
+# pgbench:  metric_primary=tps(median)  metric_secondary=latency_ms(median for rw)
+linux	32k	off	hammerdb-tprocc	8	42573	97955	40351 42573 42803
+linux	32k	off	hammerdb-tprocc	16	70804	162950	71612 70614 70804
+linux	32k	off	hammerdb-tprocc	32	113612	261752	113612 114787 111302
+linux	32k	off	hammerdb-tprocc	64	136101	312659	136101 136173 124723
+linux	32k	on	hammerdb-tprocc	8	42839	98316	42868 42523 42839
+linux	32k	on	hammerdb-tprocc	16	70469	162373	69531 70469 70988
+linux	32k	on	hammerdb-tprocc	32	109875	252581	110523 109497 109875
+linux	32k	on	hammerdb-tprocc	64	122107	281265	125953 121425 122107
+linux	8k	on	hammerdb-tprocc	16	53340	122510	51289 53340 54553
+linux	8k	on	hammerdb-tprocc	32	91034	209908	89539 91100 91034
+linux	8k	on	hammerdb-tprocc	64	123223	282418	120875 123223 125614
+linux	16k	on	hammerdb-tprocc	32	107756	247300	101343 107756 107950
+linux	128k	on	hammerdb-tprocc	32	47524	109569	47774 47524 46970
+# --- pgbench ---
+linux	32k	off	pgbench-rw	1	106.149239	9.421	102.149317 106.149239 108.268478
+linux	32k	off	pgbench-rw	8	852.033277	9.389	820.056969 857.564638 852.033277
+linux	32k	off	pgbench-rw	16	1693.864336	9.446	1693.864336 1687.854862 1713.070222
+linux	32k	off	pgbench-rw	32	3471.559874	9.218	3495.737815 3471.559874 3427.610490
+linux	32k	off	pgbench-rw	64	6711.728662	9.536	6711.134641 6711.728662 6757.227222
+linux	32k	off	pgbench-ro	8	7336.914928		7274.389098 7419.316368 7336.914928
+linux	32k	off	pgbench-ro	32	30027.212005		30027.212005 29822.105440 30452.538917
+linux	32k	on	pgbench-rw	1	106.288782	9.408	106.288782 108.757489 100.122754
+linux	32k	on	pgbench-rw	8	832.781332	9.606	830.186296 842.874385 832.781332
+linux	32k	on	pgbench-rw	16	1659.799465	9.640	1669.070984 1659.799465 1656.314955
+linux	32k	on	pgbench-rw	32	3376.102500	9.478	3320.380381 3376.102500 3388.362699
+linux	32k	on	pgbench-rw	64	6750.270088	9.481	6750.270088 6755.041407 6686.045410
+linux	32k	on	pgbench-ro	8	7211.894790		7338.338717 7195.789761 7211.894790
+linux	32k	on	pgbench-ro	32	30407.659926		30407.659926 30243.767308 30514.099228
+linux	8k	on	pgbench-rw	1	105.881179		105.881179 108.530146
+linux	8k	on	pgbench-rw	8	835.491286		835.491286 857.509716
+linux	8k	on	pgbench-rw	32	3464.001005		3464.001005 3470.561010
+linux	8k	on	pgbench-rw	64	6600.634768		6902.976168 6600.634768
+linux	16k	on	pgbench-rw	1	90.046554		90.046554 91.214731
+linux	16k	on	pgbench-rw	8	768.887346		768.887346 787.821875
+linux	16k	on	pgbench-rw	32	3254.325328		3254.325328 3276.076592
+linux	16k	on	pgbench-rw	64	6307.710640		6307.710640 6451.961307
+linux	128k	on	pgbench-rw	1	91.713804		94.110557 91.713804
+linux	128k	on	pgbench-rw	8	752.198587		752.198587 752.574425
+linux	128k	on	pgbench-rw	32	3043.532036		3043.532036 3072.488777
+linux	128k	on	pgbench-rw	64	6098.837164		6098.837164 6169.711351
+# --- OSv-KVM / OSv-Firecracker: NO benchmark datapoints (see report: open startup-handoff wall) ---
+osv-kvm	32k	off	hammerdb-tprocc	*	BLOCKED	BLOCKED	startup-handoff-wall-~2pct-boot-success
+osv-fc	32k	off	hammerdb-tprocc	*	BLOCKED	BLOCKED	same-wall-as-KVM-hypervisor-independent

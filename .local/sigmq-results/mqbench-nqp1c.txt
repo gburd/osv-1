@@ -1,0 +1,10 @@
+== MQ bench label=nqp1c scale=50 dur=25s ==
+RO c8: 49605.989517 tps
+RO c16: 31170.961342 tps
+RO c32: 13790.583979 tps
+RO c48: 8268.793389 tps
+RW c8: 5954.874204 tps
+RW c16: 7603.865916 tps
+RW c32: 1209.797711 tps
+RW c48: 649.663156 tps
+== done label=nqp1c ==

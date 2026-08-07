@@ -1,0 +1,9 @@
+=== osv-vnetmq benchmark box (TERMINATE + DELETE EBS WHEN DONE) ===
+Instance: i-017e1b6f002631dbd
+Type: m5d.metal (96 vCPU) us-east-2
+IP: 18.220.66.109
+Root vol: vol-011dcbf72b126bb2a (200G, DeleteOnTermination=true)
+Data vols (4x200G gp3): vol-042452ed7c5df9101 vol-0ec8fe44dd8df15c2 vol-0794021a5b1e495ac vol-00e78b2f4e026c0ae
+(all 5 vols DeleteOnTermination=true, so terminate removes them; verify anyway)
+Cleanup: aws ec2 terminate-instances --instance-ids i-017e1b6f002631dbd
+TERMINATED + ALL 5 EBS DELETED (confirmed 2026-07-31T21:08:27Z)
