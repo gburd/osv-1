@@ -994,6 +994,9 @@ public:
     stat_counter stat_switches;
     stat_counter stat_preemptions;
     stat_counter stat_migrations;
+    // WAKEPROF: timestamp (uptime ns) set at wake_impl(), read at switch-in to
+    // compute wake->run latency. 0 = not woken (fresh/first-run).
+    u64 _wakeprof_ts {0};
 private:
     thread_runtime::duration _total_cpu_time {0};
     std::atomic<u64> _cputime_estimator {0}; // for thread_clock()
