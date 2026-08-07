@@ -16,7 +16,73 @@
 #include <bsd/sys/net/netisr.h>
 
 #include <osv/net_trace.hh>
+#include <osv/rxprof.hh>
+#include <osv/sched.hh>
+#include <stdio.h>
+#include <stdlib.h>
 #include <algorithm>
+
+// ===================== RXPROF (RX hop-by-hop profiler) =====================
+namespace rxprof {
+    bool enabled = false;
+    std::atomic<u64> drain_ns_hist[NB];
+    std::atomic<u64> gap_ns_hist[NB];
+    std::atomic<u64> h1q_ns_hist[NB];
+    std::atomic<u64> h2_ns_hist[NB];
+    std::atomic<u64> batch_hist[64];
+    std::atomic<u64> passes{0};
+    std::atomic<u64> packets{0};
+    std::atomic<u64> drain_ns_sum{0};
+    std::atomic<u64> gap_ns_sum{0};
+    std::atomic<u64> h1q_ns_sum{0};
+    std::atomic<u64> h2_ns_sum{0};
+    std::atomic<u64> h2_ns_max{0};
+
+    static void dump_hist(const char* name, std::atomic<u64>* h, int n) {
+        printf("RXPROF %s:", name);
+        for (int i = 0; i < n; i++) {
+            u64 c = h[i].load();
+            if (c) printf(" b%d(<%luns)=%lu", i, (unsigned long)(1ull << i), (unsigned long)c);
+        }
+        printf("\n");
+    }
+    void dump() {
+        u64 np = passes.load(), pk = packets.load();
+        printf("RXPROF passes=%lu packets=%lu pkts/pass=%lu "
+               "drain_avg_ns=%lu gap_avg_ns=%lu h1q_avg_ns=%lu h2_avg_ns=%lu h2_max_ns=%lu\n",
+               (unsigned long)np, (unsigned long)pk,
+               (unsigned long)(np ? pk / np : 0),
+               (unsigned long)(np ? drain_ns_sum.load() / np : 0),
+               (unsigned long)(np ? gap_ns_sum.load() / np : 0),
+               (unsigned long)(pk ? h1q_ns_sum.load() / pk : 0),
+               (unsigned long)(pk ? h2_ns_sum.load() / pk : 0),
+               (unsigned long)h2_ns_max.load());
+        printf("RXPROF batch_per_pass:");
+        for (int i = 0; i < 64; i++) {
+            u64 c = batch_hist[i].load();
+            if (c) printf(" n%d=%lu", i, (unsigned long)c);
+        }
+        printf("\n");
+        dump_hist("drain_ns(log2)", drain_ns_hist, NB);
+        dump_hist("gap_ns(log2)", gap_ns_hist, NB);
+        dump_hist("h1q_ns(log2)", h1q_ns_hist, NB);
+        dump_hist("h2_ns(log2)", h2_ns_hist, NB);
+    }
+    void arm_from_env() {
+        const char* e = getenv("OSV_RXPROF");
+        if (e && e[0] == '1') {
+            enabled = true;
+            auto dumper = sched::thread::make([] {
+                for (;;) {
+                    sched::thread::sleep(std::chrono::seconds(5));
+                    rxprof::dump();
+                }
+            }, sched::thread::attr().name("rxprof").detached());
+            dumper->start();
+            printf("RXPROF ARMED (dumping every 5s)\n");
+        }
+    }
+}
 
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
@@ -167,6 +233,19 @@ bool classifier::post_packet(mbuf* m)
         }
     }
     return false;
+}
+
+// RXPROF variant: pass_start is the ns timestamp at the start of the current
+// receiver drain pass. pre is stamped just before classify+push+wake so the
+// H1 per-packet queueing delay (pass_start->pre) and the H2 post_packet cost
+// (pre->post) are attributed. Returns fast_path as post_packet() does.
+bool classifier::post_packet(mbuf* m, u64 pass_start)
+{
+    u64 pre = rxprof::now_ns();
+    bool fast = post_packet(m);
+    u64 post = rxprof::now_ns();
+    rxprof::record_packet(pass_start, pre, post);
+    return fast;
 }
 
 // must be called with rcu lock held

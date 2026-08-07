@@ -30,6 +30,7 @@
 #include <osv/sched.hh>
 #include <osv/trace.hh>
 #include <osv/net_trace.hh>
+#include <osv/rxprof.hh>
 
 #include <osv/device.h>
 #include <osv/ioctl.h>
@@ -627,12 +628,15 @@ void net::receiver(struct rxq* rxq)
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
+    u64 rxprof_prev_pass_end = 0;
 
     while (1) {
 
         // Wait for rx queue (used elements)
         virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
         trace_virtio_net_rx_wake();
+        u64 rxprof_pass_start = rxprof::enabled ? rxprof::now_ns() : 0;
+        unsigned rxprof_classified = 0;
 
         rxq->stats.rx_bh_wakeups++;
         rxq->update_wakeup_stats(rx_packets);
@@ -700,9 +704,13 @@ void net::receiver(struct rxq* rxq)
             rx_packets++;
             rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
 
-            bool fast_path = _ifn->if_classifier.post_packet(m_head);
+            bool fast_path = rxprof::enabled
+                ? _ifn->if_classifier.post_packet(m_head, rxprof_pass_start)
+                : _ifn->if_classifier.post_packet(m_head);
             if (!fast_path) {
                 (*_ifn->if_input)(_ifn, m_head);
+            } else {
+                rxprof_classified++;
             }
 
             trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
@@ -719,6 +727,15 @@ void net::receiver(struct rxq* rxq)
         rxq->stats.rx_csum       += csum_ok;
         rxq->stats.rx_csum_err   += csum_err;
         rxq->stats.rx_bytes      += rx_bytes;
+
+        if (rxprof::enabled) {
+            u64 pass_end = rxprof::now_ns();
+            u64 drain_ns = pass_end > rxprof_pass_start ? pass_end - rxprof_pass_start : 0;
+            u64 gap_ns = rxprof_prev_pass_end && rxprof_pass_start > rxprof_prev_pass_end
+                         ? rxprof_pass_start - rxprof_prev_pass_end : 0;
+            rxprof::record_pass(rxprof_classified, drain_ns, gap_ns);
+            rxprof_prev_pass_end = pass_end;
+        }
     }
 }
 

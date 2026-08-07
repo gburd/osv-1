@@ -21,6 +21,7 @@
 #include <osv/prio.hh>
 #include <osv/elf.hh>
 #include <stdlib.h>
+#include <stdio.h>
 #include <math.h>
 #include <unordered_map>
 #include <osv/wait_record.hh>
@@ -31,6 +32,7 @@
 #endif
 #include <osv/app.hh>
 #include <osv/kernel_config_sched_load_balance_ms.h>
+#include <osv/kernel_config_sched_wake_steal.h>
 #include <osv/symbols.hh>
 #include <osv/stubbing.hh>
 #include <algorithm>
@@ -76,7 +78,64 @@ TRACEPOINT(trace_timer_cancel, "timer=%p", timer_base*);
 TRACEPOINT(trace_timer_fired, "timer=%p", timer_base*);
 TRACEPOINT(trace_thread_create, "thread=%p", thread*);
 
+// ===================== WAKEPROF (wake->run latency profiler) =====================
+// Env OSV_WAKEPROF=1 arms it. Accumulates, per (approx) log2-us bucket, the
+// wake->run latency (time from wake_impl marking a thread runnable to it
+// actually switching in on a CPU), plus runqueue depth seen at switch-in and
+// cross-CPU IPI-wakeup count. A background thread prints the histogram to the
+// console every 5s so it is captured over serial/-nographic (no trace-buffer
+// extraction, no /proc). Generic sched instrumentation, zero cost when off.
+namespace wakeprof {
+    bool enabled = false;
+    static const int NB = 28;          // buckets: <1ns .. up to ~2^27 ns (~134ms)
+    std::atomic<u64> hist[NB];         // wake->run latency, log2(ns) bucketed
+    std::atomic<u64> rq_hist[64];      // runqueue depth at switch-in
+    std::atomic<u64> n_samples{0};
+    std::atomic<u64> lat_sum_ns{0};
+    std::atomic<u64> lat_max_ns{0};
+    std::atomic<u64> ipi_wakeups{0};   // cross-CPU IPI wakeups
+    std::atomic<u64> local_wakeups{0}; // same-CPU wakeups (need_reschedule)
+    std::atomic<u64> switches{0};      // total switch-ins observed
+
+    inline int bucket(u64 ns) {
+        int b = 0;
+        while (ns > 1 && b < NB - 1) { ns >>= 1; b++; }
+        return b;
+    }
+    inline void record(u64 lat_ns, unsigned rqdepth) {
+        hist[bucket(lat_ns)].fetch_add(1, std::memory_order_relaxed);
+        rq_hist[rqdepth < 64 ? rqdepth : 63].fetch_add(1, std::memory_order_relaxed);
+        n_samples.fetch_add(1, std::memory_order_relaxed);
+        lat_sum_ns.fetch_add(lat_ns, std::memory_order_relaxed);
+        u64 om = lat_max_ns.load(std::memory_order_relaxed);
+        while (lat_ns > om && !lat_max_ns.compare_exchange_weak(om, lat_ns)) {}
+    }
+    void dump() {
+        u64 n = n_samples.load(), sw = switches.load();
+        u64 s = lat_sum_ns.load(), mx = lat_max_ns.load();
+        printf("WAKEPROF samples=%lu sw=%lu avg_ns=%lu max_ns=%lu ipi=%lu local=%lu\n",
+               (unsigned long)n, (unsigned long)sw,
+               (unsigned long)(n ? s / n : 0), (unsigned long)mx,
+               (unsigned long)ipi_wakeups.load(), (unsigned long)local_wakeups.load());
+        printf("WAKEPROF lat_hist(log2ns):");
+        for (int i = 0; i < NB; i++) {
+            u64 c = hist[i].load();
+            if (c) printf(" b%d(<%luns)=%lu", i, (unsigned long)(1ull << i), (unsigned long)c);
+        }
+        printf("\n");
+        printf("WAKEPROF rq_depth_at_switchin:");
+        for (int i = 0; i < 64; i++) {
+            u64 c = rq_hist[i].load();
+            if (c) printf(" d%d=%lu", i, (unsigned long)c);
+        }
+        printf("\n");
+    }
+}
+
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
+
+// Wake-steal runtime toggle (see pick_idle_cpu_for_wake / init reaper).
+bool wake_steal_enabled = false;
 
 thread __thread * s_current;
 cpu __thread * current_cpu;
@@ -381,6 +440,17 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     n->cputime_estimator_set(now, n->_total_cpu_time);
     assert(n->_detached_state->st.load() == thread::status::queued);
     trace_sched_switch(n, p->_runtime.get_local(), n->_runtime.get_local());
+
+    if (wakeprof::enabled) {
+        wakeprof::switches.fetch_add(1, std::memory_order_relaxed);
+        u64 wts = n->_wakeprof_ts;
+        if (wts) {
+            u64 nowns = now.time_since_epoch().count();
+            u64 lat = nowns > wts ? nowns - wts : 0;
+            wakeprof::record(lat, runqueue.size());
+            n->_wakeprof_ts = 0;
+        }
+    }
 
     if (called_from_yield) {
         enqueue(*p);
@@ -1424,6 +1494,52 @@ void thread::destroy()
 // *may* contain status::sending_lock (for waitqueue wait morphing).
 // it will transition from one of the allowed initial states to the
 // waking state.
+// Wake-time idle-CPU steering (a Linux select_task_rq analog).
+//
+// thread::wake_impl() re-wakes a blocked thread on the CPU it last ran on
+// (st->_cpu).  For a workload that fans work out from a single point -- e.g.
+// PostgreSQL, whose one virtio-net RX thread wakes a backend per request --
+// every woken backend piles back onto the small set of CPUs adjacent to the
+// waker, and the timer-driven load_balance() cannot catch a wake/run/block
+// cycle that never accumulates a visible runqueue.  The rest of the machine
+// sits idle while a handful of CPUs are the throughput ceiling.
+//
+// When the thread being woken is migratable and its home CPU already has
+// queued work, redirect the wakeup to a genuinely idle CPU (one polling in
+// its idle loop) so the fan-out disperses immediately.  The thread is in the
+// `waking` state here -- not running, not queued -- so retargeting it is the
+// same bookkeeping the pin()/load_balance() migration paths already do for a
+// waking thread: suspend_timers + export_runtime + set _cpu + fix up the
+// thread-local percpu_base/current_cpu.  Must be called with preemption and
+// (below) irq disabled.
+static cpu* pick_idle_cpu_for_wake(thread* t, cpu* home)
+{
+#if CONF_sched_wake_steal
+    extern bool wake_steal_enabled;
+    if (!wake_steal_enabled) {
+        return nullptr;
+    }
+    // Cheap gate: only steer a migratable thread whose home CPU is loaded.
+    if (!t->migratable() || home->runqueue.empty()) {
+        return nullptr;
+    }
+    // Prefer the waker's own CPU if it is idle (best cache locality for the
+    // data just produced), otherwise the first idle CPU we find.
+    cpu* self = cpu::current();
+    if (self != home && self->idle_poll.load(std::memory_order_relaxed) &&
+        self->runqueue.empty()) {
+        return self;
+    }
+    for (cpu* c : cpus) {
+        if (c != home && c->idle_poll.load(std::memory_order_relaxed) &&
+            c->runqueue.empty()) {
+            return c;
+        }
+    }
+#endif
+    return nullptr;
+}
+
 void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 {
     status old_status = status::waiting;
@@ -1432,6 +1548,9 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
         if (!((1 << unsigned(old_status)) & allowed_initial_states_mask)) {
             return;
         }
+    }
+    if (wakeprof::enabled) {
+        st->t->_wakeprof_ts = osv::clock::uptime::now().time_since_epoch().count();
     }
     auto tcpu = st->_cpu;
     WITH_LOCK(preempt_lock_in_rcu) {
@@ -1443,14 +1562,35 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 #endif
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
+            // Steer the wakeup to an idle CPU if the home CPU is busy, so a
+            // single-waker fan-out (e.g. PG's one RX thread) spreads across
+            // idle CPUs instead of clumping onto the waker's neighborhood.
+            if (cpu* idle = pick_idle_cpu_for_wake(st->t, tcpu)) {
+#if CONF_fork
+                // Match the load_balance migration path: unlink the thread from
+                // its source cpu's parked-timer list BEFORE suspend_timers(), or
+                // the target cpu's park_timers() later trips
+                // assert(!_parked_link.is_linked()).
+                cpu::unlink_parked(*st->t);
+#endif
+                st->t->suspend_timers();
+                st->t->_runtime.export_runtime();
+                st->_cpu = idle;
+                st->t->remote_thread_local_var(::percpu_base) = idle->percpu_base;
+                st->t->remote_thread_local_var(current_cpu) = idle;
+                st->t->stat_migrations.incr();
+                tcpu = idle;
+            }
             tcpu->incoming_wakeups[c].push_back(*st->t);
         }
         if (!tcpu->incoming_wakeups_mask.test_all_and_set(c)) {
             // FIXME: avoid if the cpu is alive and if the priority does not
             // FIXME: warrant an interruption
             if (tcpu != current()->tcpu()) {
+                if (wakeprof::enabled) wakeprof::ipi_wakeups.fetch_add(1, std::memory_order_relaxed);
                 tcpu->send_wakeup_ipi();
             } else {
+                if (wakeprof::enabled) wakeprof::local_wakeups.fetch_add(1, std::memory_order_relaxed);
                 need_reschedule = true;
             }
         }
@@ -2158,6 +2298,31 @@ thread::reaper *thread::_s_reaper;
 void init_detached_threads_reaper()
 {
     thread::_s_reaper = new thread::reaper;
+
+    // Wake-steal (idle-CPU wake steering) runtime toggle: env OSV_WAKE_STEAL=1
+    // arms it, default off. Lets one image A/B stock wake_impl vs the L2
+    // wake-placement fix without a rebuild.
+    {
+        extern bool wake_steal_enabled;
+        const char* e = getenv("OSV_WAKE_STEAL");
+        wake_steal_enabled = (e && e[0] == '1');
+        printf("WAKE_STEAL %s\n", wake_steal_enabled ? "ON" : "off");
+    }
+
+    // WAKEPROF: arm from env + start a periodic console dumper (every 5s).
+    if (const char* e = getenv("OSV_WAKEPROF")) {
+        if (e[0] == '1') {
+            wakeprof::enabled = true;
+            auto dumper = thread::make([] {
+                for (;;) {
+                    sched::thread::sleep(std::chrono::seconds(5));
+                    wakeprof::dump();
+                }
+            }, thread::attr().name("wakeprof").detached());
+            dumper->start();
+            printf("WAKEPROF ARMED (dumping every 5s)\n");
+        }
+    }
 }
 
 void start_early_threads()

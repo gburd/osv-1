@@ -66,6 +66,8 @@
 #include <processor.hh>
 #include <dlfcn.h>
 #include <osv/string_utils.hh>
+#include <osv/lockprof.hh>
+#include <osv/rxprof.hh>
 
 using namespace osv;
 using namespace osv::clock::literals;
@@ -876,6 +878,10 @@ void main_cont(int loader_argc, char** loader_argv)
 #endif
 
     arch::irq_enable();
+#ifdef LOCKPROF
+    lockprof::start_dumper();
+#endif
+    rxprof::arm_from_env();
 
 #ifndef AARCH64_PORT_STUB
 #if CONF_tracepoints_sampler

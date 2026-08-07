@@ -13,6 +13,7 @@
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
 #include <lockfree/ring.hh>
+#include <osv/types.h>
 #include <functional>
 #include <unordered_map>
 #include <osv/rcu.hh>
@@ -122,6 +123,8 @@ public:
     void remove(ipv4_tcp_conn_id id);
     // producer side operations
     bool post_packet(mbuf* m);
+    // RXPROF variant: also attribute per-packet H1 queueing + H2 cost.
+    bool post_packet(mbuf* m, u64 pass_start);
 private:
     net_channel* classify_ipv4_tcp(mbuf* m);
 private:
