@@ -1373,9 +1373,20 @@ ena_rss_configure(struct ena_adapter *adapter)
 		return (rc);
 	}
 
-	/* Spread the indirection table evenly across the serviced IO queues. */
+	/*
+	 * Spread the indirection table evenly across the RX queues we created
+	 * and service. Each entry value must be an ENA RX queue id
+	 * (ENA_IO_RXQ_IDX), not a plain 0..num_io_queues-1 index: ena_com
+	 * validates every entry against ena_dev->io_sq_queues[] and rejects the
+	 * whole table (ENA_COM_INVAL) unless the referenced queue has RX
+	 * direction. RX queues live at odd io-queue indices (2*q + 1); a plain
+	 * index q points at a TX queue (even index), so the table-set silently
+	 * failed and the device kept its power-up default indirection - which
+	 * steers inbound unicast to queues OSv never services (broadcast/ARP
+	 * still reaches queue 0, so it looked like "ARP works, TCP dropped").
+	 */
 	for (i = 0; i < ENA_RX_RSS_TABLE_SIZE; i++) {
-		uint16_t qid = i % adapter->num_io_queues;
+		uint16_t qid = ENA_IO_RXQ_IDX(i % adapter->num_io_queues);
 		rc = ena_com_indirect_table_fill_entry(ena_dev, i, qid);
 		if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
 			ena_log(adapter->pdev, ERR,
@@ -1385,19 +1396,15 @@ ena_rss_configure(struct ena_adapter *adapter)
 	}
 
 	/*
-	 * A Toeplitz hash with a fixed key is enough to distribute flows; the
-	 * exact key does not matter for correctness. Not fatal if unsupported.
+	 * Keep the default Toeplitz key filled by ena_com_rss_init(); passing a
+	 * NULL key leaves it in place. ena_com_fill_hash_function() already
+	 * flushes the hash function to the device, so no separate
+	 * ena_com_set_hash_function() call is needed. Not fatal if unsupported.
 	 */
 	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, NULL,
-	    ENA_HASH_KEY_SIZE, 0xFFFFFFFF);
+	    ENA_HASH_KEY_SIZE, 0x0);
 	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
 		ena_log(adapter->pdev, ERR, "Cannot fill hash function rc: %d", rc);
-		goto err_rss_destroy;
-	}
-
-	rc = ena_com_set_hash_function(ena_dev);
-	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
-		ena_log(adapter->pdev, ERR, "Cannot set hash function rc: %d", rc);
 		goto err_rss_destroy;
 	}
 
