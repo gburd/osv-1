@@ -1504,14 +1504,31 @@ void thread::destroy()
 // cycle that never accumulates a visible runqueue.  The rest of the machine
 // sits idle while a handful of CPUs are the throughput ceiling.
 //
-// When the thread being woken is migratable and its home CPU already has
-// queued work, redirect the wakeup to a genuinely idle CPU (one polling in
-// its idle loop) so the fan-out disperses immediately.  The thread is in the
-// `waking` state here -- not running, not queued -- so retargeting it is the
-// same bookkeeping the pin()/load_balance() migration paths already do for a
-// waking thread: suspend_timers + export_runtime + set _cpu + fix up the
-// thread-local percpu_base/current_cpu.  Must be called with preemption and
-// (below) irq disabled.
+// The correct fix is a select_task_rq analog, but the migration must be done
+// where it is safe.  A woken, blocked thread's per-CPU state (its
+// suspended/parked timers, its runtime measure) lives on its HOME CPU, and
+// those per-CPU structures are only safe to touch from the home CPU in its own
+// context (the parked-timer list and the per-CPU timer list have no cross-CPU
+// lock -- they are walked from that CPU's timer IRQ).  A prior attempt migrated
+// the waking thread from the WAKER's CPU unconditionally, poking the home CPU's
+// parked list and timers from a third CPU non-atomically w.r.t. the home CPU
+// -> a parked_link double-link race that crashed under load.
+//
+// So we only steer when the WAKER is itself the home CPU (cpu::current() ==
+// home).  Then the exact same migration bookkeeping the load_balance() path
+// uses from the source CPU -- unlink_parked + suspend_timers + export_runtime +
+// set _cpu + fix the thread-local percpu_base/current_cpu, then push to the
+// target's incoming_wakeups -- runs on the CPU that OWNS the thread's per-CPU
+// state, so it is same-CPU-safe, identical to the balancer.  The idle target
+// does the enqueue in its own handle_incoming_wakeups() context; nothing pokes
+// another CPU's per-CPU vars.  A single-waker fan-out (e.g. PostgreSQL's one RX
+// thread waking a backend per request) is overwhelmingly a local wake -- the
+// waker's CPU is the backend's home -- so the waker==home case is exactly the
+// clump we need to disperse, and it is the safe case.
+//
+// Only steer when the home CPU already has queued work: single-threaded / low
+// concurrency (empty home runqueue) never pays the scan and never migrates, so
+// this costs nothing when the machine is not oversubscribed.
 static cpu* pick_idle_cpu_for_wake(thread* t, cpu* home)
 {
 #if CONF_sched_wake_steal
@@ -1519,21 +1536,30 @@ static cpu* pick_idle_cpu_for_wake(thread* t, cpu* home)
     if (!wake_steal_enabled) {
         return nullptr;
     }
-    // Cheap gate: only steer a migratable thread whose home CPU is loaded.
-    if (!t->migratable() || home->runqueue.empty()) {
+    // Only the home CPU may safely migrate its own woken thread (see above).
+    // The caller additionally restricts this to ordinary (irq-enabled) wake()
+    // context -- never the IRQ wake path -- via the irq_was_enabled gate below.
+    if (cpu::current() != home) {
         return nullptr;
     }
-    // Prefer the waker's own CPU if it is idle (best cache locality for the
-    // data just produced), otherwise the first idle CPU we find.
-    cpu* self = cpu::current();
-    if (self != home && self->idle_poll.load(std::memory_order_relaxed) &&
-        self->runqueue.empty()) {
-        return self;
+    // Cheap gate: only steer a migratable thread whose home CPU is genuinely
+    // backed up (more than one thread queued behind the current one).  Using a
+    // depth threshold rather than "non-empty" throttles the steer rate under
+    // heavy load -- steering every wake once every CPU is busy degenerates into
+    // a migration/IPI storm -- while still catching the clump as it forms.
+    if (!t->migratable() || home->runqueue.size() < 2) {
+        return nullptr;
     }
-    for (cpu* c : cpus) {
-        if (c != home && c->idle_poll.load(std::memory_order_relaxed) &&
-            c->runqueue.empty()) {
-            return c;
+    // First genuinely idle CPU (idle-polling, empty runqueue).  Scan from the
+    // home CPU's neighbor outward so a burst of wakes on one home CPU spreads
+    // over distinct idle CPUs rather than all racing for cpus[0].
+    unsigned n = cpus.size();
+    for (unsigned k = 1; k < n; k++) {
+        cpu* candidate = cpus[(home->id + k) % n];
+        if (candidate != home &&
+            candidate->idle_poll.load(std::memory_order_relaxed) &&
+            candidate->runqueue.empty()) {
+            return candidate;
         }
     }
 #endif
@@ -1553,6 +1579,12 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
         st->t->_wakeprof_ts = osv::clock::uptime::now().time_since_epoch().count();
     }
     auto tcpu = st->_cpu;
+    // Capture whether we were called from ordinary wake() (irq enabled) vs the
+    // IRQ wake path (wake_with_irq_disabled).  Wake-time idle-CPU steering does
+    // a real thread migration (suspend_timers etc.) and must only run from
+    // thread context, never from an interrupt -- so gate the steer on this.
+    bool from_thread_ctx = arch::irq_enabled();
+    bool steered = false;
     WITH_LOCK(preempt_lock_in_rcu) {
         unsigned c = cpu::current()->id;
         // we can now use st->t here, since the thread cannot terminate while
@@ -1562,15 +1594,17 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 #endif
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
-            // Steer the wakeup to an idle CPU if the home CPU is busy, so a
-            // single-waker fan-out (e.g. PG's one RX thread) spreads across
-            // idle CPUs instead of clumping onto the waker's neighborhood.
-            if (cpu* idle = pick_idle_cpu_for_wake(st->t, tcpu)) {
+            // Steer the wakeup to an idle CPU when the waker is this thread's
+            // home CPU (see pick_idle_cpu_for_wake): the migration bookkeeping
+            // then runs on the CPU that owns the thread's per-CPU timer/runtime
+            // state, so it is same-CPU-safe -- identical to load_balance()'s
+            // source-side migration.  This disperses a single-waker fan-out
+            // (e.g. PG's one RX thread) across idle CPUs at wake time.
+            if (cpu* idle = from_thread_ctx ? pick_idle_cpu_for_wake(st->t, tcpu) : nullptr) {
 #if CONF_fork
-                // Match the load_balance migration path: unlink the thread from
-                // its source cpu's parked-timer list BEFORE suspend_timers(), or
-                // the target cpu's park_timers() later trips
-                // assert(!_parked_link.is_linked()).
+                // Unlink from the (home == current) cpu's parked list before
+                // suspend_timers(), or the target cpu's park_timers() later
+                // trips assert(!_parked_link.is_linked()).
                 cpu::unlink_parked(*st->t);
 #endif
                 st->t->suspend_timers();
@@ -1580,13 +1614,22 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
                 st->t->remote_thread_local_var(current_cpu) = idle;
                 st->t->stat_migrations.incr();
                 tcpu = idle;
+                steered = true;
             }
             tcpu->incoming_wakeups[c].push_back(*st->t);
         }
         if (!tcpu->incoming_wakeups_mask.test_all_and_set(c)) {
             // FIXME: avoid if the cpu is alive and if the priority does not
             // FIXME: warrant an interruption
-            if (tcpu != current()->tcpu()) {
+            if (steered) {
+                // We deliberately picked an idle-polling target; send_wakeup_ipi
+                // suppresses the IPI to an idle_poll CPU (it assumes the target
+                // will notice by polling), but a CPU that has already halted in
+                // wait_for_interrupt() would then never pick up the steered
+                // thread -> a lost wakeup / stall.  Force the IPI to the target.
+                if (wakeprof::enabled) wakeprof::ipi_wakeups.fetch_add(1, std::memory_order_relaxed);
+                wakeup_ipi.send(tcpu);
+            } else if (tcpu != current()->tcpu()) {
                 if (wakeprof::enabled) wakeprof::ipi_wakeups.fetch_add(1, std::memory_order_relaxed);
                 tcpu->send_wakeup_ipi();
             } else {
