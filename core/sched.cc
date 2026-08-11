@@ -144,7 +144,26 @@ bool wake_pull_enabled = false;
 // Only pull from a victim whose runqueue is deeper than this (queued work
 // beyond the one thread it is running) so we never disturb a lightly-loaded
 // machine and never fight the victim over its last runnable thread.
-static constexpr unsigned wake_pull_min_depth = 2;
+//
+// TAIL FIX (a): runtime-tunable via OSV_WAKE_PULL_DEPTH.  At high fan-out
+// (c48-c64) the imbalance is spread thin -- many CPUs sit at depth 1 (one
+// running + one queued waiter) -- so a min_depth of 2 finds nothing to steal
+// and the waiters stay clumped 2-deep instead of dispersing to idle CPUs
+// (the intermittent ~31k dip).  Setting depth=1 lets an idle CPU pull as soon
+// as ANY other CPU has a single queued waiter, which is exactly the thin-but-
+// wide tail imbalance.  Still >=1 (never steal a CPU's last/only running
+// thread), so the "idle-only-asks, one-slot, bounded" PULL invariant holds.
+unsigned wake_pull_min_depth = 2;
+// TAIL FIX (b): periodic re-pull interval in microseconds (0 = off, the
+// idle-entry-only behaviour).  An idle CPU that scanned, found nothing to
+// steal, and halted only re-scans when some interrupt happens to wake it; at
+// the tail its single victim-slot may miss and it can sleep through the window
+// where work becomes stealable.  When set, an idle CPU arms a one-shot timer
+// for this interval before halting so it is guaranteed to wake and re-scan.
+// Idle-CPU-initiated + rate-limited (one timer per idle CPU per interval, and
+// it is cancelled the moment real work arrives) -- NOT a per-wake push, so it
+// does not reintroduce the PUSH IPI storm.
+long wake_pull_periodic_us = 0;
 
 thread __thread * s_current;
 cpu __thread * current_cpu;
@@ -602,6 +621,12 @@ void cpu::send_wakeup_ipi()
 
 void cpu::do_idle()
 {
+    // TAIL FIX (b): a one-shot timer that guarantees an idle CPU wakes to
+    // re-scan for stealable work every wake_pull_periodic_us, even if no other
+    // interrupt arrives.  Declared outside the loop so it survives across the
+    // spin/halt iterations; cancelled implicitly when do_idle returns (work
+    // found) via its destructor.
+    timer repull_tmr(*thread::current());
     do {
         // Idle-CPU PULL: we have no work; ask the busiest CPU to donate one
         // runnable thread (no-op unless wake_pull_enabled).  Fire once per idle
@@ -628,6 +653,17 @@ void cpu::do_idle()
             return;
         }
         guard.release();
+        // TAIL FIX (b): arm the periodic re-pull timer so we do not sleep
+        // through the window where another CPU's queued waiter becomes
+        // stealable.  wait_for_interrupt() returns when it fires, the loop
+        // re-runs try_pull_from_busiest() at the top, and we re-scan.  Bounded
+        // rate (one wake per interval per idle CPU); cheap when nothing to
+        // steal (a scan + halt), and self-terminating (loop exits the instant
+        // real work arrives).
+        if (wake_pull_enabled && wake_pull_periodic_us > 0) {
+            repull_tmr.set(osv::clock::uptime::now() +
+                           std::chrono::microseconds(wake_pull_periodic_us));
+        }
         arch::wait_for_interrupt(); // this unlocks irq_lock
         handle_incoming_wakeups();
     } while (runqueue.empty());
@@ -2481,6 +2517,28 @@ void init_detached_threads_reaper()
         const char* e = getenv("OSV_WAKE_PULL");
         wake_pull_enabled = (e && e[0] == '1');
         printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
+    }
+
+    // TAIL FIX tunables (both gated, default = the idle-entry-only baseline):
+    //   OSV_WAKE_PULL_DEPTH=N    lower the min victim runqueue depth to pull
+    //                            (1 = pull as soon as any CPU has one queued
+    //                            waiter; default 2 = only pull deeper backlogs)
+    //   OSV_WAKE_PULL_PERIODIC=U periodic re-pull: an idle CPU re-scans every
+    //                            U microseconds (0 = off, idle-entry-only)
+    {
+        extern unsigned wake_pull_min_depth;
+        extern long wake_pull_periodic_us;
+        if (const char* e = getenv("OSV_WAKE_PULL_DEPTH")) {
+            long d = atol(e);
+            if (d >= 1) {
+                wake_pull_min_depth = (unsigned)d;
+            }
+        }
+        if (const char* e = getenv("OSV_WAKE_PULL_PERIODIC")) {
+            wake_pull_periodic_us = atol(e);
+        }
+        printf("WAKE_PULL_DEPTH %u  WAKE_PULL_PERIODIC %ldus\n",
+               wake_pull_min_depth, wake_pull_periodic_us);
     }
 
     // WAKEPROF: arm from env + start a periodic console dumper (every 5s).
