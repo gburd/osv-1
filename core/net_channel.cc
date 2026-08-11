@@ -248,6 +248,24 @@ bool classifier::post_packet(mbuf* m, u64 pass_start)
     return fast;
 }
 
+bool classifier::post_packet(mbuf* m, net_channel_wake_batch& batch)
+{
+#if CONF_lazy_stack_invariant
+    assert(!sched::thread::current()->is_app());
+#endif
+    // Caller holds osv::rcu_read_lock across the whole drain pass; the recorded
+    // channel pointers stay valid until batch.flush() runs under that lock.
+    if (auto nc = classify_ipv4_tcp(m)) {
+        log_packet_in(m, NETISR_ETHER);
+        if (!nc->push(m)) {
+            return false;
+        }
+        batch.add(nc);
+        return true;
+    }
+    return false;
+}
+
 // must be called with rcu lock held
 net_channel* classifier::classify_ipv4_tcp(mbuf* m)
 {

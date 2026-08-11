@@ -22,6 +22,7 @@
 
 #include <string>
 #include <string.h>
+#include <stdlib.h>
 #include <map>
 #include <algorithm>
 #include <errno.h>
@@ -571,6 +572,16 @@ void net::read_config()
  *
  * @return true if csum is bad and false if csum is ok (!!!)
  */
+bool net::batch_wakes_enabled()
+{
+    // Cached: cannot change after boot; the receiver reads it once.
+    static const bool enabled = [] {
+        const char* v = getenv("OSV_NET_BATCH_WAKE");
+        return !(v && v[0] == '0');
+    }();
+    return enabled;
+}
+
 bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 {
     struct ether_header* eh;
@@ -629,6 +640,12 @@ void net::receiver(struct rxq* rxq)
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
     u64 rxprof_prev_pass_end = 0;
+    // Coalesce the per-packet channel wakes issued while draining one RX pass
+    // into one wake per channel, flushed together at the end of the pass, so
+    // the scheduler's per-target-CPU IPI coalescing collapses the wakeup IPIs.
+    // Runtime toggle for A/B (OSV_NET_BATCH_WAKE=0 disables); default on.
+    net_channel_wake_batch wake_batch;
+    const bool batch_wakes = net::batch_wakes_enabled();
 
     while (1) {
 
@@ -649,6 +666,15 @@ void net::receiver(struct rxq* rxq)
         // use local header that we copy out of the mbuf since we're
         // truncating it.
         net_hdr_mrg_rxbuf* mhdr;
+
+        // When batching wakes we hold one rcu_read_lock across the whole drain
+        // pass and the wake flush, because the net_channel pointers we record
+        // are rcu_dispose()d on connection teardown and must stay valid until
+        // flushed.  When not batching, post_packet() takes its own lock per
+        // packet as before.
+        if (batch_wakes) {
+            osv::rcu_read_lock.lock();
+        }
 
         while (void* buffer = vq->get_buf_elem(&len)) {
 
@@ -706,7 +732,9 @@ void net::receiver(struct rxq* rxq)
 
             bool fast_path = rxprof::enabled
                 ? _ifn->if_classifier.post_packet(m_head, rxprof_pass_start)
-                : _ifn->if_classifier.post_packet(m_head);
+                : (batch_wakes
+                   ? _ifn->if_classifier.post_packet(m_head, wake_batch)
+                   : _ifn->if_classifier.post_packet(m_head));
             if (!fast_path) {
                 (*_ifn->if_input)(_ifn, m_head);
             } else {
@@ -727,6 +755,14 @@ void net::receiver(struct rxq* rxq)
         rxq->stats.rx_csum       += csum_ok;
         rxq->stats.rx_csum_err   += csum_err;
         rxq->stats.rx_bytes      += rx_bytes;
+
+        if (batch_wakes) {
+            // One wake per distinct connection touched this pass; the flushed
+            // wakes run back-to-back so wake_impl() coalesces the wakeup IPIs
+            // per destination CPU.  Still under the drain's rcu_read_lock.
+            wake_batch.flush();
+            osv::rcu_read_lock.unlock();
+        }
 
         if (rxprof::enabled) {
             u64 pass_end = rxprof::now_ns();

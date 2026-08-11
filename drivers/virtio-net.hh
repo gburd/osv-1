@@ -261,6 +261,11 @@ public:
 
     void wait_for_queue(vring* queue);
     bool bad_rx_csum(struct mbuf* m, struct net_hdr* hdr);
+    // Whether the receiver coalesces per-packet channel wakes into one wake per
+    // channel per drain pass.  Read once from OSV_NET_BATCH_WAKE ("0" disables);
+    // default enabled.  Runtime toggle so the change can be A/B-measured on a
+    // single image.
+    static bool batch_wakes_enabled();
     // receiver()/fill_rx_ring() operate on a specific Rx queue so that with
     // multiqueue (VIRTIO_NET_F_MQ) each Rx queue is drained by its own poll
     // thread on its own CPU, instead of all inbound traffic funnelling through
