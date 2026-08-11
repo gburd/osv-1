@@ -1102,6 +1102,15 @@ struct cpu : private timer_base::client {
     thread* terminating_thread;
     osv::clock::uptime::time_point running_since;
     char* percpu_base;
+    // Idle-CPU PULL (work-stealing) request slot.  When this CPU goes idle it
+    // may ask the most-loaded CPU to donate a runnable thread: it stores its
+    // own cpu* here on the victim and IPIs the victim.  The victim's IPI
+    // handler (running in the victim's own context, so it is same-CPU-safe --
+    // identical bookkeeping to load_balance()'s source-side migration) reads
+    // this and pushes one migratable thread into the requester's
+    // incoming_wakeups.  Single-slot: at most one outstanding donate request
+    // per victim, which self-throttles the pull rate.
+    std::atomic<cpu*> pull_donate_to = { nullptr };
 #if CONF_fork
     // Fork timer-park (see thread::_parked_deadline).  A per-CPU identity kernel
     // timer that fires at the earliest parked (suspended, blocked) thread's
@@ -1142,6 +1151,12 @@ struct cpu : private timer_base::client {
     void idle_poll_end();
     void send_wakeup_ipi();
     void load_balance();
+    // Idle path: if this CPU is idle, request one thread from the busiest CPU
+    // (see pull_donate_to).  Returns true if a request was sent.
+    bool try_pull_from_busiest();
+    // IPI handler on the victim CPU: donate one migratable runnable thread to
+    // the CPU recorded in pull_donate_to.  Runs in the victim's own context.
+    void donate_to_puller();
     unsigned load();
     /**
      * Try to reschedule.

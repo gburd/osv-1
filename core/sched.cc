@@ -137,6 +137,15 @@ std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 // Wake-steal runtime toggle (see pick_idle_cpu_for_wake / init reaper).
 bool wake_steal_enabled = false;
 
+// Idle-CPU PULL (work-stealing) runtime toggle (see cpu::try_pull_from_busiest
+// / init reaper).  When on, an idle CPU pulls a runnable thread from the
+// busiest CPU instead of the waker pushing at wake time.  Default off for A/B.
+bool wake_pull_enabled = false;
+// Only pull from a victim whose runqueue is deeper than this (queued work
+// beyond the one thread it is running) so we never disturb a lightly-loaded
+// machine and never fight the victim over its last runnable thread.
+static constexpr unsigned wake_pull_min_depth = 2;
+
 thread __thread * s_current;
 cpu __thread * current_cpu;
 
@@ -146,6 +155,13 @@ bool __thread need_reschedule = false;
 elf::tls_data tls;
 
 inter_processor_interrupt wakeup_ipi{IPI_WAKEUP, [] {}};
+
+// Idle-CPU PULL: an idle CPU IPIs the busiest CPU to donate one runnable
+// thread.  The handler runs on the victim (busiest) CPU in its own interrupt
+// context, so the migration bookkeeping touches only the victim's own per-CPU
+// state -- same-CPU-safe, exactly like load_balance()'s source-side migration.
+inter_processor_interrupt sched_pull_ipi{IPI_SCHED_PULL,
+    [] { cpu::current()->donate_to_puller(); }};
 
 constexpr float cmax = 0x1P63;
 constexpr float cinitial = 0x1P-63;
@@ -587,11 +603,16 @@ void cpu::send_wakeup_ipi()
 void cpu::do_idle()
 {
     do {
+        // Idle-CPU PULL: we have no work; ask the busiest CPU to donate one
+        // runnable thread (no-op unless wake_pull_enabled).  Fire once per idle
+        // entry -- not per spin iteration -- so the IPI rate stays bounded by
+        // the number of idle CPUs, never the wake rate.  The donated thread
+        // arrives via incoming_wakeups and is picked up by the spin loop below.
+        try_pull_from_busiest();
         idle_poll_lock_type idle_poll_lock{*this};
         WITH_LOCK(idle_poll_lock) {
             // spin for a bit before halting
             for (unsigned ctr = 0; ctr < 10000; ++ctr) {
-                // FIXME: can we pull threads from loaded cpus?
                 handle_incoming_wakeups();
                 if (!runqueue.empty()) {
                     return;
@@ -1023,6 +1044,105 @@ void cpu::load_balance()
             migrated++;
         }
     }
+}
+
+// Idle-CPU PULL (work-stealing).  Called from the idle path when this CPU has
+// an empty runqueue and is about to poll/halt.  Instead of the waker pushing a
+// woken thread onto an idle CPU at wake time (the PUSH model -- a per-wake
+// IPI/migration storm that livelocks under load), the IDLE CPU pulls: it asks
+// the busiest CPU to donate one runnable thread to it.
+//
+// This is self-throttling by construction: only idle CPUs ask, and the moment a
+// CPU receives donated work it is no longer idle and stops asking.  The IPI
+// rate is bounded by the number of idle CPUs (one outstanding request each via
+// the single pull_donate_to slot), not by the wake rate -- so it cannot build
+// into the PUSH model's storm.  All runqueue mutation happens on the owning
+// (victim) CPU in its own IPI context, so it is same-CPU-safe, exactly like
+// load_balance()'s source-side migration.
+//
+// Returns true if a donate request was sent (caller can keep polling for the
+// donated thread to arrive via incoming_wakeups).
+bool cpu::try_pull_from_busiest()
+{
+    if (!wake_pull_enabled) {
+        return false;
+    }
+    // Only pull when genuinely idle.
+    if (!runqueue.empty()) {
+        return false;
+    }
+    // Find the busiest CPU by runqueue depth.  Bounded scan over cpus[].
+    cpu* busiest = nullptr;
+    unsigned best = wake_pull_min_depth;
+    for (cpu* c : cpus) {
+        if (c == this) {
+            continue;
+        }
+        unsigned d = c->load();
+        if (d >= best) {
+            best = d;
+            busiest = c;
+        }
+    }
+    if (!busiest) {
+        return false;   // nobody is backed up -- nothing to steal
+    }
+    // Publish our request on the victim.  If the victim already has an
+    // outstanding donate request (from another idle CPU), leave it -- one at a
+    // time keeps the pull rate low and avoids two idle CPUs fighting for the
+    // same victim on the same tick.
+    cpu* expected = nullptr;
+    if (!busiest->pull_donate_to.compare_exchange_strong(
+            expected, this, std::memory_order_acq_rel)) {
+        return false;
+    }
+    sched_pull_ipi.send(busiest);
+    return true;
+}
+
+// IPI handler on the victim (busiest) CPU: donate one migratable runnable
+// thread to the CPU that requested it (pull_donate_to).  Runs in the victim's
+// own interrupt context (irq already disabled), so touching this CPU's own
+// runqueue and the donated thread's per-CPU timer/runtime state is safe --
+// byte-identical bookkeeping to load_balance()'s source-side migration.
+void cpu::donate_to_puller()
+{
+    cpu* dst = pull_donate_to.exchange(nullptr, std::memory_order_acq_rel);
+    if (!dst || dst == this) {
+        return;
+    }
+    // Only donate if we still have queued work beyond the running thread; do
+    // not hand off our last runnable thread and go idle ourselves.
+    if (runqueue.size() < wake_pull_min_depth) {
+        return;
+    }
+    // Pick the least-recently-runnable migratable thread (tail of the tree),
+    // same selection as load_balance().
+    auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
+            [](thread& t) { return t._migration_lock_counter == 0; });
+    if (i == runqueue.rend()) {
+        return;
+    }
+    auto& mig = *i;
+    trace_sched_migrate(&mig, dst->id);
+    runqueue.erase(std::prev(i.base()));
+    assert(mig._detached_state->st.load() == thread::status::queued);
+    mig._detached_state->st.store(thread::status::waking);
+#if CONF_fork
+    cpu::unlink_parked(mig);
+#endif
+    mig.suspend_timers();
+    mig._detached_state->_cpu = dst;
+    mig._runtime.export_runtime();
+    mig.remote_thread_local_var(::percpu_base) = dst->percpu_base;
+    mig.remote_thread_local_var(current_cpu) = dst;
+    mig.stat_migrations.incr();
+    dst->incoming_wakeups[id].push_back(mig);
+    dst->incoming_wakeups_mask.set(id);
+    // Force the IPI to the requester: it is idle-polling / possibly halted in
+    // wait_for_interrupt(), and send_wakeup_ipi() would suppress the IPI to an
+    // idle_poll CPU -> the donated thread would sit unnoticed = a lost wakeup.
+    wakeup_ipi.send(dst);
 }
 
 cpu::notifier::notifier(std::function<void ()> cpu_up)
@@ -2350,6 +2470,17 @@ void init_detached_threads_reaper()
         const char* e = getenv("OSV_WAKE_STEAL");
         wake_steal_enabled = (e && e[0] == '1');
         printf("WAKE_STEAL %s\n", wake_steal_enabled ? "ON" : "off");
+    }
+
+    // Idle-CPU PULL (work-stealing) runtime toggle: env OSV_WAKE_PULL=1 arms it,
+    // default off.  The stable alternative to WAKE_STEAL's wake-time PUSH: idle
+    // CPUs pull work from the busiest CPU instead of the waker pushing (which
+    // livelocks under load).  One image A/B: OSV_WAKE_PULL=0 (stock) vs =1.
+    {
+        extern bool wake_pull_enabled;
+        const char* e = getenv("OSV_WAKE_PULL");
+        wake_pull_enabled = (e && e[0] == '1');
+        printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
     }
 
     // WAKEPROF: arm from env + start a periodic console dumper (every 5s).
