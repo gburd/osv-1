@@ -15,6 +15,7 @@
 #include <lockfree/ring.hh>
 #include <functional>
 #include <unordered_map>
+#include <vector>
 #include <osv/rcu.hh>
 #include <osv/rcu-hashtable.hh>
 #include <bsd/porting/netport.h>
@@ -148,6 +149,60 @@ private:
     using ipv4_tcp_channels = osv::rcu_hashtable<item, item_hash>;
     mutex _mtx;
     ipv4_tcp_channels _ipv4_tcp_channels;
+};
+
+// Collects the distinct net_channels touched during one NIC receive-drain pass
+// so their wakes can be issued together at the end of the pass, turning
+// one-wake-per-packet into one-wake-per-channel-per-pass.  Because the flushed
+// wakes run back-to-back with no intervening reschedule, thread::wake_impl()'s
+// per-target-CPU IPI coalescing (incoming_wakeups_mask) collapses them to at
+// most one wakeup IPI per destination CPU per pass.  Deduplicates so a channel
+// that got several packets in the pass is woken once.  Small inline capacity
+// avoids heap traffic on the hot RX path; overflow spills to a heap vector.
+class net_channel_wake_batch {
+public:
+    void add(net_channel* nc) {
+        for (unsigned i = 0; i < _n; i++) {
+            if (_inline[i] == nc) {
+                return;
+            }
+        }
+        if (_spill) {
+            for (auto* c : *_spill) {
+                if (c == nc) {
+                    return;
+                }
+            }
+        }
+        if (_n < inline_capacity) {
+            _inline[_n++] = nc;
+        } else {
+            if (!_spill) {
+                _spill = new std::vector<net_channel*>;
+            }
+            _spill->push_back(nc);
+        }
+    }
+    void flush() {
+        for (unsigned i = 0; i < _n; i++) {
+            _inline[i]->wake();
+        }
+        _n = 0;
+        if (_spill) {
+            for (auto* c : *_spill) {
+                c->wake();
+            }
+            delete _spill;
+            _spill = nullptr;
+        }
+    }
+    bool empty() const { return _n == 0 && !_spill; }
+    ~net_channel_wake_batch() { delete _spill; }
+private:
+    static const unsigned inline_capacity = 16;
+    unsigned _n = 0;
+    net_channel* _inline[inline_capacity];
+    std::vector<net_channel*>* _spill = nullptr;
 };
 
 // RX wake fan-out (net dispatch de-serialization).

@@ -22,6 +22,7 @@
 
 #include <string>
 #include <string.h>
+#include <stdlib.h>
 #include <map>
 #include <errno.h>
 #include <osv/debug.h>
@@ -413,6 +414,16 @@ void net::read_config()
  *
  * @return true if csum is bad and false if csum is ok (!!!)
  */
+bool net::batch_wakes_enabled()
+{
+    // Cached: cannot change after boot; the receiver reads it once.
+    static const bool enabled = [] {
+        const char* v = getenv("OSV_NET_BATCH_WAKE");
+        return v && v[0] == '1';
+    }();
+    return enabled;
+}
+
 bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 {
     struct ether_header* eh;
@@ -470,6 +481,13 @@ void net::receiver()
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
+    // Coalesce the per-packet channel wakes issued while draining one RX pass
+    // into one wake per channel, flushed at the end of the pass, so wake_impl()
+    // collapses the wakeup IPIs per destination CPU.  Runtime toggle
+    // OSV_NET_BATCH_WAKE (=0 disables); default off so it composes cleanly with
+    // the dispatch-fanout path (they are mutually exclusive per pass).
+    net_channel_wake_batch wake_batch;
+    const bool batch_wakes = net::batch_wakes_enabled();
 
     while (1) {
 
@@ -558,6 +576,15 @@ void net::receiver()
                 } else {
                     (*_ifn->if_input)(_ifn, m_head);
                 }
+            } else if (batch_wakes) {
+                // Batch-wake: classify+enqueue, record the channel, wake once
+                // per distinct channel at end-of-pass (see wake_batch.flush()).
+                net_channel* nc = _ifn->if_classifier.classify_and_push(m_head);
+                if (nc) {
+                    wake_batch.add(nc);
+                } else {
+                    (*_ifn->if_input)(_ifn, m_head);
+                }
             } else {
                 bool fast_path = _ifn->if_classifier.post_packet(m_head);
                 if (!fast_path) {
@@ -584,6 +611,10 @@ void net::receiver()
         // wake their backends in parallel while we go back to the RX ring.
         if (net_wake_dispatch::enabled()) {
             net_wake_dispatch::flush();
+        } else if (batch_wakes) {
+            // Wake every distinct channel touched this pass, back-to-back, so
+            // wake_impl() coalesces the wakeup IPIs per destination CPU.
+            wake_batch.flush();
         }
     }
 }

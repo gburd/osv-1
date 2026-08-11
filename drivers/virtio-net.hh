@@ -220,6 +220,10 @@ public:
 
     void wait_for_queue(vring* queue);
     bool bad_rx_csum(struct mbuf* m, struct net_hdr* hdr);
+    // Whether the receiver coalesces per-packet channel wakes into one wake per
+    // channel per drain pass.  Read once from OSV_NET_BATCH_WAKE ("1" enables);
+    // default off.  Runtime toggle for A/B on a single image.
+    static bool batch_wakes_enabled();
     void receiver();
     void fill_rx_ring();
     mbuf* packet_to_mbuf(const std::vector<iovec>& iovec);
