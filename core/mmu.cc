@@ -2469,7 +2469,37 @@ static bool handle_cow_write_fault(uintptr_t addr)
     npte = pte_mark_cow(npte, false);
     npte.set_writable(true);
     pt[i0] = npte;
-    mmu::flush_tlb_all();
+    // TLB invalidation for the just-installed private COW page.
+    //
+    // The normal path does a global cross-CPU flush (flush_tlb_all), which
+    // BLOCKS: it takes tlb_flush_mutex and wait_until()s for every other CPU to
+    // confirm -- i.e. it RESCHEDULES.  A reschedule is legal at exception_depth
+    // <= 1 (a single, non-nested page fault), but NOT when this COW fault is
+    // itself NESTED inside another exception (exception_depth >= 2): the nested
+    // exception stacks are per-CPU and finite, so rescheduling off one corrupts
+    // it -- reschedule_from_interrupt asserts(exception_depth <= 1).
+    //
+    // On bare Nitro (unlike KVM, whose interrupt/fault timing masked it) a real
+    // ENA/NVMe/timer IRQ reliably lands a fault inside an in-flight fault during
+    // PostgreSQL's postmaster backend fork, driving this handler to depth 2 --
+    // then the blocking flush_tlb_all reschedules and trips the assert.
+    //
+    // A GLOBAL flush is not needed here for correctness: the page was just made
+    // PRIVATE to THIS address space (pt[i0] holds a fresh phys page in this AS's
+    // own tables).  Only the FAULTING CPU can have a stale write-protected TLB
+    // entry for `addr` in this AS; other CPUs run other address spaces (a
+    // different CR3) and reload the full TLB context when they next switch into
+    // this AS, so they cannot observe a stale mapping.  A LOCAL flush is thus
+    // sufficient and, crucially, never blocks -- safe at any exception depth.
+    //
+    // So: when nested (depth >= 2) do the non-blocking local flush; otherwise
+    // keep the conservative global flush (identical to prior behaviour, so the
+    // common depth<=1 path is byte-for-byte unchanged).
+    if (sched::exception_depth >= 2) {
+        mmu::flush_tlb_local();
+    } else {
+        mmu::flush_tlb_all();
+    }
     return true;
 }
 #endif // CONF_fork
@@ -2526,13 +2556,42 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
     // is likewise handled by for_read.  Peek the leaf PTE lock-free and skip
     // the exclusive lock unless the leaf is really COW, so shared-anon faults
     // no longer serialize behind the AS-wide writer.
+    // First handle a copy-on-write write fault (fork private mappings): the
+    // page is present but write-protected with the cow bit -- copy it.
+    //
+    // NESTED-FAULT SAFETY (bare-Nitro fork wall): this fault may itself be
+    // NESTED inside another in-flight exception.  On bare Nitro a real
+    // ENA/NVMe/timer IRQ reliably lands a fault inside an in-flight fault during
+    // PostgreSQL's postmaster backend fork (KVM's timing masked it), driving
+    // this handler to sched::exception_depth >= 2.  At that depth NO reschedule
+    // is allowed -- the per-CPU nested-exception stacks are finite, so
+    // reschedule_from_interrupt asserts(exception_depth <= 1).  But both the
+    // AS-wide vmas_mutex->for_write() acquisition (a contended rwlock BLOCKS)
+    // and handle_cow_write_fault's flush_tlb_all (takes tlb_flush_mutex +
+    // wait_until, BLOCKS) reschedule -> the assert trips deep in the fork path.
+    //
+    // When nested that deep, resolve the COW fault LOCK-FREE: walk_to_leaf reads
+    // only THIS AS's own tables, the private page is installed with a single
+    // PTE write to this AS, and a LOCAL TLB flush suffices (the page is private
+    // to this AS -- other CPUs run a different CR3 and reload on switch-in).  A
+    // concurrent COW copy of the same page by another CPU at most duplicates a
+    // private page (the loser leaks one page -- rare, only in this nested race,
+    // and correctness-preserving).  Nothing here blocks, so no reschedule can
+    // happen at depth >= 2.  The non-nested (depth <= 1) path is UNCHANGED.
     if (mmu::is_page_fault_write(ef->get_error()) &&
             (!cow_peek_enabled() || write_fault_needs_cow_lock(addr))) {
-        PREVENT_STACK_PAGE_FAULT
-        WITH_LOCK(as->vmas_mutex->for_write()) {
+        if (sched::exception_depth >= 2) {
             if (handle_cow_write_fault(addr)) {
                 trace_mmu_vm_fault_ret(addr, ef->get_error());
                 return;
+            }
+        } else {
+            PREVENT_STACK_PAGE_FAULT
+            WITH_LOCK(as->vmas_mutex->for_write()) {
+                if (handle_cow_write_fault(addr)) {
+                    trace_mmu_vm_fault_ret(addr, ef->get_error());
+                    return;
+                }
             }
         }
     }
