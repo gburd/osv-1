@@ -2114,6 +2114,7 @@ objects += fs/ext/ext_null_vfsops.o
 
 $(out)/loader.o: CXXFLAGS += -DHIDE_SYMBOLS=$(conf_hide_symbols)
 $(out)/core/trace.o: CXXFLAGS += -DHIDE_SYMBOLS=$(conf_hide_symbols)
+$(out)/core/net_channel.o: CXXFLAGS += -faligned-new
 
 # The OSv kernel is linked into an ordinary, non-PIE, executable, so there is no point in compiling
 # with -fPIC or -fpie and objects that can be linked into a PIE. On the contrary, PIE-compatible objects
