@@ -1069,6 +1069,16 @@ void cpu::donate_to_puller()
     runqueue.erase(std::prev(i.base()));
     assert(mig._detached_state->st.load() == thread::status::queued);
     mig._detached_state->st.store(thread::status::waking);
+#if CONF_fork
+    // A preempted (queued) app thread may be parked on THIS (victim) cpu's
+    // per-CPU timer list (park_timers runs on every app-thread switch-out).
+    // Unlink it here, on its owning (source) cpu, before it migrates to `dst`,
+    // so its on-stack timer nodes are never left linked on a foreign cpu's
+    // parked list where a later timer IRQ would walk them through the wrong
+    // address space and fault in non-preemptable context.  Identical to the
+    // source-side unlink load_balance() does before its own migration.
+    cpu::unlink_parked(mig);
+#endif
     mig.suspend_timers();
     mig._detached_state->_cpu = dst;
     mig._runtime.export_runtime();
