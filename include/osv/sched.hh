@@ -314,6 +314,11 @@ public:
     // understood on any CPU. Use this function when migrating the thread to a
     // different CPU, and the destination CPU should run update_after_sleep().
     void export_runtime();
+    // Same as export_runtime(), but for a thread that is not running on the
+    // current CPU (e.g. a blocked thread being steered to a new CPU at wake
+    // time): its local runtime is in "from"'s scale, not the current CPU's, so
+    // divide by from->c rather than cpu::current()->c.
+    void export_runtime(cpu* from);
     // Update the thread's local runtime after a sleep, when we potentially
     // missed one or more renormalization steps (which were only done to
     // runnable threads), or need to convert global runtime to local runtime.
@@ -652,6 +657,20 @@ public:
     }
     static osv::application *current_app();
     bool migratable() const { return _migration_lock_counter == 0; }
+#if CONF_fork
+    // True while this thread's on-stack timer nodes may be parked on some cpu's
+    // per-CPU parked list (set on switch-out, cleared on switch-in / unpark).
+    // wake-time steering uses this to refuse to steer a parked thread, since
+    // it cannot safely unlink from a foreign cpu's parked list (see
+    // steer_to_idle_cpu in core/sched.cc).
+    bool timers_parked() const { return _timers_parked || _parked_link.is_linked(); }
+    // True if this thread has any live timer nodes (armed on its home cpu's
+    // per-CPU timer list, or suspended pending a reload).  wake-time steering
+    // runs on the WAKER's cpu and cannot safely relocate a thread's timers off
+    // its HOME cpu (suspend_timers touches the caller's cpu list, not home's),
+    // so it only steers a thread that has NO timer state to relocate.
+    bool has_timer_state() const { return has_active_timers() || timers_suspended() || timers_parked(); }
+#endif
     bool pinned() const { return _pinned; }
     /**
      * Return thread's numeric id
@@ -765,7 +784,8 @@ public:
     void* get_exception_stack_top() { return _arch.exception_stack + sizeof(_arch.exception_stack); }
 private:
     static void wake_impl(detached_state* st,
-            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting));
+            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting),
+            bool may_steer = false);
     static void sleep_impl(timer &tmr);
     void main();
 #ifdef __x86_64__
@@ -911,6 +931,19 @@ private:
     // park_timers never push_back()s a still-linked node (the intrusive-list
     // safe-link double-insert assert) and no erase touches a foreign cpu's list.
     cpu *_parked_cpu = nullptr;
+    // Set when thread::wake_impl() steers this thread to an idle CPU at wake
+    // time (see steer_to_idle_cpu).  The steer exports the thread's runtime and
+    // retargets it to the idle CPU BEFORE the destination has run
+    // update_after_sleep() to convert the runtime back; between those two
+    // points the thread must not be re-migrated by the idle-pull path
+    // (donate_to_puller) or the load balancer, or its runtime would be
+    // re-exported without an intervening update_after_sleep and it could run
+    // still-exported (ran_for()'s _renormalize_count == -1 assert).  The steer
+    // bumps _migration_lock_counter (which both migration paths already skip
+    // via migratable()) and sets this flag; the destination's
+    // handle_incoming_wakeups() clears both after update_after_sleep(), so the
+    // steered thread is PULL/balance-ineligible for exactly the export window.
+    bool _steered_pending = false;
 #endif
 public:
     void destroy();

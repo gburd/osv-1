@@ -37,7 +37,7 @@
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
 #include <osv/kernel_config_sched_wake_pull.h>
-
+#include <osv/kernel_config_sched_wake_idle_steer.h>
 MAKE_SYMBOL(sched::thread::current);
 MAKE_SYMBOL(sched::cpu::current);
 MAKE_SYMBOL(sched::get_preempt_counter);
@@ -89,6 +89,14 @@ bool wake_pull_enabled = false;
 // beyond the one thread it is running) so we never disturb a lightly-loaded
 // machine and never fight the victim over its last runnable thread.
 static constexpr unsigned wake_pull_min_depth = 2;
+#endif
+
+#if CONF_sched_wake_idle_steer
+// Wake-time idle-CPU steering runtime toggle (see steer_to_idle_cpu /
+// thread::wake_impl).  When on, a woken application thread whose home CPU is
+// loaded is placed on an idle CPU at wake time instead of on its last-run CPU.
+// Default off; armed at boot via env OSV_WAKE_STEER=1.
+bool wake_steer_enabled = false;
 #endif
 
 thread __thread * s_current;
@@ -402,6 +410,23 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     runqueue.erase(ni);
     n->cputime_estimator_set(now, n->_total_cpu_time);
     assert(n->_detached_state->st.load() == thread::status::queued);
+#if CONF_fork
+    // A wake-time-steered thread (thread::wake_impl) kept its migration lock +
+    // _steered_pending set from the steer through its landing on this cpu until
+    // it is actually selected to RUN here.  Holding the lock across that whole
+    // interval -- not just the export window -- keeps the idle-pull path
+    // (donate_to_puller) and the load balancer from re-migrating (and thus
+    // re-exporting) it before it has run once on the cpu it was steered to.  A
+    // second migration between the destination's update_after_sleep() and the
+    // thread's first run is exactly what let it run still-exported
+    // (_renormalize_count == -1) and trip ran_for()'s assert.  It is coherent
+    // and about to run now, so release the lock; from here it migrates like any
+    // other thread.
+    if (n->_steered_pending) {
+        n->_steered_pending = false;
+        n->_migration_lock_counter--;
+    }
+#endif
     trace_sched_switch(n, p->_runtime.get_local(), n->_runtime.get_local());
 
     if (called_from_yield) {
@@ -1563,7 +1588,104 @@ void thread::destroy()
 // *may* contain status::sending_lock (for waitqueue wait morphing).
 // it will transition from one of the allowed initial states to the
 // waking state.
-void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
+//
+// Wake-time idle-CPU steering (a Linux select_task_rq analog).  thread::wake()
+// normally re-queues a blocked thread onto the CPU it last ran on (its "home").
+// When one thread wakes many others -- e.g. a single network RX thread waking a
+// backend per client connection -- those wakees pile onto the waker's CPU while
+// the rest of the machine sits idle, and the idle-pull path / load balancer
+// (the other spreaders) only fire on a runqueue depth a request/reply ping-pong
+// never builds.  So on the wakeup, if the woken thread is unpinned and its home
+// CPU already has runnable work while some CPU is idle, steer the wakeup to an
+// idle CPU instead of home.  Returns the CPU to wake the thread on (home if no
+// steering).
+//
+// Kept cheap because it runs on the hot wakeup path: a single scan of the CPU
+// array that stops at the first idle CPU, and only when home is loaded.
+static cpu* steer_to_idle_cpu(thread* t, cpu* home)
+{
+#if CONF_sched_wake_idle_steer
+    if (!wake_steer_enabled) {
+        return home;
+    }
+    // Only steer application threads.  Kernel worker threads (page-pool
+    // refillers, the reaper, BSD taskqueues, etc.) are few, often effectively
+    // CPU-affine, and moving them buys nothing while widening the surface for
+    // scheduler-internal wakeup races; the clump we want to disperse is the
+    // application work (e.g. a server's per-connection worker threads).
+    if (!t->is_app()) {
+        return home;
+    }
+    // Never steer the CPU's currently-running thread: a self-wake (a running
+    // thread woken before it has descheduled) is handled by the
+    // "&t == thread::current()" fast path in handle_incoming_wakeups(), which
+    // does not run update_after_sleep(); migrating it there would leave its
+    // runtime exported (global) and trip ran_for()'s _renormalize_count assert.
+    if (t == thread::current()) {
+        return home;
+    }
+    // Never steer a thread that is STILL RUNNING on its home cpu.  A thread
+    // that called prepare_wait() sets itself status::waiting while it is still
+    // executing (before cpu::schedule() actually deschedules it); a waker that
+    // wins the waiting->waking CAS in that window would otherwise steer a
+    // thread that is concurrently running on home.  Its runtime is being
+    // charged by home's reschedule_from_interrupt (ran_for), so exporting it
+    // from the waker's cpu races that and lets it run still-exported
+    // (_renormalize_count == -1).  home->get_current() reads home's s_current
+    // (t's percpu context is still home's, since we have not retargeted it):
+    // if t is home's running thread, leave it -- it will deschedule on home and
+    // the normal same-cpu wake fast path handles it.
+    if (t == t->remote_thread_local_var(s_current)) {
+        return home;
+    }
+    // Never move a pinned or migration-disabled thread (migratable() checks
+    // _migration_lock_counter, which pin() bumps).  We also need it to be zero
+    // so the steer can bump it as its own PULL/balance-exclusion lock below.
+    if (!t->migratable()) {
+        return home;
+    }
+#if CONF_fork
+    // FORK SAFETY (crashes #1 and #2 both trace to this).  wake_impl() runs on
+    // the WAKER's cpu, which is neither the thread's home nor the steer target.
+    // A blocked app thread's timers live on its HOME cpu -- either armed/
+    // suspended on home's per-CPU timer list (relocated by suspend_timers,
+    // which operates on cpu::current()->timers = the CALLER's cpu, not home's)
+    // or parked on home's parked list (relocated by unlink_parked, on the
+    // OWNING cpu).  The proven migration paths (pin, load_balance,
+    // donate_to_puller) all run ON the thread's home cpu precisely so those
+    // touch the right cpu's lists.  A wake-time steer from a foreign cpu cannot
+    // safely relocate that timer state: it would leave the thread's on-stack
+    // timer nodes linked on home's list, where a later timer IRQ walks them
+    // through a foreign address space and faults in non-preemptable context
+    // (assert(preemptable) in page_fault), and that timer IRQ can also re-wake
+    // the thread mid-migration, breaking the exported-runtime handoff
+    // (assert(_renormalize_count != -1) in ran_for).  So only steer a thread
+    // that has NO timer state to relocate -- then the migration is a pure
+    // runtime + tls-var retarget, safe from the waker.  A PG backend blocked
+    // reading its next query (no WaitLatch timeout armed) is exactly this case,
+    // which is the wakeup fan-out we want to disperse.
+    if (t->has_timer_state()) {
+        return home;
+    }
+#endif
+    // If home has no other runnable work, waking there keeps cache locality;
+    // steering would only cost a migration for no dispersal benefit.
+    if (home->load() == 0) {
+        return home;
+    }
+    // Find an idle CPU to absorb the wakeup.  First idle CPU wins (cheap); if
+    // none is idle, leave the thread on its home CPU for the load balancer.
+    for (auto c : cpus) {
+        if (c != home && c->load() == 0) {
+            return c;
+        }
+    }
+#endif
+    return home;
+}
+
+void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask,
+                       bool may_steer)
 {
     status old_status = status::waiting;
     trace_sched_wake(st->t);
@@ -1580,8 +1702,56 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 #if CONF_lazy_stack_invariant
         assert(!sched::preemptable());
 #endif
+        // If home is loaded and an idle CPU exists, steer this wakeup there.
+        // Only steer a thread that was genuinely blocked (old_status ==
+        // waiting): a status::sending_lock wakeup is a mutex lock hand-off
+        // whose runtime/scheduling handoff is delicate, so leave it on its home
+        // CPU.  may_steer is set only by wake() (normal thread context,
+        // interrupts enabled, preemptable) -- never from the IRQ-context
+        // wake_with_irq_disabled() path, where a cross-CPU migration could nest
+        // inside an interrupt.
+        cpu* target = (may_steer && old_status == status::waiting)
+            ? steer_to_idle_cpu(st->t, tcpu) : tcpu;
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
+            if (target != tcpu) {
+                // Retarget the thread to the idle CPU before enqueueing it
+                // there.  The thread is in status::waking, so no other waker
+                // can touch it (the CAS above is the exclusive envelope
+                // thread::pin() relies on for its status::waking migrate case).
+                //
+                // A blocked thread's runtime is NOT exported (it was left in
+                // home's CPU-local scale on switch-out; ran_for() asserts that).
+                // export_runtime(tcpu) converts it from home's scale to a global
+                // value that the destination's handle_incoming_wakeups()
+                // converts back via update_after_sleep().
+                //
+                // FORK SAFETY (crash class 2: the STEER+PULL exported-runtime
+                // race).  Between this export and the destination's
+                // update_after_sleep(), the thread must not be re-migrated by
+                // the idle-pull path (donate_to_puller) or the load balancer:
+                // either would re-export an already-exported runtime, or let
+                // the thread run still-exported (_renormalize_count == -1),
+                // tripping ran_for()'s assert.  Both migration paths already
+                // skip a thread whose _migration_lock_counter != 0
+                // (migratable()).  So bump it here and set _steered_pending;
+                // the destination clears both right after update_after_sleep()
+                // in handle_incoming_wakeups(), making the thread
+                // PULL/balance-ineligible for exactly the export window and no
+                // longer.  (steer_to_idle_cpu only steers a thread whose lock
+                // was 0, so this bump/clear is balanced.)  All #if CONF_fork:
+                // on a non-fork build there is no idle-pull path to race, so
+                // the plain retarget below is used.
+#if CONF_fork
+                st->t->_migration_lock_counter++;
+                st->t->_steered_pending = true;
+#endif
+                st->t->_runtime.export_runtime(tcpu);
+                st->_cpu = target;
+                st->t->remote_thread_local_var(::percpu_base) = target->percpu_base;
+                st->t->remote_thread_local_var(current_cpu) = target;
+                tcpu = target;
+            }
             tcpu->incoming_wakeups[c].push_back(*st->t);
         }
         if (!tcpu->incoming_wakeups_mask.test_all_and_set(c)) {
@@ -1605,7 +1775,8 @@ void thread::wake()
     sched::ensure_next_stack_page_if_preemptable();
 #endif
     WITH_LOCK(rcu_read_lock) {
-        wake_impl(_detached_state.get());
+        wake_impl(_detached_state.get(),
+                  1 << unsigned(status::waiting), /*may_steer=*/true);
     }
 }
 
@@ -2309,6 +2480,18 @@ void init_detached_threads_reaper()
         printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
     }
 #endif
+#if CONF_sched_wake_idle_steer
+    // Wake-time idle-CPU steering runtime toggle: env OSV_WAKE_STEER=1 arms it,
+    // default off.  Compiled in but a no-op at runtime unless armed, so the
+    // default build behaves exactly as before; set OSV_WAKE_STEER=1 to steer a
+    // woken app thread whose home CPU is loaded onto an idle CPU at wake time.
+    {
+        extern bool wake_steer_enabled;
+        const char* e = getenv("OSV_WAKE_STEER");
+        wake_steer_enabled = (e && e[0] == '1');
+        printf("WAKE_STEER %s\n", wake_steer_enabled ? "ON" : "off");
+    }
+#endif
 }
 
 void start_early_threads()
@@ -2360,6 +2543,14 @@ void thread_runtime::export_runtime()
 {
     if (_renormalize_count != -1) {
         _Rtt /= cpu::current()->c;;
+        _renormalize_count = -1; // special signal to update_after_sleep()
+    }
+}
+
+void thread_runtime::export_runtime(cpu* from)
+{
+    if (_renormalize_count != -1) {
+        _Rtt /= from->c;
         _renormalize_count = -1; // special signal to update_after_sleep()
     }
 }

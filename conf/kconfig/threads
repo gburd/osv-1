@@ -49,6 +49,22 @@ config sched_wake_pull
     the wake rate.  Compiling it in costs nothing: it is a runtime no-op
     unless the OSV_WAKE_PULL=1 environment toggle is set at boot.
 
+config sched_wake_idle_steer
+  prompt "Steer woken threads to idle CPUs"
+  def_bool y
+  help
+    When waking an unpinned application thread whose home CPU already has
+    runnable work, place it on an idle CPU instead (a Linux select_task_rq
+    analog).  This eagerly disperses a wakeup fan-out -- e.g. one network RX
+    thread waking a worker per client connection -- across idle CPUs at wake
+    time, instead of piling the workers onto the waker's CPU and waiting for
+    the idle-pull path or the periodic load balancer to spread them (which a
+    request/reply ping-pong, whose runqueues stay shallow, rarely triggers).
+    Costs one CPU-array scan per steered wakeup, stopping at the first idle CPU
+    and only when the home CPU is loaded.  Compiling it in costs nothing: it is
+    a runtime no-op unless the OSV_WAKE_STEER=1 environment toggle is set at
+    boot.  Disable to keep strict wake-to-home-CPU cache locality.
+
 config threads_default_kernel_stack_size
   prompt "Kernel thread default stack size"
   int
