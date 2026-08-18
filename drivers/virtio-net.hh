@@ -16,6 +16,7 @@
 #include <osv/percpu_xmit.hh>
 #include <osv/contiguous_alloc.hh>
 #include <osv/aligned_new.hh>
+#include <lockfree/ring.hh>
 
 #include "drivers/virtio.hh"
 #include "drivers/pci-device.hh"
@@ -266,6 +267,12 @@ public:
     // thread on its own CPU, instead of all inbound traffic funnelling through
     // one queue and one thread.
     void receiver(struct rxq* rxq);
+    // Drain up to `budget` packets from the rx ring. Shared by the poll thread
+    // (budget = ~0u, inline_ctx = false) and the inline RX-IRQ path
+    // (budget = the NAPI weight, inline_ctx = true). Returns true if the caller
+    // should wake the poll thread to finish (ring not drained, or a non
+    // fast-path packet was deferred). See virtio-net.cc for the safety rules.
+    bool rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx);
     void fill_rx_ring(struct rxq* rxq);
     mbuf* packet_to_mbuf(const std::vector<iovec>& iovec);
     unsigned* rx_buffer_refcnt(void* frame);
@@ -363,10 +370,21 @@ private:
     struct rxq {
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(sched::thread::make(poll_func, sched::thread::attr().
-                                    name("virtio-net-rx"))) {};
+                                    name("virtio-net-rx"))),
+              deferred(aligned_new<ring_spsc<mbuf*, unsigned, 256>>()) {};
         vring* vqueue;
         std::unique_ptr<sched::thread> poll_task;
         struct rxq_stats stats = { 0 };
+        // Packets the inline RX-IRQ path could not deliver via the net_channel
+        // fast path; drained through if_input by the poll thread (see
+        // rx_drain/receiver). SPSC lock-free ring: the RX interrupt handler is
+        // the single producer (IRQ ctx, cannot take a sleeping mutex), the poll
+        // thread the single consumer. Heap-allocated (it is cacheline-aligned;
+        // embedding it would over-align rxq and trip -Werror=aligned-new).
+        // Off the hot path unless OSV_RX_INLINE is set and a non-fast-path
+        // packet arrives.
+        std::unique_ptr<ring_spsc<mbuf*, unsigned, 256>,
+                        aligned_new_deleter<ring_spsc<mbuf*, unsigned, 256>>> deferred;
 
         void update_wakeup_stats(const u64 wakeup_packets) {
             if_update_wakeup_stats(stats.rx_wakeup_stats, wakeup_packets);
