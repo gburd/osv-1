@@ -46,6 +46,10 @@ public:
         : _process_packet(std::move(process_packet)) {}
     // producer: try to push a packet
     bool push(mbuf* m) { return _queue.push(m); }
+    // consumer: is a packet waiting to be processed?  Used by the socket-recv
+    // busy-poll (sbwait_tmo) to catch an imminent packet before the backend
+    // blocks, so the receiver never has to cross-thread wake it.
+    bool has_packet() const { return _queue.size(); }
     // consumer: wake the consumer (best used after multiple push()s)
     void wake() {
 #if CONF_lazy_stack_invariant

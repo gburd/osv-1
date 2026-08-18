@@ -34,6 +34,7 @@
 #include <osv/poll.h>
 #include <osv/clock.hh>
 #include <osv/signal.hh>
+#include <cstdlib>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/rwlock.h>
@@ -51,6 +52,17 @@
  * can call back into the AIO module if it is loaded.
  */
 void	(*aio_swake)(struct socket *, struct sockbuf *);
+
+// Socket-recv busy-poll iteration count.  See sbwait_tmo.  Read once from
+// OSV_SOCK_BUSY_POLL; default 0 == disabled == historical behavior byte-for-byte.
+static unsigned sock_busy_poll_count()
+{
+	static unsigned n = []{
+		const char* e = getenv("OSV_SOCK_BUSY_POLL");
+		return e ? (unsigned)strtoul(e, nullptr, 10) : 0u;
+	}();
+	return n;
+}
 
 /*
  * Primitive routines for operating on socket buffers
@@ -151,6 +163,30 @@ int sbwait_tmo(socket* so, struct sockbuf *sb, boost::optional<std::chrono::time
 	signal_catcher sc;
 	if (so->so_nc && !so->so_nc_busy) {
 		so->so_nc_busy = true;
+		// Socket-recv busy-poll: before blocking (which forces the receiver
+		// to cross-thread wake this backend -- a wake-IPI plus a context
+		// switch per request), spin briefly polling the net_channel for an
+		// imminent packet.  On a busy request/reply server the next request
+		// usually arrives within a few microseconds; catching it here lets
+		// the backend drain it inline without sleeping, so the receiver never
+		// arms _waiting_thread and issues no wake at all.  Socket-level analog
+		// of the idle-CPU spin-before-halt (OSV_IDLE_SPIN) and of Linux
+		// SO_BUSY_POLL / epoll busy-poll.  Off by default (count 0 ==
+		// historical behavior byte-for-byte); a busy server raises it via
+		// OSV_SOCK_BUSY_POLL.  Only on the net_channel fast path, only while
+		// no signal is pending and the timeout has not already fired.
+		unsigned busy_poll = sock_busy_poll_count();
+		if (busy_poll && !(timeout && Clock::now() >= *timeout)) {
+			for (unsigned ctr = 0; ctr < busy_poll; ++ctr) {
+				if (so->so_nc->has_packet()) {
+					so->so_nc_busy = false;
+					so->so_nc_wq.wake_all(SOCK_MTX_REF(so));
+					sb->sb_flags &= ~SB_WAIT;
+					so->so_nc->process_queue();
+					return 0;
+				}
+			}
+		}
 		sched::thread::wait_for(SOCK_MTX_REF(so), *so->so_nc, sb->sb_cc_wq, tmr, sc);
 		so->so_nc_busy = false;
 		so->so_nc_wq.wake_all(SOCK_MTX_REF(so));
