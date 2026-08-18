@@ -28,7 +28,7 @@
  *   vdevs=raidz2:/dev/vblk1,/dev/vblk2,...(raidz2)
  *   qd=8 bs=4096 secs=30 reps=3 impl=openzfs direct=0 nfiles=100000
  * Workloads: seqwrite seqread_cold seqread_warm randread randwrite
- *            mmapread fsync meta compress scrub odirect info
+ *            mmapread mmapverify fsync meta compress scrub odirect info
  */
 extern int osv_run_app(const char *app_path, const char *args[], int args_len);
 extern void zfsdev_init(void);
@@ -346,6 +346,62 @@ static double wl_mmapread(const char *ds, const Opts *o, const char *fname,
     return t > 0 ? (sz/(1024.0*1024.0)) / t : 0;
 }
 
+/* Deterministic content word for file offset @off: catches any stale/wrong
+ * aliased page (a plain memset pattern would not).  8-byte granular. */
+static inline uint64_t pat_word(uint64_t off) {
+    uint64_t x = off * 0x9E3779B97F4A7C15ULL + 0x1234567 ;
+    x ^= x >> 29; x *= 0xBF58476D1CE4E5B9ULL; x ^= x >> 32;
+    return x;
+}
+
+/* mmap-read correctness + zero-copy check.  Writes a patterned file, mmaps it
+ * (drives zfs_vop_cache -> ARC borrow path), verifies every word against the
+ * regenerated pattern (the aliased page must be byte-identical to what was
+ * written), and reports an FNV-1a checksum plus the free-page delta after
+ * touching every page. */
+static void wl_mmapverify(const char *ds, const Opts *o, const char *fname,
+                          long *free_delta_mb, int *ok, uint64_t *cksum) {
+    char path[256]; snprintf(path, sizeof path, "/%s/%s", ds, fname);
+    unsigned long size = o->size_mb * 1024UL * 1024UL;
+    size_t BUF = 1024*1024;
+    uint64_t *buf = (uint64_t*)alloc_buf(BUF, 0);
+    *ok = 0; *cksum = 0; *free_delta_mb = 0;
+    if (!buf) return;
+    unlink(path);
+    int f = open(path, O_CREAT|O_WRONLY|O_LARGEFILE, 0644);
+    if (f < 0) { free(buf); return; }
+    uint64_t off = 0;
+    unsigned long left = size;
+    while (left) {
+        size_t n = left < BUF ? left : BUF;
+        for (size_t i = 0; i < n/8; i++) buf[i] = pat_word(off + i*8);
+        ssize_t w = write(f, buf, n); if (w <= 0) break;
+        off += n; left -= n;
+    }
+    fsync(f); close(f);
+
+    struct stat st; if (stat(path, &st) != 0) { free(buf); return; }
+    size_t sz = st.st_size;
+    f = open(path, O_RDONLY|O_LARGEFILE); if (f < 0) { free(buf); return; }
+    long f_before = free_mb();
+    volatile uint64_t *m = (volatile uint64_t*)mmap(NULL, sz, PROT_READ,
+                                                    MAP_SHARED, f, 0);
+    if ((void*)m == MAP_FAILED) { close(f); free(buf); return; }
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    int good = 1;
+    for (size_t i = 0; i < sz/8; i++) {
+        uint64_t v = m[i];
+        if (v != pat_word(i*8)) { good = 0; if (i < 4) printf(
+            "MISMATCH off=%zu got=%016llx want=%016llx\n", i*8,
+            (unsigned long long)v, (unsigned long long)pat_word(i*8)); }
+        h ^= v; h *= 1099511628211ULL;
+    }
+    long f_after = free_mb();
+    *free_delta_mb = f_before - f_after;
+    *ok = good; *cksum = h;
+    munmap((void*)m, sz); close(f); free(buf);
+}
+
 static double wl_fsync(const char *ds, const Opts *o, const char *fname) {
     char path[256]; snprintf(path, sizeof path, "/%s/%s", ds, fname);
     unlink(path);
@@ -462,6 +518,12 @@ int main(int ac, char **av) {
         for (unsigned long r=0;r<o.reps;r++) { long d; v[r]=wl_mmapread(ds,&o,"f0",&d); fd[r]=(double)d; }
         report_stat("mmapread_MBps", v, o.reps, "MB/s");
         report_stat("mmapread_freedelta", fd, o.reps, "MB");
+    } else if (!strcmp(wl, "mmapverify")) {
+        long d; int ok; uint64_t ck;
+        wl_mmapverify(ds,&o,"f0",&d,&ok,&ck);
+        printf("RESULT mmapverify_ok %d (1=aliased-read-byte-identical)\n", ok);
+        printf("RESULT mmapverify_cksum %016llx\n", (unsigned long long)ck);
+        printf("RESULT mmapverify_freedelta %ld MB\n", d);
     } else if (!strcmp(wl, "fsync")) {
         for (unsigned long r=0;r<o.reps;r++) v[r] = wl_fsync(ds,&o,"zil");
         report_stat("fsync_persec", v, o.reps, "fsync/s");
