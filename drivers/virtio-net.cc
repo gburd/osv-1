@@ -22,6 +22,7 @@
 
 #include <string>
 #include <string.h>
+#include <stdlib.h>
 #include <map>
 #include <algorithm>
 #include <errno.h>
@@ -69,6 +70,32 @@ extern int maxnic;
 namespace virtio {
 
 int net::_instance = 0;
+
+// RX INLINE DELIVERY (OSV_RX_INLINE, off by default): the NAPI-weight budget
+// for draining the rx ring directly in the RX MSI-X handler context (IRQ ctx,
+// irq-disabled, AS0-identity-heap only) instead of always waking the separate
+// receiver poll thread first. 0 = OFF = historical byte-identical behavior.
+// Read once, cached.
+//
+// EXPERIMENTAL / not safe under sustained load yet: the inline drain builds
+// mbufs (packet_to_mbuf -> uma_zalloc -> malloc), and malloc can page-fault on
+// heap growth. The RX interrupt handler runs with preemption disabled, so such
+// a fault trips assert(sched::preemptable()) in page_fault. A light load is
+// fine (the mbuf zone is warm), but a burst that grows the heap crashes. The
+// correct completion is a per-rxq pre-allocated mbuf-header pool refilled by
+// the poll thread so the IRQ path never allocates (the NAPI analog); until
+// then keep this OFF (unset) in production. See .local/RX-INLINE-DESIGN.md.
+static u16 rx_inline_weight()
+{
+    static u16 w = [] {
+        const char* e = getenv("OSV_RX_INLINE");
+        if (!e) return (u16)0;
+        unsigned long v = strtoul(e, nullptr, 10);
+        if (v > 4096) v = 4096; // sane ceiling on IRQ-ctx work per interrupt
+        return (u16)v;
+    }();
+    return w;
+}
 
 #define net_tag "virtio-net"
 #define net_d(...)   tprintf_d(net_tag, __VA_ARGS__)
@@ -393,8 +420,40 @@ net::net(virtio_device& dev)
             auto* rx = _rxqs[i].get();
             auto* tx = _txqs[i].get();
             sched::thread* poll = rx->poll_task.get();
-            bindings.push_back({ (unsigned)(2 * i),
-                                 [rx] { rx->vqueue->disable_interrupts(); }, poll });
+            u16 w = rx_inline_weight();
+            if (w) {
+                // RX INLINE DELIVERY: drain up to `w` packets right here in the
+                // interrupt handler (NAPI-style), delivering established-TCP
+                // packets via the net_channel fast path so the owning backend
+                // is woken without first waking the separate receiver poll
+                // thread. Only wake the poll thread if the drain could not
+                // finish (ring still full after the budget, or a non-fast-path
+                // packet was deferred). Bottom-half thread is null: the wake is
+                // issued from inside the isr instead, conditionally.
+                bindings.push_back({ (unsigned)(2 * i),
+                    [this, rx, poll, w] {
+                        rx->vqueue->disable_interrupts();
+                        if (this->rx_drain(rx, w, true)) {
+                            poll->wake_with_irq_disabled();
+                        } else {
+                            // Drain finished. Re-enable the queue interrupt so
+                            // the next packet notifies us, then re-check for a
+                            // packet that raced in between the last get_buf and
+                            // the enable (the standard enable-then-recheck race,
+                            // same as wait_for_queue). If one slipped in, wake
+                            // the poll thread to handle it rather than looping
+                            // in the interrupt handler.
+                            rx->vqueue->enable_interrupts();
+                            if (rx->vqueue->used_ring_not_empty()) {
+                                rx->vqueue->disable_interrupts();
+                                poll->wake_with_irq_disabled();
+                            }
+                        }
+                    }, nullptr });
+            } else {
+                bindings.push_back({ (unsigned)(2 * i),
+                                     [rx] { rx->vqueue->disable_interrupts(); }, poll });
+            }
             bindings.push_back({ (unsigned)(2 * i + 1),
                                  [tx] { tx->vqueue->disable_interrupts(); }, nullptr });
         }
@@ -620,105 +679,198 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
     return false;
 }
 
-void net::receiver(struct rxq* rxq)
+// Drain up to `budget` packets from the rx ring, building mbufs and delivering
+// each up the stack. Shared by the receiver poll thread (budget == unlimited,
+// inline_ctx == false) and the inline RX-IRQ path (budget == the NAPI weight,
+// inline_ctx == true). Returns true if the ring may still have used buffers
+// after the budget was spent (the caller should reschedule a full drain).
+//
+// In inline_ctx we run only the net_channel fast path (post_packet: classify +
+// lock-free enqueue + wake the owning socket's poller), which already runs in
+// exactly this !preemptable/AS0 context in the poll thread today, so it adds no
+// new address-space or preemption hazard. Any packet that does NOT classify to
+// a net_channel must go through the generic if_input path, which is NOT safe to
+// run from the IRQ context; in inline_ctx we therefore stop draining on the
+// first such packet and let the caller wake the poll thread to finish (the
+// unconsumed used buffers remain in the ring for the thread to drain in order,
+// so no packet is dropped or reordered).
+bool net::rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx)
 {
     vring* vq = rxq->vqueue;
     std::vector<iovec> packet;
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
+    u32 done = 0;
+    bool more = false;
+    bool deferred_any = false;
+
+    u32 len;
+    int nbufs;
+    net_hdr_mrg_rxbuf* mhdr;
+
+    while (done < budget) {
+        void* buffer = vq->get_buf_elem(&len);
+        if (!buffer) {
+            break;
+        }
+
+        vq->get_buf_finalize();
+
+        if (vq->effective_avail_ring_count() >= refill_thresh)
+            fill_rx_ring(rxq);
+
+        // Bad packet/buffer - discard and continue to the next one
+        if (len < _hdr_size + ETHER_HDR_LEN) {
+            rx_drops++;
+            free_buffer(buffer);
+            done++;
+            continue;
+        }
+
+        mhdr = static_cast<net_hdr_mrg_rxbuf*>(buffer);
+
+        if (!_mergeable_bufs) {
+            nbufs = 1;
+        } else {
+            nbufs = mhdr->num_buffers;
+        }
+
+        packet.push_back({buffer + _hdr_size, len - _hdr_size});
+
+        // Read the fragments - only applies if _mergeable_bufs is ON
+        bool frag_short = false;
+        while (--nbufs > 0) {
+            buffer = vq->get_buf_elem(&len);
+            if (!buffer) {
+                rx_drops++;
+                for (auto&& v : packet) {
+                    free_buffer(v);
+                }
+                frag_short = true;
+                break;
+            }
+            packet.push_back({buffer, len});
+            vq->get_buf_finalize();
+        }
+        if (frag_short) {
+            packet.clear();
+            done++;
+            continue;
+        }
+
+        auto m_head = packet_to_mbuf(packet);
+        packet.clear();
+
+        if ((_ifn->if_capenable & IFCAP_RXCSUM) &&
+            (mhdr->hdr.flags &
+             net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)) {
+            if (bad_rx_csum(m_head, &mhdr->hdr))
+                csum_err++;
+            else
+                csum_ok++;
+
+        }
+
+        rx_packets++;
+        rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
+
+        bool fast_path = _ifn->if_classifier.post_packet(m_head);
+        if (!fast_path) {
+            if (inline_ctx) {
+                // Not a net_channel fast-path (established-TCP) packet. if_input
+                // runs netisr DIRECT dispatch (the full ip/tcp stack) inline,
+                // which is not safe to run from the IRQ context (heavier work,
+                // and under CONF_fork it may touch state that faults while
+                // !preemptable). Defer this one mbuf to the poll thread, which
+                // runs if_input in its normal (priority_infinity thread)
+                // context. A classify miss is by definition NOT an established
+                // PG socket, so deferring it cannot reorder any fast-path flow.
+                // If the SPSC ring is full (a burst of unclassified packets),
+                // drop this one rather than block the IRQ handler.
+                if (!rxq->deferred->push(m_head)) {
+                    m_freem(m_head);
+                    rx_drops++;
+                }
+                deferred_any = true;
+            } else {
+                (*_ifn->if_input)(_ifn, m_head);
+            }
+        }
+
+        trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
+        done++;
+
+        // The interface may have been stopped while we were
+        // passing the packet up the network stack.
+        if ((_ifn->if_drv_flags & IFF_DRV_RUNNING) == 0)
+            break;
+    }
+
+    // If we hit the budget but the ring still has used buffers, or we deferred
+    // a non-fast-path packet to the poll thread, tell the caller to reschedule
+    // a full drain on the poll thread (which also drains the deferred queue).
+    if ((done >= budget && vq->used_ring_not_empty()) || deferred_any) {
+        more = true;
+    }
+
+    // Update the stats
+    rxq->stats.rx_drops      += rx_drops;
+    rxq->stats.rx_packets    += rx_packets;
+    rxq->stats.rx_csum       += csum_ok;
+    rxq->stats.rx_csum_err   += csum_err;
+    rxq->stats.rx_bytes      += rx_bytes;
+    return more;
+}
+
+void net::receiver(struct rxq* rxq)
+{
+    vring* vq = rxq->vqueue;
 
     while (1) {
 
-        // Wait for rx queue (used elements)
-        virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
+        // Wait for the rx queue to have used elements, OR for the inline RX
+        // path to have deferred a packet to us. This mirrors
+        // virtio_driver::wait_for_queue (enable-then-recheck the queue
+        // interrupt) but also wakes on a non-empty deferred ring, because the
+        // inline path may have already consumed the packet from the vring
+        // (leaving the vring empty) and handed it to us via the deferred ring.
+        // Without the deferred term the thread would sleep through that wake.
+        sched::thread::wait_until([this, vq, rxq] {
+            if (!rxq->deferred->empty()) {
+                return true;
+            }
+            bool have = vq->used_ring_not_empty();
+            if (!have) {
+                vq->enable_interrupts();
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                have = vq->used_ring_not_empty() || !rxq->deferred->empty();
+                if (have) {
+                    vq->disable_interrupts();
+                }
+            }
+            return have;
+        });
         trace_virtio_net_rx_wake();
 
         rxq->stats.rx_bh_wakeups++;
-        rxq->update_wakeup_stats(rx_packets);
+        rxq->update_wakeup_stats(rxq->stats.rx_packets);
 
-        u32 len;
-        int nbufs;
-        rx_drops = rx_packets = csum_ok = 0;
-        csum_err = rx_bytes = 0;
-
-        // use local header that we copy out of the mbuf since we're
-        // truncating it.
-        net_hdr_mrg_rxbuf* mhdr;
-
-        while (void* buffer = vq->get_buf_elem(&len)) {
-
-            vq->get_buf_finalize();
-
-            if (vq->effective_avail_ring_count() >= refill_thresh)
-                fill_rx_ring(rxq);
-
-            // Bad packet/buffer - discard and continue to the next one
-            if (len < _hdr_size + ETHER_HDR_LEN) {
-                rx_drops++;
-                free_buffer(buffer);
-                continue;
+        // Drain any packets the inline RX path deferred to us (non-fast-path
+        // packets that must go through the generic if_input/netisr stack in
+        // this thread context rather than the IRQ context). Delivered in FIFO
+        // order; each is a distinct non-established flow so no fast-path flow
+        // is reordered.
+        {
+            mbuf* dm = nullptr;
+            while (rxq->deferred->pop(dm)) {
+                (*_ifn->if_input)(_ifn, dm);
             }
-
-            mhdr = static_cast<net_hdr_mrg_rxbuf*>(buffer);
-
-            if (!_mergeable_bufs) {
-                nbufs = 1;
-            } else {
-                nbufs = mhdr->num_buffers;
-            }
-
-            packet.push_back({buffer + _hdr_size, len - _hdr_size});
-
-            // Read the fragments - only applies if _mergeable_bufs is ON
-            while (--nbufs > 0) {
-                buffer = vq->get_buf_elem(&len);
-                if (!buffer) {
-                    rx_drops++;
-                    for (auto&& v : packet) {
-                        free_buffer(v);
-                    }
-                    break;
-                }
-                packet.push_back({buffer, len});
-                vq->get_buf_finalize();
-            }
-
-            auto m_head = packet_to_mbuf(packet);
-            packet.clear();
-
-            if ((_ifn->if_capenable & IFCAP_RXCSUM) &&
-                (mhdr->hdr.flags &
-                 net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)) {
-                if (bad_rx_csum(m_head, &mhdr->hdr))
-                    csum_err++;
-                else
-                    csum_ok++;
-
-            }
-
-            rx_packets++;
-            rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
-
-            bool fast_path = _ifn->if_classifier.post_packet(m_head);
-            if (!fast_path) {
-                (*_ifn->if_input)(_ifn, m_head);
-            }
-
-            trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
-
-            // The interface may have been stopped while we were
-            // passing the packet up the network stack.
-            if ((_ifn->if_drv_flags & IFF_DRV_RUNNING) == 0)
-                break;
         }
 
-        // Update the stats
-        rxq->stats.rx_drops      += rx_drops;
-        rxq->stats.rx_packets    += rx_packets;
-        rxq->stats.rx_csum       += csum_ok;
-        rxq->stats.rx_csum_err   += csum_err;
-        rxq->stats.rx_bytes      += rx_bytes;
+        // Unbounded drain in the thread (historical behavior). rx_drain
+        // updates rxq->stats itself.
+        rx_drain(rxq, ~0u, false);
     }
 }
 
