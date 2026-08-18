@@ -411,6 +411,16 @@ inline bool rdrand(u64* dest)
     return ok;
 }
 
+inline bool rdseed(u64* dest)
+{
+    unsigned char ok;
+    asm volatile ("rdseed %0; setc %1"
+        : "=r" (*dest), "=qm" (ok)
+        :
+        : "cc");
+    return ok;
+}
+
 inline uint32_t stmxcsr()
 {
     uint32_t bits;
