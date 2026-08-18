@@ -60,6 +60,7 @@ cpuid_bit cpuid_bits[] = {
     { 1, 'c', 27, &f::osxsave, 0, nullptr, "osxsave" },
     { 1, 'c', 28, &f::avx, 0, nullptr, "avx" },
     { 1, 'c', 30, &f::rdrand, 0, nullptr, "rdrand" },
+    { 7, 'b', 18, &f::rdseed, 0, nullptr, "rdseed" },
     { 1, 'd', 19, &f::clflush, 0, nullptr, "clflush" },
     { 7, 'b', 0, &f::fsgsbase, 0, nullptr, "fgsbase" },
     { 7, 'b', 9, &f::repmovsb, 0, nullptr, "repmovsb" },
