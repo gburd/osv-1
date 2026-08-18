@@ -607,9 +607,28 @@ void* do_main_thread(void *_main_args)
         }
     }
 
-    //This option is only used by ZFS builder
+    // Preload the ZFS library WITHOUT mounting a ZFS root.  Used by the ZFS
+    // builder, and by any image whose root filesystem is NOT zfs (e.g.
+    // fs=ramfs) but which still wants to create/import a ZFS *data* pool at
+    // runtime.  In the latter case libsolaris.so alone is not enough: the
+    // in-kernel ZFS control device /dev/zfs must also exist, otherwise
+    // zpool/zfs commands cannot talk to the kernel and "zpool create" fails
+    // with "/dev/zfs not found".  load_zfs_library_and_mount_zfs_root() calls
+    // zfsdev_init() for the fs=zfs path; do the same here for the no-root
+    // path so a ramfs-root image can bring up a ZFS data pool.
+    //
+    // The ZFS builder boots with --noinit and initializes the control device
+    // itself from its own bootfs tool (via libsolaris.so's exported
+    // zfsdev_init), so only bring the device up here when the image runs its
+    // normal init.  That avoids creating the "zfs" device twice (the loader
+    // copy of the init guard is distinct from the libsolaris.so copy).
     if (opt_preload_zfs_library) {
-        if (load_fs_library(libsolaris_path)) {
+        bool init_zfsdev = opt_init;
+        if (load_fs_library(libsolaris_path, [init_zfsdev]() {
+                if (init_zfsdev)
+                    zfsdev::zfsdev_init();
+                return 0;
+            })) {
             fprintf(stderr, "Failed to preload ZFS library. Powering off.\n");
             osv::poweroff();
         }
