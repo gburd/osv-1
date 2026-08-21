@@ -274,6 +274,16 @@ public:
     // fast-path packet was deferred). See virtio-net.cc for the safety rules.
     bool rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx);
     void fill_rx_ring(struct rxq* rxq);
+    // Refill rxq->hdr_pool up to its target with m_gethdr()-allocated bare mbuf
+    // headers.  MUST run in a preemptable context (the poll thread), never the
+    // inline RX-IRQ path.  Returns the number added.
+    unsigned refill_hdr_pool(struct rxq* rxq);
+    // packet_to_mbuf variant for the inline RX-IRQ path: takes the head mbuf
+    // header from `pool_hdr` (already popped from rxq->hdr_pool, no allocation);
+    // returns nullptr if a fragment chain needs an allocation the pool cannot
+    // satisfy (caller then defers).  Single-buffer packets (the common PG case,
+    // MRG_RXBUF off or one buffer) never allocate.
+    mbuf* packet_to_mbuf_pooled(const std::vector<iovec>& packet, mbuf* pool_hdr);
     mbuf* packet_to_mbuf(const std::vector<iovec>& iovec);
     unsigned* rx_buffer_refcnt(void* frame);
     static void free_rx_buffer(void* buffer, void* refcnt);
@@ -371,7 +381,8 @@ private:
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(sched::thread::make(poll_func, sched::thread::attr().
                                     name("virtio-net-rx"))),
-              deferred(aligned_new<ring_spsc<mbuf*, unsigned, 256>>()) {};
+              deferred(aligned_new<ring_spsc<mbuf*, unsigned, 256>>()),
+              hdr_pool(aligned_new<ring_spsc<mbuf*, unsigned, 256>>()) {};
         vring* vqueue;
         std::unique_ptr<sched::thread> poll_task;
         struct rxq_stats stats = { 0 };
@@ -385,6 +396,18 @@ private:
         // packet arrives.
         std::unique_ptr<ring_spsc<mbuf*, unsigned, 256>,
                         aligned_new_deleter<ring_spsc<mbuf*, unsigned, 256>>> deferred;
+
+        // Pre-allocated mbuf-header pool for the inline RX-IRQ path.  m_gethdr()
+        // (the only allocator in packet_to_mbuf) can grow the heap and page
+        // fault, which is illegal in the non-preemptable IRQ context the inline
+        // drain runs in.  So the poll thread (preemptable) pre-fills this pool
+        // with bare mbuf headers via m_gethdr(); the inline drain POPS a header
+        // instead of allocating.  If the pool is empty the inline drain defers
+        // the packet to the poll thread (see rx_drain) rather than allocating.
+        // SPSC: the poll thread is the single producer (refill), the RX-IRQ
+        // handler the single consumer (pop) - same discipline as `deferred`.
+        std::unique_ptr<ring_spsc<mbuf*, unsigned, 256>,
+                        aligned_new_deleter<ring_spsc<mbuf*, unsigned, 256>>> hdr_pool;
 
         void update_wakeup_stats(const u64 wakeup_packets) {
             if_update_wakeup_stats(stats.rx_wakeup_stats, wakeup_packets);
