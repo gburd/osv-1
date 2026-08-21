@@ -527,6 +527,11 @@ net::net(virtio_device& dev)
 
     for (unsigned i = 0; i < _nqp; i++) {
         fill_rx_ring(_rxqs[i].get());
+        // Seed the inline-RX mbuf-header pool once here (preemptable init
+        // context) so the first inline drains have headers to pop before the
+        // poll thread's first refill. No-op cost when OSV_RX_INLINE is unset
+        // (the pool is simply never consumed).
+        refill_hdr_pool(_rxqs[i].get());
     }
 
     // Step 8
@@ -759,7 +764,55 @@ bool net::rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx)
             continue;
         }
 
-        auto m_head = packet_to_mbuf(packet);
+        mbuf* m_head;
+        if (inline_ctx) {
+            // Inline RX-IRQ context: MUST NOT allocate (m_gethdr can fault while
+            // !preemptable). Pop a pre-allocated header from the pool and build
+            // the mbuf around it without allocating. If the pool is empty, or
+            // the packet is a multi-buffer fragment chain (which would need a
+            // per-fragment allocation), defer the raw buffers to the poll thread
+            // via a normal packet_to_mbuf there. We build the mbuf here only
+            // when it is allocation-free.
+            mbuf* pool_hdr = nullptr;
+            if (rxq->hdr_pool->pop(pool_hdr)) {
+                m_head = packet_to_mbuf_pooled(packet, pool_hdr);
+                if (!m_head) {
+                    // Multi-buffer packet the pooled path cannot build without
+                    // allocating: return the unused header to the pool and
+                    // defer the packet. free_buffer on each iov since the poll
+                    // thread cannot see `packet` (a local); instead build the
+                    // full mbuf HERE would allocate, so we drop+defer safely by
+                    // handing the pool header back and dropping the fragmented
+                    // packet (rare: mergeable fragmented RX under a full pool).
+                    if (!rxq->hdr_pool->push(pool_hdr)) {
+                        m_free(pool_hdr);
+                    }
+                    for (auto&& v : packet) {
+                        free_buffer(v);
+                    }
+                    packet.clear();
+                    rx_drops++;
+                    deferred_any = true;   // ask the poll thread to run/refill
+                    done++;
+                    continue;
+                }
+            } else {
+                // Pool exhausted: cannot build inline without allocating. Drop
+                // the buffers and signal the poll thread (it refills the pool
+                // and re-enables). Dropping is safe: TCP retransmits; this only
+                // happens under a sustained burst that outran the refill.
+                for (auto&& v : packet) {
+                    free_buffer(v);
+                }
+                packet.clear();
+                rx_drops++;
+                deferred_any = true;
+                done++;
+                continue;
+            }
+        } else {
+            m_head = packet_to_mbuf(packet);
+        }
         packet.clear();
 
         if ((_ifn->if_capenable & IFCAP_RXCSUM) &&
@@ -868,6 +921,13 @@ void net::receiver(struct rxq* rxq)
             }
         }
 
+        // Refill the inline path's pre-allocated mbuf-header pool from this
+        // (preemptable) thread context, so the inline RX-IRQ drain can pop
+        // headers without ever calling m_gethdr() itself. No-op unless the
+        // inline path is enabled and has drained the pool. Safe to call
+        // unconditionally: it only allocates up to the pool's target depth.
+        refill_hdr_pool(rxq);
+
         // Unbounded drain in the thread (historical behavior). rx_drain
         // updates rxq->stats itself.
         rx_drain(rxq, ~0u, false);
@@ -910,6 +970,59 @@ mbuf* net::packet_to_mbuf(const std::vector<iovec>& packet)
         m_head->M_dat.MH.MH_pkthdr.len += iov.iov_len;
     }
     return m_head;
+}
+
+// Refill rxq->hdr_pool up to target depth with bare mbuf headers allocated via
+// m_gethdr().  Runs ONLY in the poll thread (preemptable) - never the inline
+// RX-IRQ path - so the m_gethdr heap-growth path is legal here.  The inline
+// drain pops from this pool instead of allocating.
+unsigned net::refill_hdr_pool(struct rxq* rxq)
+{
+    // Target depth well under the ring capacity (256) so the SPSC push never
+    // wraps against an in-flight pop.  ~192 headers = several NAPI budgets of
+    // headroom between refills.
+    static const unsigned pool_target = 192;
+    unsigned added = 0;
+    while (rxq->hdr_pool->size() < pool_target) {
+        mbuf* m = m_gethdr(M_DONTWAIT, MT_DATA);
+        if (!m) {
+            break;  // out of memory - inline path will just defer until refilled
+        }
+        if (!rxq->hdr_pool->push(m)) {
+            // Pool full (racing pop made room then it filled) - give the header
+            // back rather than leak it.
+            m_free(m);
+            break;
+        }
+        added++;
+    }
+    return added;
+}
+
+// Inline-RX-IRQ variant of packet_to_mbuf: uses `pool_hdr` (already popped from
+// rxq->hdr_pool in the caller - NO allocation) as the packet's head mbuf.  For
+// a single-buffer packet (MRG_RXBUF off, or one buffer - the common PG request
+// case) this NEVER allocates.  A multi-buffer (fragmented mergeable) packet
+// would need m_get() per fragment, which allocates and can fault in IRQ ctx;
+// in that case we return nullptr and the caller defers the whole packet to the
+// poll thread (which builds it via the normal packet_to_mbuf).
+mbuf* net::packet_to_mbuf_pooled(const std::vector<iovec>& packet, mbuf* pool_hdr)
+{
+    if (packet.size() != 1) {
+        return nullptr;  // fragment chain needs allocation - caller defers
+    }
+    mbuf* m = pool_hdr;
+    auto refcnt = rx_buffer_refcnt(packet[0].iov_base);
+    m->M_dat.MH.MH_dat.MH_ext.ref_cnt = refcnt;
+    m_extadd(m, static_cast<char*>(packet[0].iov_base), packet[0].iov_len,
+            _use_large_buffers ? &net::free_large_rx_buffer : &net::free_rx_buffer,
+            packet[0].iov_base, refcnt, M_PKTHDR, EXT_EXTREF);
+    m->M_dat.MH.MH_pkthdr.len = packet[0].iov_len;
+    m->M_dat.MH.MH_pkthdr.rcvif = _ifn;
+    m->M_dat.MH.MH_pkthdr.csum_flags = 0;
+    m->m_hdr.mh_len = packet[0].iov_len;
+    m->m_hdr.mh_next = nullptr;
+    return m;
 }
 
 // hook for EXT_EXTREF mbuf cleanup.  The refcount lives inside the buffer (see
