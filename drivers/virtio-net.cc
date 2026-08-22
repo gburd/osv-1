@@ -703,6 +703,19 @@ bool net::rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx)
 {
     vring* vq = rxq->vqueue;
     std::vector<iovec> packet;
+#if CONF_fork
+    // The inline RX drain runs in non-preemptable interrupt context.  This
+    // local vector's first push_back would malloc its backing store, and under
+    // CONF_fork malloc routes through the COW fork arena whose fresh chunk
+    // faults on first touch -> assert(preemptable()) in page_fault.  Reserve
+    // the backing store from the never-COW identity kernel heap up front so no
+    // allocation happens on the interrupt path (a packet is one buffer, or a
+    // few mergeable fragments; 64 covers any real frame without reallocating).
+    if (inline_ctx) {
+        fork_arena::kernel_heap_scope _kh;
+        packet.reserve(64);
+    }
+#endif
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
