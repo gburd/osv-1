@@ -17,6 +17,9 @@
 #include <osv/interrupt.hh>
 #include "osv/trace.hh"
 #include <osv/ilog2.hh>
+#if CONF_fork
+#include <osv/fork_arena.hh>
+#endif
 
 using namespace memory;
 using sched::thread;
@@ -60,6 +63,16 @@ namespace virtio {
         for (int i = 0; i < num; i++) _desc[i]._next = i + 1;
         _desc[num-1]._next = 0;
 
+        // The _cookie array and _sg_vec backing store are kernel infrastructure
+        // touched from the RX/TX interrupt path (in whatever address space the
+        // CPU currently holds).  Under CONF_fork a forked backend touching a
+        // COW-arena page in that non-preemptable context takes a COW write
+        // fault -> assert(preemptable()).  Force these into the never-COW
+        // identity kernel heap so every address space shares the same pages and
+        // no fault is taken.  (Same rule as struct file / net_channel nodes.)
+#if CONF_fork
+        fork_arena::kernel_heap_scope _vring_kh;
+#endif
         _cookie = new void*[num];
 
         _avail_head = 0;
