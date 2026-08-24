@@ -97,6 +97,18 @@ static u16 rx_inline_weight()
     return w;
 }
 
+// Per-wakeup drain budget for the RX poll thread when the NAPI bottom-half is
+// enabled (OSV_RX_INLINE != 0). Bounding the drain lets the poll thread yield
+// to the backends it just woke (and to any other runnable thread) instead of
+// monopolizing its CPU under a sustained burst; if the ring still has buffers
+// after the budget the thread re-arms itself and reschedules. The value reuses
+// the OSV_RX_INLINE weight so a single tunable controls the feature.
+static u32 rx_poll_weight()
+{
+    u16 w = rx_inline_weight();
+    return w ? (u32)w : ~0u;   // 0 = feature off = historical unbounded drain
+}
+
 #define net_tag "virtio-net"
 #define net_d(...)   tprintf_d(net_tag, __VA_ARGS__)
 #define net_i(...)   tprintf_i(net_tag, __VA_ARGS__)
@@ -422,48 +434,27 @@ net::net(virtio_device& dev)
             sched::thread* poll = rx->poll_task.get();
             u16 w = rx_inline_weight();
             if (w) {
-                // RX INLINE DELIVERY: drain up to `w` packets right here in the
-                // interrupt handler (NAPI-style), delivering established-TCP
-                // packets via the net_channel fast path so the owning backend
-                // is woken without first waking the separate receiver poll
-                // thread. Only wake the poll thread if the drain could not
-                // finish (ring still full after the budget, or a non-fast-path
-                // packet was deferred). Bottom-half thread is null: the wake is
-                // issued from inside the isr instead, conditionally.
+                // RX NAPI BOTTOM-HALF: the interrupt handler is a pure
+                // top-half. It only masks the queue interrupt and raises the
+                // softirq (wakes this queue's poll thread); it does NOT drain,
+                // classify, deliver, or issue any net_channel wake. All of that
+                // (packet_to_mbuf allocation, post_packet, net_channel::wake,
+                // the RCU poller walk, if_input) runs in the poll thread, which
+                // is a normal preemptable kernel thread and therefore a legal
+                // context for it. Running that work inline in the ISR nested on
+                // whatever thread was interrupted (under load, a forked backend
+                // app thread) is the illegal nesting that dropped the backend
+                // wake via the wake_impl CAS and hung the guest with every CPU
+                // in do_idle. The only wake issued here is the poll thread's own
+                // wake_with_irq_disabled(), legal because the poll thread is not
+                // an app thread and interrupts are disabled. The poll thread is
+                // the sole owner of re-enabling the queue interrupt, via its
+                // enable-then-recheck barrier in wait_until (below), which is
+                // what makes the handoff lost-wakeup-proof.
                 bindings.push_back({ (unsigned)(2 * i),
-                    [this, rx, poll, w] {
+                    [rx, poll] {
                         rx->vqueue->disable_interrupts();
-                        if (this->rx_drain(rx, w, true)) {
-                            // More work remains (budget hit with the ring still
-                            // non-empty, or a packet was deferred to the poll
-                            // thread). Re-enable the queue interrupt BEFORE
-                            // waking the poll thread. Leaving it disabled and
-                            // relying on the poll thread to re-enable it opens a
-                            // lost-wakeup race: if the poll thread is already
-                            // past its wait_until interrupt-enable check when we
-                            // wake it, it can drain, find the ring momentarily
-                            // empty, and sleep with interrupts still disabled --
-                            // then no future packet ever notifies us and every
-                            // CPU idles forever (observed as an all-CPU do_idle
-                            // hang under concurrent load). Re-enabling here is
-                            // safe: a spurious interrupt just finds an empty
-                            // ring, whereas a lost one deadlocks.
-                            rx->vqueue->enable_interrupts();
-                            poll->wake_with_irq_disabled();
-                        } else {
-                            // Drain finished. Re-enable the queue interrupt so
-                            // the next packet notifies us, then re-check for a
-                            // packet that raced in between the last get_buf and
-                            // the enable (the standard enable-then-recheck race,
-                            // same as wait_for_queue). If one slipped in, wake
-                            // the poll thread to handle it rather than looping
-                            // in the interrupt handler.
-                            rx->vqueue->enable_interrupts();
-                            if (rx->vqueue->used_ring_not_empty()) {
-                                rx->vqueue->disable_interrupts();
-                                poll->wake_with_irq_disabled();
-                            }
-                        }
+                        poll->wake_with_irq_disabled();
                     }, nullptr });
             } else {
                 bindings.push_back({ (unsigned)(2 * i),
@@ -956,9 +947,22 @@ void net::receiver(struct rxq* rxq)
         // unconditionally: it only allocates up to the pool's target depth.
         refill_hdr_pool(rxq);
 
-        // Unbounded drain in the thread (historical behavior). rx_drain
-        // updates rxq->stats itself.
-        rx_drain(rxq, ~0u, false);
+        // Bounded NAPI-style drain. rx_drain(inline_ctx=false) delivers every
+        // packet in this poll thread's context (allocation, post_packet,
+        // net_channel::wake, the RCU poller walk, if_input are all legal here),
+        // which is the whole point of the bottom-half: the interrupt handler
+        // never touches net_channel. rx_poll_weight() bounds the work per pass
+        // so a sustained burst does not starve the backends we just woke; if
+        // buffers remain we re-arm and reschedule ourselves rather than looping
+        // here. When the feature is off rx_poll_weight() is ~0u == the
+        // historical unbounded drain, so this is byte-identical off-path.
+        if (rx_drain(rxq, rx_poll_weight(), false)) {
+            // Still more in the ring: yield so the backends we just woke (and
+            // anything else runnable) get the CPU, then loop. wait_until below
+            // will not sleep because used_ring_not_empty() is true, so no wake
+            // is needed and none can be lost.
+            sched::thread::yield();
+        }
     }
 }
 
