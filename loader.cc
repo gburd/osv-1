@@ -65,6 +65,8 @@
 #include "libc/network/__dns.hh"
 #include <processor.hh>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <osv/string_utils.hh>
 
 using namespace osv;
@@ -632,8 +634,19 @@ void* do_main_thread(void *_main_args)
     if (opt_preload_zfs_library) {
         bool init_zfsdev = opt_init;
         if (load_fs_library(libsolaris_path, [init_zfsdev]() {
-                if (init_zfsdev)
+                if (init_zfsdev) {
                     zfsdev::zfsdev_init();
+                    // The ZFS userspace tools (zpool/zfs) consult /etc/mnttab;
+                    // on a non-ZFS root (e.g. ramfs) nothing else creates it, so
+                    // an empty one must exist or the tools fail to enumerate
+                    // mounts. Mirror what the in-tree zfs bench harness does
+                    // (zfsdev_init + creat /etc/mnttab) so a runtime zpool
+                    // create/import works from a ramfs-root image.
+                    mkdir("/etc", 0755);
+                    int fd = creat("/etc/mnttab", 0644);
+                    if (fd >= 0)
+                        close(fd);
+                }
                 return 0;
             })) {
             fprintf(stderr, "Failed to preload ZFS library. Powering off.\n");
