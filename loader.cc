@@ -490,7 +490,7 @@ static int load_fs_library(const char* fs_library_path, std::function<int()> on_
            return 0;
         }
     } else {
-        debugf("Could not load and/or initialize %s.\n", fs_library_path);
+        debugf("Could not load and/or initialize %s: %s\n", fs_library_path, dlerror());
         return 1;
     }
 }
