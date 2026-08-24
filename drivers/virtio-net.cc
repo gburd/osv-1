@@ -434,6 +434,21 @@ net::net(virtio_device& dev)
                     [this, rx, poll, w] {
                         rx->vqueue->disable_interrupts();
                         if (this->rx_drain(rx, w, true)) {
+                            // More work remains (budget hit with the ring still
+                            // non-empty, or a packet was deferred to the poll
+                            // thread). Re-enable the queue interrupt BEFORE
+                            // waking the poll thread. Leaving it disabled and
+                            // relying on the poll thread to re-enable it opens a
+                            // lost-wakeup race: if the poll thread is already
+                            // past its wait_until interrupt-enable check when we
+                            // wake it, it can drain, find the ring momentarily
+                            // empty, and sleep with interrupts still disabled --
+                            // then no future packet ever notifies us and every
+                            // CPU idles forever (observed as an all-CPU do_idle
+                            // hang under concurrent load). Re-enabling here is
+                            // safe: a spurious interrupt just finds an empty
+                            // ring, whereas a lost one deadlocks.
+                            rx->vqueue->enable_interrupts();
                             poll->wake_with_irq_disabled();
                         } else {
                             // Drain finished. Re-enable the queue interrupt so
