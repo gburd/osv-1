@@ -563,6 +563,40 @@ void* do_main_thread(void *_main_args)
     }
     boot_time.event("drivers loaded");
 
+    // Preload the ZFS library WITHOUT mounting a ZFS root, BEFORE the root-mount
+    // block.  Used by the ZFS builder, and by any image whose root filesystem
+    // is NOT zfs (e.g. fs=ramfs) but which still wants to create/import a ZFS
+    // *data* pool at runtime.  This must run before opt_mount's unmount/pivot
+    // dance: after that, dlopen of /usr/lib/fs/libsolaris.so from the bootfs
+    // ramfs fails to open (the path is no longer resolvable), which is why the
+    // fs=zfs path (which dlopens libsolaris inside the mount block, before the
+    // pivot) works while a later preload did not.  libsolaris.so alone is not
+    // enough: the in-kernel ZFS control device /dev/zfs must also exist, else
+    // zpool/zfs commands fail with "/dev/zfs not found".  So also run
+    // zfsdev_init() (as load_zfs_library_and_mount_zfs_root does for fs=zfs)
+    // and create an empty /etc/mnttab (as the in-tree zfs bench harness does)
+    // so a ramfs-root image can bring up a ZFS data pool on a local disk.
+    //
+    // The ZFS builder boots with --noinit and initializes the control device
+    // itself from its own bootfs tool, so only bring the device up here when
+    // the image runs its normal init.
+    if (opt_preload_zfs_library) {
+        bool init_zfsdev = opt_init;
+        if (load_fs_library(libsolaris_path, [init_zfsdev]() {
+                if (init_zfsdev) {
+                    zfsdev::zfsdev_init();
+                    mkdir("/etc", 0755);
+                    int fd = creat("/etc/mnttab", 0644);
+                    if (fd >= 0)
+                        close(fd);
+                }
+                return 0;
+            })) {
+            fprintf(stderr, "Failed to preload ZFS library. Powering off.\n");
+            osv::poweroff();
+        }
+    }
+
     if (opt_mount) {
         unmount_devfs();
 
@@ -616,43 +650,7 @@ void* do_main_thread(void *_main_args)
         }
     }
 
-    // Preload the ZFS library WITHOUT mounting a ZFS root.  Used by the ZFS
-    // builder, and by any image whose root filesystem is NOT zfs (e.g.
-    // fs=ramfs) but which still wants to create/import a ZFS *data* pool at
-    // runtime.  In the latter case libsolaris.so alone is not enough: the
-    // in-kernel ZFS control device /dev/zfs must also exist, otherwise
-    // zpool/zfs commands cannot talk to the kernel and "zpool create" fails
-    // with "/dev/zfs not found".  load_zfs_library_and_mount_zfs_root() calls
-    // zfsdev_init() for the fs=zfs path; do the same here for the no-root
-    // path so a ramfs-root image can bring up a ZFS data pool.
-    //
-    // The ZFS builder boots with --noinit and initializes the control device
-    // itself from its own bootfs tool (via libsolaris.so's exported
-    // zfsdev_init), so only bring the device up here when the image runs its
-    // normal init.  That avoids creating the "zfs" device twice (the loader
-    // copy of the init guard is distinct from the libsolaris.so copy).
-    if (opt_preload_zfs_library) {
-        bool init_zfsdev = opt_init;
-        if (load_fs_library(libsolaris_path, [init_zfsdev]() {
-                if (init_zfsdev) {
-                    zfsdev::zfsdev_init();
-                    // The ZFS userspace tools (zpool/zfs) consult /etc/mnttab;
-                    // on a non-ZFS root (e.g. ramfs) nothing else creates it, so
-                    // an empty one must exist or the tools fail to enumerate
-                    // mounts. Mirror what the in-tree zfs bench harness does
-                    // (zfsdev_init + creat /etc/mnttab) so a runtime zpool
-                    // create/import works from a ramfs-root image.
-                    mkdir("/etc", 0755);
-                    int fd = creat("/etc/mnttab", 0644);
-                    if (fd >= 0)
-                        close(fd);
-                }
-                return 0;
-            })) {
-            fprintf(stderr, "Failed to preload ZFS library. Powering off.\n");
-            osv::poweroff();
-        }
-    }
+    // (ZFS preload moved earlier, before the root-mount block.)
 
 #if CONF_networking_stack
     bool has_if = false;
