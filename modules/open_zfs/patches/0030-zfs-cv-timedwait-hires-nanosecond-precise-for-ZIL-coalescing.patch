@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Mon, 25 Aug 2026 00:00:00 +0000
+Subject: [PATCH 30/30] zfs: make cv_timedwait_hires nanosecond-precise on OSv
+ so ZIL commits coalesce
+
+cv_timedwait_hires converted its nanosecond deadline to ddi_get_lbolt ticks
+and called the tick-granular cv_timedwait.  With hz=1000 a tick is 1ms, so the
+ZIL commit-batch window (zil_commit_waiter_timeout sizes it as ~10% of the last
+log-write latency, typically a few hundred microseconds) rounded down to zero.
+The window never elapsed as intended, so concurrent fsyncs did not coalesce
+into one log-write-block plus one device cache flush; every commit paid its own
+synchronous NVMe FLUSH.  Measured effect on native NVMe: synchronous-commit RW
+throughput was ~6x below Linux and barely scaled with concurrency (c1 364, c8
+656, c32 845 tps) because each commit ran a near-serial flush cycle instead of
+batching.  It also mis-handled the CALLOUT_FLAG_ABSOLUTE deadline by passing an
+absolute value to a relative-timeout tick API.
+
+Route cv_timedwait_hires to a nanosecond-precision wait
+(openzfs_cv_timedwait_hires in bsd/porting/netport1.cc, which waits the true
+remaining nanoseconds via the OSv condvar's chrono wait), correctly honoring
+the absolute vs relative flag.  The ZIL batch window is now respected and
+concurrent commits coalesce.
+
+Signed-off-by: Greg Burd <greg@burd.me>
+---
+ include/os/osv/spl/sys/condvar.h | 18 ++++++++----------
+ 1 file changed, 8 insertions(+), 10 deletions(-)
+
+diff --git a/include/os/osv/spl/sys/condvar.h b/include/os/osv/spl/sys/condvar.h
+index 1111111..2222222 100644
+--- a/include/os/osv/spl/sys/condvar.h
++++ b/include/os/osv/spl/sys/condvar.h
+@@ -47,18 +47,16 @@
+ static inline int
+ cv_timedwait_hires(kcondvar_t *cvp, mutex_t *mp, long long tim,
+     long long res __attribute__((unused)), int flag)
+ {
+-	clock_t ticks;
+-
+-	if (flag == 0) {
+-		/* Relative time: add current hrtime */
+-		tim += gethrtime();
+-	}
+-
+-	/* Convert absolute hrtime (nanoseconds) to tick deadline */
+-	ticks = (clock_t)(tim / (1000000000LL / hz));
+-	return (cv_timedwait(cvp, mp, ticks));
++	/*
++	 * Nanosecond-precise wait.  Tick granularity (1ms at hz=1000) would
++	 * round the sub-millisecond ZIL commit-batch window to zero, defeating
++	 * commit coalescing and forcing a synchronous flush per commit.  `tim`
++	 * is an absolute gethrtime() (uptime-ns) deadline when the ABSOLUTE
++	 * flag (nonzero) is set, otherwise a relative nanosecond delay.
++	 */
++	extern int openzfs_cv_timedwait_hires(kcondvar_t *, mutex_t *,
++	    long long, int);
++	return (openzfs_cv_timedwait_hires(cvp, mp, tim, flag != 0));
+ }
+ 
+ #define	cv_timedwait_sig_hires		cv_timedwait_hires
+-- 
+2.40.0
