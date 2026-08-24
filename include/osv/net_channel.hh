@@ -51,7 +51,10 @@ public:
 #if CONF_lazy_stack_invariant
         assert(!sched::thread::current()->is_app());
 #endif
-        _waiting_thread.wake_from_kernel_or_with_irq_disabled();
+        // Receive-path wake: hint wake-local steering so the blocked backend is
+        // woken on the RX-serving CPU (no cross-CPU IPI, cache-hot data) when
+        // armed. No-op placement change unless OSV_WAKE_LOCAL=1.
+        _waiting_thread.wake_prefer_local_from_kernel_or_with_irq_disabled();
         if (_pollers || !_epollers.empty()) {
             wake_pollers();
         }
