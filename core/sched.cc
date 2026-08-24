@@ -91,6 +91,23 @@ bool wake_pull_enabled = false;
 static constexpr unsigned wake_pull_min_depth = 2;
 #endif
 
+// Wake-local receive-flow steering (RFS-style) runtime toggle. When on, a
+// net_channel wake issued from the receive path (poll thread / RX softirq)
+// retargets the woken backend to the CURRENT (RX-serving) CPU if that CPU is
+// not already backed up, instead of sending a cross-CPU wakeup IPI to the
+// backend's stale home CPU. This colocates the blocked backend with the CPU
+// that received its connection's data: the wake becomes a local reschedule (no
+// IPI, no VM-exit on that IPI) and the backend runs where its socket/mbuf data
+// is cache-hot. Only applies to wakes that pass prefer_local (net_channel), so
+// timers, mutexes and every other wake are unaffected. Default off; armed at
+// boot via env OSV_WAKE_LOCAL=1.
+bool wake_local_enabled = false;
+// Do not retarget onto a CPU whose runqueue is already at or above this depth,
+// so a burst of flows on one RX queue cannot pile every backend onto one CPU
+// and starve the rest (self-limiting: once the RX CPU is busy, wakes fall back
+// to the normal home-CPU placement / idle-pull dispersal).
+static constexpr unsigned wake_local_max_depth = 3;
+
 thread __thread * s_current;
 cpu __thread * current_cpu;
 
@@ -1585,7 +1602,8 @@ void thread::destroy()
 // *may* contain status::sending_lock (for waitqueue wait morphing).
 // it will transition from one of the allowed initial states to the
 // waking state.
-void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
+void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask,
+                       bool prefer_local)
 {
     status old_status = status::waiting;
     trace_sched_wake(st->t);
@@ -1597,6 +1615,21 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
     auto tcpu = st->_cpu;
     WITH_LOCK(preempt_lock_in_rcu) {
         unsigned c = cpu::current()->id;
+        // Wake-local receive-flow steering: if this is a receive-path wake
+        // (prefer_local) and the woken thread's home CPU is remote, retarget it
+        // to the current (RX-serving) CPU when that CPU is not already backed
+        // up. This turns a cross-CPU wakeup IPI into a local reschedule and
+        // colocates the backend with its cache-hot socket data. Guarded by the
+        // current CPU's runqueue depth so a flood cannot pile every backend
+        // onto one CPU. No effect unless armed (OSV_WAKE_LOCAL=1); when off or
+        // for any non-receive wake this is a byte-identical no-op.
+        if (prefer_local && wake_local_enabled) {
+            cpu* cur = cpu::current();
+            if (tcpu != cur && cur->load() < wake_local_max_depth) {
+                st->_cpu = cur;
+                tcpu = cur;
+            }
+        }
         // we can now use st->t here, since the thread cannot terminate while
         // it's waking, but not afterwards, when it may be running
 #if CONF_lazy_stack_invariant
@@ -2088,6 +2121,20 @@ void thread_handle::wake_from_kernel_or_with_irq_disabled()
     }
 }
 
+void thread_handle::wake_prefer_local_from_kernel_or_with_irq_disabled()
+{
+#if CONF_lazy_stack_invariant
+    assert(!sched::thread::current()->is_app() || !arch::irq_enabled());
+#endif
+    WITH_LOCK(rcu_read_lock) {
+        thread::detached_state* ds = _t.read();
+        if (ds) {
+            thread::wake_impl(ds, 1 << unsigned(thread::status::waiting),
+                              /*prefer_local=*/true);
+        }
+    }
+}
+
 timer_list::callback_dispatch::callback_dispatch()
 {
     clock_event->set_callback(this);
@@ -2331,6 +2378,18 @@ void init_detached_threads_reaper()
         printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
     }
 #endif
+    // Wake-local receive-flow steering (RFS-style): env OSV_WAKE_LOCAL=1 arms
+    // it, default off. Compiled in but a runtime no-op unless armed, so the
+    // default build is unchanged. When armed, receive-path (net_channel) wakes
+    // retarget the woken backend onto the RX-serving CPU to drop the cross-CPU
+    // wakeup IPI. Independent of OSV_WAKE_PULL (they compose: pull disperses,
+    // local colocates receive wakes).
+    {
+        extern bool wake_local_enabled;
+        const char* e = getenv("OSV_WAKE_LOCAL");
+        wake_local_enabled = (e && e[0] == '1');
+        printf("WAKE_LOCAL %s\n", wake_local_enabled ? "ON" : "off");
+    }
 }
 
 void start_early_threads()

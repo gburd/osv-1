@@ -765,7 +765,8 @@ public:
     void* get_exception_stack_top() { return _arch.exception_stack + sizeof(_arch.exception_stack); }
 private:
     static void wake_impl(detached_state* st,
-            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting));
+            unsigned allowed_initial_states_mask = 1 << unsigned(status::waiting),
+            bool prefer_local = false);
     static void sleep_impl(timer &tmr);
     void main();
 #ifdef __x86_64__
@@ -1024,6 +1025,10 @@ public:
     void reset(thread& t) { _t.assign(t._detached_state.get()); }
     void wake();
     void wake_from_kernel_or_with_irq_disabled();
+    // As above, but hints the scheduler to wake the thread on the current
+    // (calling) CPU when wake-local steering is armed. Used by the receive path
+    // (net_channel) to colocate a woken backend with the RX-serving CPU.
+    void wake_prefer_local_from_kernel_or_with_irq_disabled();
     void clear() { _t.assign(nullptr); }
     operator bool() const { return _t; }
     bool operator==(const thread_handle& x) const {
