@@ -482,8 +482,15 @@ static void stop_all_remaining_app_threads()
 
 static int load_fs_library(const char* fs_library_path, std::function<int()> on_load_fun = nullptr)
 {
-    // Load and initialize filesystem driver
-    if (dlopen(fs_library_path, RTLD_LAZY)) {
+    // Load and initialize filesystem driver.  RTLD_GLOBAL is load-bearing for
+    // the ZFS case: the userspace tools (/zpool.so, /zfs.so) are linked only
+    // against libzfs.so + libc and resolve their nvpair/nvlist/fnvlist symbols
+    // (~60 of them) against libsolaris.so at runtime.  Loading libsolaris with
+    // RTLD_LOCAL leaves those symbols invisible to a later dlopen of the tools,
+    // so zpool.so loads with dozens of "ignoring missing symbol nvpair_*" and
+    // then cannot talk to the kernel ("/dev/zfs not found").  RTLD_GLOBAL puts
+    // libsolaris's exports in the global scope so the tools resolve correctly.
+    if (dlopen(fs_library_path, RTLD_LAZY | RTLD_GLOBAL)) {
         if (on_load_fun) {
            return on_load_fun();
         } else {
