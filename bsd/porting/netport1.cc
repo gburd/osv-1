@@ -99,18 +99,28 @@ int openzfs_cv_timedwait(kcondvar_t *cv, mutex_t *mutex, clock_t abstime)
 // never coalesce into one log write + one device cache flush; every commit
 // pays its own synchronous flush and sync-write throughput collapses (measured
 // ~6x below Linux, and it barely scaled with concurrency).  Wait the exact
-// nanosecond delay instead.  `deadline_ns` is an absolute gethrtime()
-// (uptime-ns) value when CALLOUT_FLAG_ABSOLUTE is set, otherwise a relative
-// nanosecond delay; either way we wait the true remaining nanoseconds so the
-// ZIL batch window is honored and commits coalesce.
+// nanosecond delay instead.  `deadline_ns` is an absolute gethrtime() value
+// when CALLOUT_FLAG_ABSOLUTE is set, otherwise a relative nanosecond delay;
+// either way we wait the true remaining nanoseconds so the ZIL batch window is
+// honored and commits coalesce.
+//
+// CLOCK BASE: gethrtime() (bsd/sys/cddl/compat/opensolaris/sys/time.h) is
+// clock_gettime(CLOCK_UPTIME), and CLOCK_UPTIME is #defined to CLOCK_REALTIME
+// there -- so an absolute gethrtime() deadline is a WALL-CLOCK nanosecond value
+// (~1.7e18 ns), not an uptime value.  We must subtract wall-clock now, not
+// uptime now: uptime is ~1e11 ns at boot, so subtracting it from a wall-clock
+// deadline yields a ~1.7e18 ns (>50 year) delay and the timer never fires --
+// the ZIL commit-batch timeout is then dead, and a backend whose lwb-completion
+// cv_signal is also missed hangs forever.  Match gethrtime()'s clock (wall).
 OSV_LIBSOLARIS_API
 int openzfs_cv_timedwait_hires(kcondvar_t *cv, mutex_t *mutex,
     long long deadline_ns, int absolute)
 {
     long long delta_ns = deadline_ns;
     if (absolute) {
+        // Wall clock, matching gethrtime() == clock_gettime(CLOCK_REALTIME).
         u64 now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>
-                        (osv::clock::uptime::now().time_since_epoch()).count();
+                        (osv::clock::wall::now().time_since_epoch()).count();
         delta_ns = deadline_ns - (long long)now_ns;
     }
     if (delta_ns <= 0) {
