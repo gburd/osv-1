@@ -160,11 +160,18 @@ class virtio_driver;
 
         __attribute__((always_inline)) inline // Necessary because of issue #1029
         void update_used_event() {
-            // only let the host know about our used idx in case irq are enabled
-            if (_avail->interrupt_on()) {
-                trace_vring_update_used_event(this, _used_ring_host_head);
-                set_used_event(_used_ring_host_head, std::memory_order_release);
-            }
+            // Always publish our consumer position in used_event.  Under
+            // VIRTIO_RING_F_EVENT_IDX the device uses used_event (not
+            // _avail->_flags) to decide when to raise a completion interrupt, so
+            // used_event must track the true consumer head even while draining
+            // with legacy _flags interrupts "disabled"; otherwise it goes stale
+            // during a drain and the device can miss raising an interrupt for a
+            // completion that arrives just as the consumer finishes and sleeps
+            // (observed as a lost virtio-blk FLUSH-completion wakeup that wedged
+            // the whole guest).  Keeping it current is harmless for a device
+            // without EVENT_IDX, which ignores used_event.
+            trace_vring_update_used_event(this, _used_ring_host_head);
+            set_used_event(_used_ring_host_head, std::memory_order_release);
         }
         // GC the used items that were already read to be emptied
         // within the ring. Should be called by add_buf

@@ -144,21 +144,26 @@ namespace virtio {
     {
         trace_virtio_enable_interrupts(this);
         _avail->enable_interrupt();
+        // Arm the EVENT_IDX notification threshold at the last used entry the
+        // consumer has processed, so the device raises an interrupt on the very
+        // next completion.  Under VIRTIO_RING_F_EVENT_IDX the device consults
+        // used_event, NOT _avail->_flags, to decide whether to interrupt, so
+        // this store -- not enable_interrupt() above -- is what actually re-arms
+        // notifications.  It must be published before the recheck of used->_idx
+        // below (the seq_cst fence provides that ordering).
         set_used_event(_used_ring_host_head, std::memory_order_relaxed);
-        // StoreLoad barrier: this seq_cst fence pairs with the device-side
-        // barrier so the enable-then-recheck idiom is race-free.  A consumer
-        // enables interrupts here and then re-reads the used ring; the device
-        // posts a completion (bumping used->_idx) and then reads _avail->_flags
-        // to decide whether to interrupt.  The fence orders our _flags=enabled
-        // store before our used->_idx load, so at least one side observes the
-        // other: either our re-check sees the new completion, or the device
-        // sees interrupts enabled and raises one.  Without this fence a
-        // completion could be missed with interrupts left disabled.  (The
-        // relaxed _flags stores in enable_interrupt()/disable_interrupt() are
-        // adequate only because of this fence.)  With multiqueue this reasoning
-        // holds per queue: each vring's _flags/used->_idx/_used_ring_host_head
-        // are independent and _used_ring_host_head is advanced only by the
-        // single consumer thread, never by an interrupt handler.
+        // StoreLoad barrier: this seq_cst fence orders our used_event store
+        // before the consumer's subsequent used->_idx re-check, and pairs with
+        // the device's barrier between publishing a used entry (bump used->_idx)
+        // and reading used_event to decide on an interrupt.  So at least one
+        // side observes the other: either our re-check sees the new completion,
+        // or the device sees the armed used_event and raises an interrupt.
+        // (This is the EVENT_IDX form of the enable-then-recheck idiom; the
+        // _avail->_flags path is legacy and ignored by an EVENT_IDX device, but
+        // enable_interrupt() is left in place for devices without EVENT_IDX.)
+        // With multiqueue this reasoning holds per queue: each vring's
+        // used_event/used->_idx/_used_ring_host_head are independent and
+        // _used_ring_host_head is advanced only by the single consumer thread.
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
