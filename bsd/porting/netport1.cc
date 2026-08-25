@@ -98,7 +98,7 @@ int openzfs_cv_timedwait(kcondvar_t *cv, mutex_t *mutex, clock_t abstime)
 // ticks) rounds a sub-millisecond window down to zero, so concurrent fsyncs
 // never coalesce into one log write + one device cache flush; every commit
 // pays its own synchronous flush.  Wait the exact nanosecond delay instead.
-// `deadline_ns` is an absolute gethrtime() (uptime-ns) value when
+// `deadline_ns` is an absolute gethrtime() (wall-clock, CLOCK_REALTIME) value when
 // CALLOUT_FLAG_ABSOLUTE is set, otherwise a relative nanosecond delay; either
 // way we wait the true remaining nanoseconds so the ZIL batch window is
 // honored and commits coalesce.
@@ -108,8 +108,13 @@ int openzfs_cv_timedwait_hires(kcondvar_t *cv, mutex_t *mutex,
 {
     long long delta_ns = deadline_ns;
     if (absolute) {
+        // gethrtime() is clock_gettime(CLOCK_UPTIME), and CLOCK_UPTIME is
+        // #defined to CLOCK_REALTIME, so an absolute deadline is a wall-clock
+        // nanosecond value.  Subtract wall-clock now (not uptime, which is
+        // ~1e11 ns at boot and would leave a ~1.7e18 ns / >50 year delay,
+        // arming the ZIL commit-batch timeout effectively forever).
         u64 now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>
-                        (osv::clock::uptime::now().time_since_epoch()).count();
+                        (osv::clock::wall::now().time_since_epoch()).count();
         delta_ns = deadline_ns - (long long)now_ns;
     }
     if (delta_ns <= 0) {

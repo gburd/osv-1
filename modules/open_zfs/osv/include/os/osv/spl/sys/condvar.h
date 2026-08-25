@@ -56,7 +56,7 @@ cv_timedwait_hires(kcondvar_t *cvp, mutex_t *mp, long long tim,
 	 * (zil_commit_waiter_timeout sizes it as ~10% of the last log-write
 	 * latency) down to zero, so concurrent fsyncs never coalesce into one
 	 * log write plus one device cache flush and every commit pays its own
-	 * synchronous flush.  `tim` is an absolute gethrtime() (uptime-ns)
+	 * synchronous flush.  `tim` is an absolute gethrtime() (wall-clock, CLOCK_REALTIME)
 	 * deadline when the flag (ABSOLUTE) is nonzero, else a relative
 	 * nanosecond delay.
 	 */
