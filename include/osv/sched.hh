@@ -575,6 +575,12 @@ public:
     inline void wake_with_irq_or_preemption_disabled(Action action);
     template <class Action>
     inline void wake_with(Action action);
+    // Like wake_with(), but a receive-path/completion wake that prefers to run
+    // the woken thread on the current CPU (turns a cross-CPU wakeup IPI into a
+    // local reschedule) when OSV_WAKE_LOCAL is armed. Byte-identical no-op wake
+    // when the knob is off. Used by the storage completion / taskq wake path.
+    template <class Action>
+    inline void wake_with_prefer_local(Action action);
     // for mutex internal use
     template <class Action>
     inline void wake_with_from_mutex(Action action);
@@ -783,7 +789,8 @@ private:
     void update_dtv();
     void complete() __attribute__((__noreturn__));
     template <class Action>
-    inline void do_wake_with(Action action, unsigned allowed_initial_states_mask);
+    inline void do_wake_with(Action action, unsigned allowed_initial_states_mask,
+                             bool prefer_local = false);
     template <class IntrStrategy, class Mutex, class Pred>
     static void do_wait_until(Mutex& mtx, Pred pred);
     template <typename Mutex, typename... wait_object>
@@ -1574,12 +1581,13 @@ void thread::wait_for(waitable&&... waitables)
 
 template <class Action>
 inline
-void thread::do_wake_with(Action action, unsigned allowed_initial_states_mask)
+void thread::do_wake_with(Action action, unsigned allowed_initial_states_mask,
+                           bool prefer_local)
 {
     WITH_LOCK(osv::rcu_read_lock) {
         auto ds = _detached_state.get();
         action();
-        wake_impl(ds, allowed_initial_states_mask);
+        wake_impl(ds, allowed_initial_states_mask, prefer_local);
     }
 }
 
@@ -1610,6 +1618,21 @@ void thread::wake_with(Action action)
     arch::ensure_next_stack_page();
 #endif
     return do_wake_with(action, (1 << unsigned(status::waiting)));
+}
+
+template <class Action>
+inline
+void thread::wake_with_prefer_local(Action action)
+{
+#if CONF_lazy_stack_invariant
+    assert(arch::irq_enabled());
+    assert(preemptable());
+#endif
+#if CONF_lazy_stack
+    arch::ensure_next_stack_page();
+#endif
+    return do_wake_with(action, (1 << unsigned(status::waiting)),
+                        /*prefer_local=*/true);
 }
 
 template <class Action>

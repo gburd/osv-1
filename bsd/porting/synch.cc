@@ -146,7 +146,11 @@ void synch_port::wakeup(void* chan)
     for (auto it=ppp.first; it!=ppp.second; ++it) {
         synch_thread* wait = (*it).second;
         trace_synch_wakeup_waking(chan, wait->_thread);
-        wait->_thread->wake_with([&] { wait->_awake.store(true, std::memory_order_release); });
+        // Completion/taskq wake: prefer to run the woken worker on the current
+        // CPU (local reschedule instead of a cross-CPU wakeup IPI) when armed.
+        // The runqueue-depth guard in wake_impl prevents a broadcast from
+        // piling every woken thread onto one CPU. No-op unless OSV_WAKE_LOCAL=1.
+        wait->_thread->wake_with_prefer_local([&] { wait->_awake.store(true, std::memory_order_release); });
     }
     _evlist.erase(ppp.first, ppp.second);
     mutex_unlock(&_lock);
@@ -163,7 +167,10 @@ void synch_port::wakeup_one(void* chan)
         synch_thread* wait = (*it).second;
         _evlist.erase(it);
         trace_synch_wakeup_one_waking(chan, wait->_thread);
-        wait->_thread->wake_with([&] { wait->_awake.store(true, std::memory_order_release); });
+        // Completion/taskq wake (e.g. the ZFS zio issue/interrupt taskq worker
+        // and the vdev flush completion): prefer the current CPU to collapse a
+        // cross-CPU wakeup IPI into a local reschedule. No-op unless armed.
+        wait->_thread->wake_with_prefer_local([&] { wait->_awake.store(true, std::memory_order_release); });
     }
     mutex_unlock(&_lock);
 }
