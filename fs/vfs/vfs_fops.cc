@@ -177,7 +177,12 @@ bool vfs_file::put_page(void *addr, uintptr_t off, mmu::hw_ptep<0> ptep)
 
 void vfs_file::sync(off_t start, off_t end)
 {
-    pagecache::sync(this, start, end);
+    // pagecache::sync() reports writeback errors by return value rather than
+    // throwing (see the comment there): the only caller is mmu::file_vma::sync
+    // on the munmap/msync path, which surfaces any error via its own
+    // sys_fsync() tail, and throwing here can abort the guest when the C++
+    // unwinder cannot run in a forked backend's context.
+    (void) pagecache::sync(this, start, end);
 }
 
 // Locking: VOP_CACHE will call into the filesystem, and that can trigger an

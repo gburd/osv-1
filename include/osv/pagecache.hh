@@ -36,13 +36,13 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
 bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep);
 
 /*
- * sync() — flush all dirty pages in [start, end) for the file described by fp.
+ * sync() - flush all dirty pages in [start, end) for the file described by fp.
  * Throws on I/O error.  Used by VOP_FSYNC implementations.
  */
-void sync(vfs_file* fp, off_t start, off_t end);
+int sync(vfs_file* fp, off_t start, off_t end);
 
 /*
- * writeback_inode() — flush dirty write-cache pages for a specific (dev, ino)
+ * writeback_inode() - flush dirty write-cache pages for a specific (dev, ino)
  * inode in the byte range [start, end).
  *
  * Unlike sync(), this function does not require a vfs_file* and does not throw.
@@ -54,14 +54,14 @@ void sync(vfs_file* fp, off_t start, off_t end);
 int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end);
 
 /*
- * writeback_all() — flush every dirty page in the entire write cache.
+ * writeback_all() - flush every dirty page in the entire write cache.
  * Used at clean shutdown and by the periodic writeback daemon.
  * Errors are silently swallowed.
  */
 void writeback_all();
 
 /*
- * pagecache_wb_interval_secs — seconds between periodic writeback passes.
+ * pagecache_wb_interval_secs - seconds between periodic writeback passes.
  * Default: 5.  Writable at runtime; change takes effect at the next wakeup.
  * Atomic so a runtime writer does not race with the writeback daemon.
  */
@@ -77,7 +77,7 @@ extern "C" {
 #endif
 
 /*
- * osv_pagecache_writeback_inode() — C-linkage wrapper around
+ * osv_pagecache_writeback_inode() - C-linkage wrapper around
  * pagecache::writeback_inode().  Called from C filesystem code (e.g. ZFS
  * vop_fsync, ext2 vop_fsync) that has a vnode but not a vfs_file*.
  * Returns 0 on success or the first writeback errno.
@@ -86,7 +86,7 @@ int osv_pagecache_writeback_inode(dev_t dev, ino_t ino, off_t start,
                                   off_t end);
 
 /*
- * osv_pagecache_map_arc_page() — insert a borrowed ARC page into the read
+ * osv_pagecache_map_arc_page() - insert a borrowed ARC page into the read
  * cache without copying.  @page points into a pinned ZFS dbuf (db_data +
  * intra-record offset); @db_handle is the opaque dmu_buf_t* whose hold keeps
  * @page resident.  Ownership of the hold transfers to the page cache: the
@@ -104,7 +104,7 @@ int osv_pagecache_writeback_inode(dev_t dev, ino_t ino, off_t start,
 void osv_pagecache_map_arc_page(void *key, void *db_handle, void *page);
 
 /*
- * osv_pagecache_register_arc_rele() — register the callback used to release a
+ * osv_pagecache_register_arc_rele() - register the callback used to release a
  * borrowed ARC dbuf hold when its cached page is dropped.  Called once at ZFS
  * module init from libsolaris.so (OpenZFS path).
  */

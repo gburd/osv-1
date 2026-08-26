@@ -599,7 +599,7 @@ extern "C" void osv_pagecache_register_arc_rele(void (*rele)(void*))
 }
 
 /*
- * osv_free_pages() — return number of free physical pages.
+ * osv_free_pages() - return number of free physical pages.
  *
  * Called from arc_os.c (OpenZFS) so the ARC sees real memory pressure rather
  * than the static freemem value initialised at ZFS module load time.
@@ -610,7 +610,7 @@ extern "C" unsigned long osv_free_pages(void)
 }
 
 /*
- * osv_pagecache_read_page() — copy a cached read page into @buf.
+ * osv_pagecache_read_page() - copy a cached read page into @buf.
  *
  * If (dev, ino, offset) is in the read cache, copies PAGE_SIZE bytes into
  * @buf and returns 0 (cache hit).  Returns -1 on miss.
@@ -631,7 +631,7 @@ extern "C" int osv_pagecache_read_page(dev_t dev, ino_t ino, off_t offset,
 }
 
 /*
- * osv_pagecache_map_page_if_absent() — insert page only when key is absent.
+ * osv_pagecache_map_page_if_absent() - insert page only when key is absent.
  *
  * If (dev, ino, offset) is already in the read cache the new @page is NOT
  * inserted and the caller remains responsible for freeing it.  Returns 1
@@ -647,10 +647,10 @@ extern "C" int osv_pagecache_map_page_if_absent(dev_t dev, ino_t ino,
     hashkey key {dev, ino, offset};
     SCOPE_LOCK(read_lock);
     if (find_in_cache(read_cache, key))
-        return 1;   /* already cached — caller owns page */
+        return 1;   /* already cached - caller owns page */
     cached_page *cp = new cached_page(key, page);
     read_cache.emplace(key, cp);
-    return 0;       /* inserted — read_cache owns page */
+    return 0;       /* inserted - read_cache owns page */
 }
 
 static int create_read_cached_page(vfs_file* fp, hashkey& key)
@@ -669,7 +669,7 @@ static int create_read_cached_page(vfs_file* fp, hashkey& key)
 static constexpr int READAHEAD_WINDOW = 4;
 
 /*
- * prefetch_one_page() — speculatively load one page into the read cache.
+ * prefetch_one_page() - speculatively load one page into the read cache.
  *
  * Called for readahead: errors are silently ignored (prefetch is best-effort).
  * write_lock must NOT be held by the caller; this function acquires and
@@ -704,7 +704,7 @@ static void prefetch_one_page(vfs_file* fp, hashkey key, off_t file_size)
 }
 
 /*
- * readahead_if_sequential() — heuristic sequential prefetch.
+ * readahead_if_sequential() - heuristic sequential prefetch.
  *
  * If the page just before @key is in read_cache (sequential-access signal),
  * speculatively populate the next READAHEAD_WINDOW pages.
@@ -721,7 +721,7 @@ static void readahead_if_sequential(vfs_file* fp, const hashkey& key)
     {
         WITH_LOCK(read_lock) {
             if (!find_in_cache(read_cache, prev))
-                return;  /* not sequential — skip readahead */
+                return;  /* not sequential - skip readahead */
         }
     }
 
@@ -911,7 +911,15 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
     return addr != zero_page;
 }
 
-void sync(vfs_file* fp, off_t start, off_t end)
+// Flush dirty MAP_SHARED pages for [start,end) back to the filesystem.
+// Returns 0 on success or the writeback errno.  Historically this threw an
+// error on writeback failure, but it is reached from munmap() (via
+// mmu::file_vma::sync) as well as fsync(); throwing a C++ exception on the
+// munmap path can abort the guest when the exception unwinder cannot run in
+// that context (e.g. a forked backend whose module unwind state is not
+// coherent across its copy-on-write address space).  Report the error by
+// return value instead and let each caller decide how to surface it.
+int sync(vfs_file* fp, off_t start, off_t end)
 {
     struct stat st;
     fp->stat(&st);
@@ -943,20 +951,23 @@ void sync(vfs_file* fp, off_t start, off_t end)
     }
 
     if (to_flush.empty())
-        return;
+        return 0;
 
     mmu::flush_tlb_all();
 
     /* Phase 3: write each page back to the filesystem. */
+    int ret = 0;
     for (auto cp : to_flush) {
         auto err = cp->writeback();
         if (err) {
             // Re-mark dirty: phase 2 cleared the flag, but the data never
             // reached the filesystem, so it must not be treated as clean.
             cp->mark_dirty();
-            throw make_error(err);
+            if (!ret)
+                ret = err;
         }
     }
+    return ret;
 }
 
 /*
@@ -1012,7 +1023,7 @@ static void flush_write_cache_dirty()
 }
 
 /*
- * writeback_inode() — flush dirty pages for a specific (dev, ino) range.
+ * writeback_inode() - flush dirty pages for a specific (dev, ino) range.
  *
  * Same three-phase approach as sync() but:
  *   - accepts (dev, ino) directly instead of a vfs_file*
@@ -1066,7 +1077,7 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
 }
 
 /*
- * writeback_all() — flush the entire write cache.
+ * writeback_all() - flush the entire write cache.
  * Thin wrapper around flush_write_cache_dirty() for external callers.
  */
 void writeback_all()
@@ -1097,7 +1108,7 @@ static void writeback_worker()
 }
 
 /*
- * pagecache_start_writeback() — start the periodic writeback daemon.
+ * pagecache_start_writeback() - start the periodic writeback daemon.
  *
  * Called once from the pagecache constructor after the scheduler is up.
  * A plain constructor (no init_prio) runs after all init_prio constructors,
@@ -1220,7 +1231,7 @@ extern "C" OSV_LIBSOLARIS_API void start_pagecache_access_scanner() {
 }
 
 /*
- * osv_pagecache_writeback_inode() — C-linkage entry point.
+ * osv_pagecache_writeback_inode() - C-linkage entry point.
  *
  * Allows C filesystem code (ZFS vop_fsync, ext2 vop_fsync, etc.) to request
  * writeback of dirty mmap pages for a specific inode without needing a C++
