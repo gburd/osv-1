@@ -451,18 +451,46 @@ void file::load_segment(const Elf64_Phdr& phdr)
         }
     }
 #if CONF_fork
-    // libsolaris.so (the OpenZFS kernel module) is loaded into the COW-cloned
-    // application VA slot, but its writable .data/.bss hold GLOBAL ZFS state
-    // (buf_hash_table, arc_anon/mru/mfu, the dbuf hash, arc_stats, ...) that
-    // both AS0 ZFS kernel threads and forked app threads must see identically.
-    // Register its writable segments so clone_address_space shares them verbatim
-    // (never COW) across every fork child -- otherwise a forked PostgreSQL
-    // process and the AS0 txg_sync / dp_sync_taskq threads diverge and ZFS
-    // corrupts (e.g. NULL-deref in buf_hash_remove).  libsolaris.so is mlocked
-    // and never unloaded, so its VA range is fixed for the life of the system.
-    if ((perm & mmu::perm_write) &&
+    // Cross-address-space coherence of loaded shared libraries under fork().
+    //
+    // A shared library is mapped into the application VA slot (slot 32), which
+    // clone_address_space() clones copy-on-write per fork child.  Two things
+    // then break unless the library's segments are shared verbatim across every
+    // fork address space:
+    //
+    //  1. libsolaris.so (the OpenZFS kernel module) has writable .data/.bss
+    //     holding GLOBAL ZFS state (buf_hash_table, arc_anon/mru/mfu, the dbuf
+    //     hash, arc_stats, ...) that both AS0 ZFS kernel threads and forked app
+    //     threads must see identically, or ZFS corrupts (NULL-deref in
+    //     buf_hash_remove when AS0 reads a forked child's private COW copy).
+    //
+    //  2. A library dlopen()ed by one forked backend (e.g. PostgreSQL's
+    //     RestoreLibraryState -> internal_load_library -> dlopen) is mapped only
+    //     into that backend's private COW slot, yet its object is inserted into
+    //     the SHARED elf::program module list and _next_alloc is advanced
+    //     globally.  Any other address space (a sibling backend resolving a
+    //     symbol, or the C++ unwinder walking dl_iterate_phdr / modules_get)
+    //     then dereferences that per-AS VA and page-faults on an unmapped slot
+    //     (observed as a fault near (void*)-4096 in elf::program::get_library).
+    //
+    // Register EVERY loaded shared library's PT_LOAD segments (all permissions,
+    // not just writable) so clone_address_space shares them verbatim, never COW,
+    // in every fork child.  This makes the shared module list coherent: a given
+    // library lives at the same VA, backed by the same physical pages, in AS0
+    // and every forked backend.  OSv library objects are ThreadOnly stateless
+    // code (PostgreSQL extension/function .so's) or the mlocked ZFS module, so
+    // verbatim sharing of their writable segments is correct here.  Gated by
+    // OSV_FORK_SHARE_DLOPEN (default on); set to 0 to restore the old per-AS COW
+    // behavior.  The main program and the kernel are not "libraries" and take a
+    // different path; only actual shared objects reach load_segment here.
+    static const bool fork_share_dlopen = [] {
+        const char *e = getenv("OSV_FORK_SHARE_DLOPEN");
+        return !(e && e[0] == '0');
+    }();
+    bool is_libsolaris =
         _pathname.size() >= 13 &&
-        _pathname.compare(_pathname.size() - 13, 13, "libsolaris.so") == 0) {
+        _pathname.compare(_pathname.size() - 13, 13, "libsolaris.so") == 0;
+    if (is_libsolaris ? (perm & mmu::perm_write) : fork_share_dlopen) {
         uintptr_t rstart = reinterpret_cast<uintptr_t>(_base) + vstart;
         uintptr_t rend = reinterpret_cast<uintptr_t>(_base) + vstart + memsz;
         mmu::add_fork_shared_module_range(rstart, rend);
