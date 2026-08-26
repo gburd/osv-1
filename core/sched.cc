@@ -1625,7 +1625,12 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask,
         // for any non-receive wake this is a byte-identical no-op.
         if (prefer_local && wake_local_enabled) {
             cpu* cur = cpu::current();
-            if (tcpu != cur && cur->load() < wake_local_max_depth) {
+            // Only retarget a thread that is actually free to migrate: never
+            // move a pinned thread (e.g. a per-CPU NVMe completion worker bound
+            // via sched::thread::pin) or one holding migrate_disable(), or the
+            // scheduler's runqueue bookkeeping for its home CPU is corrupted.
+            if (tcpu != cur && !st->t->pinned() && st->t->migratable() &&
+                cur->load() < wake_local_max_depth) {
                 st->_cpu = cur;
                 tcpu = cur;
             }
