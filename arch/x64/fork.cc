@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <osv/sched.hh>
 #include <osv/fork.hh>
+#include <osv/fork_arena.hh>
 #include <osv/debug.hh>
 
 // pthread_atfork child-handler chain (defined in libc/pthread.cc), run in the
@@ -69,6 +70,19 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp,
     // otherwise the child keeps its own private OSv per-thread TLS.
     u64 parent_app_tcb = parent->get_app_tcb();
 
+    // Allocate the child sched::thread object (and its detached_state, which
+    // holds the scheduler status word and home-CPU) on the identity kernel
+    // heap, not the forking backend's copy-on-write fork arena.  A cross-
+    // address-space wakeup -- e.g. one forked PostgreSQL backend doing
+    // pthread_cond_signal on a condvar whose waiter is another forked backend
+    // -- walks the woken thread's detached_state (thread::wake_impl reads
+    // st->st).  If detached_state lived in the child's COW arena its VA is
+    // unmapped/stale in the waking backend's address space, so the wake
+    // page-faults, and because the wake runs with preemption disabled it trips
+    // assert(sched::preemptable()) in page_fault and aborts.  The identity heap
+    // is mapped verbatim in every fork address space, so the wake can always
+    // resolve the thread's scheduler state.
+    fork_arena::kernel_heap_scope kh_child_thread;
     auto t = sched::thread::make([rc, parent_app_tcb] {
         if (parent_app_tcb) {
             arch::set_fsbase(parent_app_tcb);
