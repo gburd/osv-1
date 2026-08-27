@@ -42,23 +42,18 @@ public:
     inline void wake() {
         // A wait_record left linked in a condvar/mutex queue can be stale: it
         // may already be woken (wake() stores null below), or -- under fork --
-        // it may be a freed-and-reused record still linked in a fork child's
-        // private copy-on-write copy of the queue (the condvar object itself
-        // was COW-cloned, so its _waiters_fifo diverges per address space).
-        // A reused record's thread pointer reads as garbage (null, a small
-        // integer, or a torn value with the low bits zeroed), which the plain
-        // null check does not catch.  Dereferencing it faults, and on the
-        // preemption-disabled wake path that fault aborts the instance.
-        // Only wake a canonical sched::thread pointer: a live thread object
-        // lives at or above the kernel VMA boundary and is not a tiny integer
-        // or a low-bits-zeroed torn pointer.  A stale/torn record is dropped.
+        // a freed-and-reused record left in a fork child's private copy-on-
+        // write copy of the queue (the condvar object was COW-cloned, so its
+        // _waiters_fifo diverges per address space).  A reused record's thread
+        // pointer can read as null or as a tiny-integer remnant; dereferencing
+        // it faults, and on the preemption-disabled wake path that fault aborts
+        // the instance.  Skip a thread pointer that is null or an obviously
+        // invalid low value (no sched::thread lives in the first page); a real
+        // thread lives high in the address space.  This is deliberately narrow
+        // -- only clearly-bogus pointers are dropped -- so it never discards a
+        // legitimate wake.
         sched::thread *w = t.load(std::memory_order_relaxed);
-        uintptr_t wv = reinterpret_cast<uintptr_t>(w);
-        // A live sched::thread object lives at or above the kernel VMA boundary
-        // (0x400000000000); application-space and tiny-integer values (0, 1,
-        // ...) are not valid thread pointers.  Reject those so a reused/torn
-        // record is dropped instead of dereferenced.
-        if (wv < 0x400000000000UL) {
+        if (reinterpret_cast<uintptr_t>(w) < 0x1000UL) {
             return;
         }
         w->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
