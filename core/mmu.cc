@@ -2252,11 +2252,26 @@ void* map_anon(const void* addr, size_t size, unsigned flags, unsigned perm)
 
 std::unique_ptr<file_vma> default_file_mmap(file* file, addr_range range, unsigned flags, unsigned perm, off_t offset)
 {
+#if CONF_fork
+    // The file_vma is inserted into a (possibly fork-child) address space's
+    // owned_vmas and later disposed by destroy_address_space() on the REAPER
+    // thread in AS0.  If it lived in the child's COW fork arena its VA is not
+    // mapped in the reaper's AS, so clear_and_dispose() null-derefs it.  Force
+    // it onto the shared identity kernel heap, like map_anon() and the clone
+    // path already do.
+    fork_arena::kernel_heap_scope kh;
+#endif
     return std::unique_ptr<file_vma>(new file_vma(range, perm, flags, file, offset, new map_file_page_read(file, offset)));
 }
 
 std::unique_ptr<file_vma> map_file_mmap(file* file, addr_range range, unsigned flags, unsigned perm, off_t offset)
 {
+#if CONF_fork
+    // Same reaper-teardown hazard as default_file_mmap(): keep the file_vma on
+    // the shared identity kernel heap so destroy_address_space() (AS0 reaper)
+    // can dispose it.
+    fork_arena::kernel_heap_scope kh;
+#endif
     return std::unique_ptr<file_vma>(new file_vma(range, perm, flags, file, offset, new map_file_page_mmap(file, offset, flags & mmap_shared)));
 }
 
@@ -2692,6 +2707,13 @@ void anon_vma::split(uintptr_t edge)
     if (edge <= _range.start() || edge >= _range.end()) {
         return;
     }
+#if CONF_fork
+    // The split-off vma is inserted into this (possibly fork-child) address
+    // space's owned_vmas and later disposed by the AS0 reaper in
+    // destroy_address_space(); keep it on the shared identity kernel heap so
+    // the reaper can dereference it (see map_anon()).
+    fork_arena::kernel_heap_scope kh;
+#endif
     vma* n = new anon_vma(addr_range(edge, _range.end()), _perm, _flags);
     set(_range.start(), edge);
     cur_vma_list().insert(*n);
