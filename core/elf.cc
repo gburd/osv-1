@@ -473,16 +473,24 @@ void file::load_segment(const Elf64_Phdr& phdr)
     //     then dereferences that per-AS VA and page-faults on an unmapped slot
     //     (observed as a fault near (void*)-4096 in elf::program::get_library).
     //
-    // Register EVERY loaded shared library's PT_LOAD segments (all permissions,
-    // not just writable) so clone_address_space shares them verbatim, never COW,
-    // in every fork child.  This makes the shared module list coherent: a given
-    // library lives at the same VA, backed by the same physical pages, in AS0
-    // and every forked backend.  OSv library objects are ThreadOnly stateless
-    // code (PostgreSQL extension/function .so's) or the mlocked ZFS module, so
-    // verbatim sharing of their writable segments is correct here.  Gated by
-    // OSV_FORK_SHARE_DLOPEN (default on); set to 0 to restore the old per-AS COW
-    // behavior.  The main program and the kernel are not "libraries" and take a
-    // different path; only actual shared objects reach load_segment here.
+    // Register the library segments that must be COHERENT across fork address
+    // spaces so clone_address_space() shares them verbatim (never COW).
+    //
+    //  - libsolaris.so's WRITABLE segments: its .data/.bss hold GLOBAL ZFS state
+    //    that AS0 kernel threads and forked app threads must see identically.
+    //  - Every shared library's READ-ONLY / EXECUTABLE segments (code, rodata,
+    //    eh_frame): these back the shared module list that a sibling backend's
+    //    symbol resolution and the C++ unwinder (dl_iterate_phdr / eh_frame
+    //    lookup) read cross-address-space; if they stayed per-AS COW, a fault
+    //    near (void*)-4096 in elf::program::get_library results.
+    //
+    // Do NOT share other libraries' WRITABLE segments: each forked backend needs
+    // its own private .data/.bss (its library globals are per-process), and
+    // sharing them verbatim corrupts per-backend state and the fork resume/AS
+    // layout.  Read-only/exec segments are identical content, so sharing the
+    // same physical pages is safe and is what makes cross-AS module access
+    // coherent.  Gated by OSV_FORK_SHARE_DLOPEN (default on); set to 0 to
+    // restore the old fully-per-AS-COW behavior.
     static const bool fork_share_dlopen = [] {
         const char *e = getenv("OSV_FORK_SHARE_DLOPEN");
         return !(e && e[0] == '0');
@@ -490,7 +498,10 @@ void file::load_segment(const Elf64_Phdr& phdr)
     bool is_libsolaris =
         _pathname.size() >= 13 &&
         _pathname.compare(_pathname.size() - 13, 13, "libsolaris.so") == 0;
-    if (is_libsolaris ? (perm & mmu::perm_write) : fork_share_dlopen) {
+    bool share = is_libsolaris
+        ? (perm & mmu::perm_write)                         // ZFS global state
+        : (fork_share_dlopen && !(perm & mmu::perm_write)); // code/rodata only
+    if (share) {
         uintptr_t rstart = reinterpret_cast<uintptr_t>(_base) + vstart;
         uintptr_t rend = reinterpret_cast<uintptr_t>(_base) + vstart + memsz;
         mmu::add_fork_shared_module_range(rstart, rend);
