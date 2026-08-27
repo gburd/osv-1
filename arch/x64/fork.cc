@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <osv/sched.hh>
 #include <osv/fork.hh>
+#include <osv/fork_arena.hh>
 #include <osv/debug.hh>
 
 // pthread_atfork child-handler chain (defined in libc/pthread.cc), run in the
@@ -69,6 +70,16 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp,
     // otherwise the child keeps its own private OSv per-thread TLS.
     u64 parent_app_tcb = parent->get_app_tcb();
 
+    // Allocate the child sched::thread object AND its lambda closure (which
+    // holds the by-value resume context `rc`, including the caller's rsp) on
+    // the identity kernel heap, not the parent's copy-on-write fork arena.
+    // The child thread reads `rc` from this closure to restore its registers
+    // and stack pointer; if the closure landed in COW arena memory that is not
+    // coherent in the child's address space when it runs, the child would read
+    // a stale/zero rc.rsp and resume on a NULL stack (an intermittent crash at
+    // the first fork-of-a-fork). Identity memory is shared verbatim across every
+    // fork address space, so the child always sees the published context.
+    fork_arena::kernel_heap_scope kh_resume;
     auto t = sched::thread::make([rc, parent_app_tcb] {
         if (parent_app_tcb) {
             arch::set_fsbase(parent_app_tcb);
