@@ -40,7 +40,18 @@ public:
     explicit waiter(sched::thread *t) : t(t) { };
 
     inline void wake() {
-        t.load(std::memory_order_relaxed)->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
+        // A waiter whose thread pointer is null has already been woken (wake()
+        // stores null via the action below) or is a stale record; never
+        // dereference a null thread.  This also guards the wait-morphing
+        // send_lock path against a wait_record left in a condvar's queue whose
+        // backing thread is no longer resolvable in the current address space
+        // (e.g. a fork-child view of an application condvar), which would
+        // otherwise fault dereferencing a null/invalid detached_state.
+        sched::thread *w = t.load(std::memory_order_relaxed);
+        if (!w) {
+            return;
+        }
+        w->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
     }
 
     inline void wait() const {
