@@ -40,15 +40,25 @@ public:
     explicit waiter(sched::thread *t) : t(t) { };
 
     inline void wake() {
-        // A waiter whose thread pointer is null has already been woken (wake()
-        // stores null via the action below) or is a stale record; never
-        // dereference a null thread.  This also guards the wait-morphing
-        // send_lock path against a wait_record left in a condvar's queue whose
-        // backing thread is no longer resolvable in the current address space
-        // (e.g. a fork-child view of an application condvar), which would
-        // otherwise fault dereferencing a null/invalid detached_state.
+        // A wait_record left linked in a condvar/mutex queue can be stale: it
+        // may already be woken (wake() stores null below), or -- under fork --
+        // it may be a freed-and-reused record still linked in a fork child's
+        // private copy-on-write copy of the queue (the condvar object itself
+        // was COW-cloned, so its _waiters_fifo diverges per address space).
+        // A reused record's thread pointer reads as garbage (null, a small
+        // integer, or a torn value with the low bits zeroed), which the plain
+        // null check does not catch.  Dereferencing it faults, and on the
+        // preemption-disabled wake path that fault aborts the instance.
+        // Only wake a canonical sched::thread pointer: a live thread object
+        // lives at or above the kernel VMA boundary and is not a tiny integer
+        // or a low-bits-zeroed torn pointer.  A stale/torn record is dropped.
         sched::thread *w = t.load(std::memory_order_relaxed);
-        if (!w) {
+        uintptr_t wv = reinterpret_cast<uintptr_t>(w);
+        // A live sched::thread object lives at or above the kernel VMA boundary
+        // (0x400000000000); application-space and tiny-integer values (0, 1,
+        // ...) are not valid thread pointers.  Reject those so a reused/torn
+        // record is dropped instead of dereferenced.
+        if (wv < 0x400000000000UL) {
             return;
         }
         w->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
