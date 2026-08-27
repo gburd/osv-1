@@ -1631,6 +1631,23 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
     }
     if (f) {
         trace_elf_load(name.c_str());
+#if CONF_fork
+        // The whole elf::object (its shared_ptr control block, symbol/section
+        // bookkeeping, the _files map entries, and the RCU-published _modules
+        // list) is a SHARED kernel structure read by EVERY address space for
+        // symbol resolution.  A forked backend calling dlopen() (e.g.
+        // PostgreSQL loading a PL/pgSQL or extension .so on first use) runs
+        // this load path in its own COW address space; without forcing the
+        // identity heap the object and its internals land in that backend's
+        // private fork arena (VA 0x3000..).  Once published in _modules/_files,
+        // a sibling backend resolving a symbol walks that object's
+        // _dynamic_table/symtab through its own page tables and reads a
+        // divergent/absent COW copy -- a torn-pointer page fault growing
+        // _modules, or a dynamic table missing DT_STRTAB -> invalid_elf_error.
+        // Force every load-time allocation onto the identity heap so the shared
+        // object is byte-identical in every address space.
+        fork_arena::kernel_heap_scope kh;
+#endif
         auto ef = std::shared_ptr<object>(new file(*this, f, name),
                 [=](object *obj) { remove_object(obj); });
         ef->set_base(_next_alloc);
@@ -1999,6 +2016,13 @@ init_table get_init(Elf64_Ehdr* header)
 ulong program::register_dtv(object* obj)
 {
     SCOPE_LOCK(_module_index_list_mutex);
+#if CONF_fork
+    // _module_index_list is RCU-published and read cross-address-space (every
+    // thread's TLS/DTV setup indexes it).  A forked backend loading a library
+    // grows it in its own COW arena otherwise; force the identity heap so the
+    // published vector is coherent in every address space (see load_object).
+    fork_arena::kernel_heap_scope kh;
+#endif
     auto list = _module_index_list_rcu.read_by_owner();
     if (!list) {
         _module_index_list_rcu.assign(new std::vector<object*>({obj}));
