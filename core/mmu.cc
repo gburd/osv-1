@@ -70,7 +70,44 @@ struct vma_range_compare {
 };
 
 //Set of all vma ranges - both linear and non-linear ones
+#if CONF_fork
+// vma_range rb-tree nodes must live on the identity kernel heap, never the COW
+// fork arena.  A forked child inserts ranges into its own vma_range_set as it
+// mmap()s/splits post-fork; those nodes are freed by the reaper thread running
+// in AS0 when destroy_address_space() destroys the child's owned_ranges
+// (~address_space -> ~_Rb_tree<vma_range>).  If any insert path missed a
+// per-call-site kernel_heap_scope, a node would sit in the arena (VA 0x3000..),
+// COW-private to the dead child, and the AS0 reaper would read a divergent
+// physical page for the chunk header -> fork_arena::recover() asserts
+// h->magic == chunk_magic and aborts.  A node allocator that always forces the
+// identity heap makes the rule structural instead of per-call-site: every
+// vma_range node is coherent in every address space, so the cross-AS free is
+// valid.  Nodes are tiny kernel metadata and AS0 already lands on the identity
+// heap, so this is free there and keeps one uniform set type across AS0 and
+// children.
+template <class T>
+struct vma_range_identity_allocator : std::allocator<T> {
+    template <class U> struct rebind {
+        typedef vma_range_identity_allocator<U> other;
+    };
+    vma_range_identity_allocator() = default;
+    template <class U>
+    vma_range_identity_allocator(const vma_range_identity_allocator<U>&) {}
+    T* allocate(std::size_t n) {
+        fork_arena::kernel_heap_scope kh;
+        return std::allocator<T>::allocate(n);
+    }
+    void deallocate(T* p, std::size_t n) {
+        // fork_arena::free() dispatches by address, and the matching allocate()
+        // already placed p on the identity heap, so no scope is needed here.
+        std::allocator<T>::deallocate(p, n);
+    }
+};
+typedef std::set<vma_range, vma_range_compare,
+                 vma_range_identity_allocator<vma_range>> vma_range_set_type;
+#else
 typedef std::set<vma_range, vma_range_compare> vma_range_set_type;
+#endif
 __attribute__((init_priority((int)init_prio::vma_range_set)))
 vma_range_set_type vma_range_set;
 rwlock_t vma_range_set_mutex;
