@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Fri, 28 Aug 2026 08:30:00 +0000
+Subject: [PATCH 30/30] zfs: allocate the ARC eviction waiter on the identity
+ heap for OSv fork
+
+arc_wait_for_eviction() declared its arc_evict_waiter_t on the calling
+thread's stack. On OSv with fork() emulation a process runs in its own
+copy-on-write address space, so that stack (and the embedded kcondvar_t
+aew_cv, whose OSv condvar holds a lockfree mutex and a waiter FIFO) is
+COW-private to the forked process. The process links the waiter onto the
+process-global arc_evict_waiters list and cv_waits; the AS0 arc_evict thread
+later runs arc_evict_cb -> cv_signal(&aw->aew_cv) -> condvar wake,
+dereferencing the forked process's stack-resident condvar through AS0's page
+tables. AS0 sees a physically different, incoherent copy, so the wake either
+faults on a stale/null waiter pointer or is silently dropped and the process
+that is waiting for ARC eviction never wakes. This blocked concurrent forked
+processes under ARC write pressure.
+
+Allocate the waiter with kmem_zalloc, which under OSv's fork support routes to
+the identity kernel heap that is mapped verbatim in every address space, so
+the waiting process and the AS0 evictor operate on the same physical aew_cv /
+aew_node / aew_count. ARC is a process-global kernel singleton and this waiter
+is signalled by an AS0 thread, so the identity heap is its correct home.
+Semantics are unchanged: the list_link_active(&aw->aew_node) real-vs-spurious
+wakeup check still works, against a coherent node.
+---
+ module/zfs/arc.c | 20 ++++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/module/zfs/arc.c b/module/zfs/arc.c
+--- a/module/zfs/arc.c
++++ b/module/zfs/arc.c
+@@ -5175,9 +5218,24 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+ 	case ARC_OVF_SEVERE:
+ 	default:
+ 	{
+-		arc_evict_waiter_t aw;
+-		list_link_init(&aw.aew_node);
+-		cv_init(&aw.aew_cv, NULL, CV_DEFAULT, NULL);
++		/*
++		 * OSv fork COW-coherence: the waiter must NOT live on this
++		 * thread's stack.  Under CONF_fork a PostgreSQL backend runs in
++		 * its own copy-on-write address space, so a stack object is
++		 * physically private to that AS.  The ARC eviction thread runs
++		 * in AS0 and signals aew_cv / walks aew_node cross-AS from
++		 * arc_evict_cb(); a COW-private stack copy makes those touch a
++		 * different physical page than the waiter -> the embedded
++		 * condvar's internal mutex is incoherent and cv_signal ->
++		 * condvar_wake_one -> mutex::lock either NULL-derefs (page fault
++		 * via taskqueue_thread_loop) or drops the wakeup (all vCPUs idle,
++		 * the DB wedges under VU>=4).  kmem_zalloc routes to the identity
++		 * kernel heap (mapped verbatim in every AS) under fork, so the
++		 * waiter is coherent for both the backend and the AS0 evictor.
++		 */
++		arc_evict_waiter_t *aw = kmem_zalloc(sizeof (*aw), KM_SLEEP);
++		list_link_init(&aw->aew_node);
++		cv_init(&aw->aew_cv, NULL, CV_DEFAULT, NULL);
+ 
+ 		uint64_t last_count = 0;
+ 		mutex_enter(&arc_evict_lock);
+@@ -5194,16 +5252,16 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+ 		 * case arc_evict_state_impl() may have deferred
+ 		 * wakeups (but still incremented arc_evict_count).
+ 		 */
+-		aw.aew_count = MAX(last_count, arc_evict_count) + amount;
++		aw->aew_count = MAX(last_count, arc_evict_count) + amount;
+ 
+-		list_insert_tail(&arc_evict_waiters, &aw);
++		list_insert_tail(&arc_evict_waiters, aw);
+ 
+ 		arc_set_need_free();
+ 
+ 		DTRACE_PROBE3(arc__wait__for__eviction,
+ 		    uint64_t, amount,
+ 		    uint64_t, arc_evict_count,
+-		    uint64_t, aw.aew_count);
++		    uint64_t, aw->aew_count);
+ 
+ 		/*
+ 		 * We will be woken up either when arc_evict_count reaches
+@@ -5212,11 +5270,12 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+ 		 * In case of "false" wakeup, we will still be on the list.
+ 		 */
+ 		do {
+-			cv_wait(&aw.aew_cv, &arc_evict_lock);
+-		} while (list_link_active(&aw.aew_node));
++			cv_wait(&aw->aew_cv, &arc_evict_lock);
++		} while (list_link_active(&aw->aew_node));
+ 		mutex_exit(&arc_evict_lock);
+ 
+-		cv_destroy(&aw.aew_cv);
++		cv_destroy(&aw->aew_cv);
++		kmem_free(aw, sizeof (*aw));
+ 	}
+ 	}
+ }
