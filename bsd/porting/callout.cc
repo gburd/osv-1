@@ -214,6 +214,15 @@ static void _callout_thread(void)
 int callout_reset_on(struct callout *c, u64 to_ticks, void (*fn)(void *),
     void *arg, int ignore_cpu)
 {
+    // Defensive: a null callout must be a no-op, never a fault.  Under
+    // concurrency the ARP/lle path can reach callout_reset() on a link-layer
+    // entry (la->la_timer) that raced with its own teardown, passing a null
+    // callout; dereferencing it here would page-fault at address 0 in the
+    // network output path (arpresolve -> ether_output -> tcp_output) and abort
+    // the instance.  Nothing to arm, so return.
+    if (!c) {
+        return 0;
+    }
     auto cur = osv::clock::uptime::now();
     int cur_ticks = ns2ticks(
             std::chrono::duration_cast<std::chrono::nanoseconds>
