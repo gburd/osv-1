@@ -91,23 +91,6 @@ bool wake_pull_enabled = false;
 static constexpr unsigned wake_pull_min_depth = 2;
 #endif
 
-// Wake-local receive-flow steering (RFS-style) runtime toggle. When on, a
-// net_channel wake issued from the receive path (poll thread / RX softirq)
-// retargets the woken backend to the CURRENT (RX-serving) CPU if that CPU is
-// not already backed up, instead of sending a cross-CPU wakeup IPI to the
-// backend's stale home CPU. This colocates the blocked backend with the CPU
-// that received its connection's data: the wake becomes a local reschedule (no
-// IPI, no VM-exit on that IPI) and the backend runs where its socket/mbuf data
-// is cache-hot. Only applies to wakes that pass prefer_local (net_channel), so
-// timers, mutexes and every other wake are unaffected. Default off; armed at
-// boot via env OSV_WAKE_LOCAL=1.
-bool wake_local_enabled = false;
-// Do not retarget onto a CPU whose runqueue is already at or above this depth,
-// so a burst of flows on one RX queue cannot pile every backend onto one CPU
-// and starve the rest (self-limiting: once the RX CPU is busy, wakes fall back
-// to the normal home-CPU placement / idle-pull dispersal).
-static constexpr unsigned wake_local_max_depth = 3;
-
 thread __thread * s_current;
 cpu __thread * current_cpu;
 
@@ -1602,17 +1585,23 @@ void thread::destroy()
 // *may* contain status::sending_lock (for waitqueue wait morphing).
 // it will transition from one of the allowed initial states to the
 // waking state.
+// Wake-local (OSV_WAKE_LOCAL): opt-in, default off.  When armed, a completion
+// wake that goes through wake_with_prefer_local() (currently only the SPL
+// condvar path used by the ZFS ZIL commit) retargets a safely-migratable
+// waiter to the waking CPU, collapsing a cross-CPU wakeup IPI + VM-exit on the
+// fsync/commit critical path into a local reschedule.  See wake_impl().
+bool thread::wake_local_enabled()
+{
+    static bool on = []{
+        const char* e = getenv("OSV_WAKE_LOCAL");
+        return e && e[0] && e[0] != '0';
+    }();
+    return on;
+}
+
 void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask,
                        bool prefer_local)
 {
-    // Defend against a null detached_state: a wait_record whose backing thread
-    // is not resolvable in the waker's address space (e.g. a fork-child view of
-    // an application condvar's queue) can yield a null st here.  Dereferencing
-    // it would fault, and on a preemption-disabled wake path that fault aborts
-    // the instance (assert(preemptable()) in page_fault).  Skip the wake.
-    if (!st) {
-        return;
-    }
     status old_status = status::waiting;
     trace_sched_wake(st->t);
     while (!st->st.compare_exchange_weak(old_status, status::waking)) {
@@ -1623,31 +1612,26 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask,
     auto tcpu = st->_cpu;
     WITH_LOCK(preempt_lock_in_rcu) {
         unsigned c = cpu::current()->id;
-        // Wake-local receive-flow steering: if this is a receive-path wake
-        // (prefer_local) and the woken thread's home CPU is remote, retarget it
-        // to the current (RX-serving) CPU when that CPU is not already backed
-        // up. This turns a cross-CPU wakeup IPI into a local reschedule and
-        // colocates the backend with its cache-hot socket data. Guarded by the
-        // current CPU's runqueue depth so a flood cannot pile every backend
-        // onto one CPU. No effect unless armed (OSV_WAKE_LOCAL=1); when off or
-        // for any non-receive wake this is a byte-identical no-op.
-        if (prefer_local && wake_local_enabled) {
-            cpu* cur = cpu::current();
-            // Only retarget a thread that is actually free to migrate: never
-            // move a pinned thread (e.g. a per-CPU NVMe completion worker bound
-            // via sched::thread::pin) or one holding migrate_disable(), or the
-            // scheduler's runqueue bookkeeping for its home CPU is corrupted.
-            if (tcpu != cur && !st->t->pinned() && st->t->migratable() &&
-                cur->load() < wake_local_max_depth) {
-                st->_cpu = cur;
-                tcpu = cur;
-            }
-        }
         // we can now use st->t here, since the thread cannot terminate while
         // it's waking, but not afterwards, when it may be running
 #if CONF_lazy_stack_invariant
         assert(!sched::preemptable());
 #endif
+        // Wake-local: when the caller asks to prefer the current CPU (a
+        // completion wake such as the ZFS ZIL lwb-completion signalling the
+        // committing PostgreSQL backend), retarget a safely-migratable waiter
+        // to this CPU before queuing it.  The waker is running here and hot;
+        // the waiter's last CPU is typically halted, so the default path costs
+        // a cross-CPU wakeup IPI plus a VM-exit and a remote reschedule on the
+        // commit critical path.  Running the waiter here collapses that into a
+        // local reschedule.  Only retarget threads that are free to migrate
+        // (not pinned, migration not locked); everything else uses its own
+        // CPU unchanged.  Off unless armed (see wake_with_prefer_local).
+        if (prefer_local && tcpu != cpu::current() &&
+            st->t->migratable() && !st->t->pinned()) {
+            tcpu = cpu::current();
+            st->_cpu = tcpu;
+        }
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
             tcpu->incoming_wakeups[c].push_back(*st->t);
@@ -2134,20 +2118,6 @@ void thread_handle::wake_from_kernel_or_with_irq_disabled()
     }
 }
 
-void thread_handle::wake_prefer_local_from_kernel_or_with_irq_disabled()
-{
-#if CONF_lazy_stack_invariant
-    assert(!sched::thread::current()->is_app() || !arch::irq_enabled());
-#endif
-    WITH_LOCK(rcu_read_lock) {
-        thread::detached_state* ds = _t.read();
-        if (ds) {
-            thread::wake_impl(ds, 1 << unsigned(thread::status::waiting),
-                              /*prefer_local=*/true);
-        }
-    }
-}
-
 timer_list::callback_dispatch::callback_dispatch()
 {
     clock_event->set_callback(this);
@@ -2391,18 +2361,6 @@ void init_detached_threads_reaper()
         printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
     }
 #endif
-    // Wake-local receive-flow steering (RFS-style): env OSV_WAKE_LOCAL=1 arms
-    // it, default off. Compiled in but a runtime no-op unless armed, so the
-    // default build is unchanged. When armed, receive-path (net_channel) wakes
-    // retarget the woken backend onto the RX-serving CPU to drop the cross-CPU
-    // wakeup IPI. Independent of OSV_WAKE_PULL (they compose: pull disperses,
-    // local colocates receive wakes).
-    {
-        extern bool wake_local_enabled;
-        const char* e = getenv("OSV_WAKE_LOCAL");
-        wake_local_enabled = (e && e[0] == '1');
-        printf("WAKE_LOCAL %s\n", wake_local_enabled ? "ON" : "off");
-    }
 }
 
 void start_early_threads()

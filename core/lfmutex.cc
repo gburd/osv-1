@@ -145,13 +145,16 @@ void mutex::lock()
 // sometime later when the lock holder unlock()s it. It is assumed that the
 // waiting thread DOES NOT hold the mutex at the time of this call, so the
 // thread should relinquish the lock before putting itself on wait_record.
-void mutex::send_lock(wait_record *wr)
+void mutex::send_lock(wait_record *wr, bool prefer_local)
 {
     trace_mutex_send_lock(this, wr);
     if (count.fetch_add(1, std::memory_order_acquire) == 0) {
         // Uncontended case (no other thread is holding the lock, and no
         // concurrent lock() attempts). We got the lock for wr, so wake it.
-        wr->wake();
+        // This is the common case for the ZFS ZIL commit wake (the user mutex
+        // is typically free at commit time), so honor prefer_local here to run
+        // the woken backend on the waking CPU and skip a cross-CPU wakeup IPI.
+        wr->wake(prefer_local);
         return;
     }
 

@@ -39,7 +39,7 @@ protected:
 public:
     explicit waiter(sched::thread *t) : t(t) { };
 
-    inline void wake() {
+    inline void wake(bool prefer_local = false) {
         // A wait_record left linked in a condvar/mutex queue can be stale: it
         // may already be woken (wake() stores null below), or -- under fork --
         // a freed-and-reused record left in a fork child's private copy-on-
@@ -56,7 +56,16 @@ public:
         if (reinterpret_cast<uintptr_t>(w) < 0x1000UL) {
             return;
         }
-        w->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
+        // prefer_local: a completion wake (the ZFS ZIL commit) asks to run the
+        // woken thread on the waking CPU to avoid a cross-CPU wakeup IPI.  It is
+        // honored only when OSV_WAKE_LOCAL is armed and the thread is safely
+        // migratable (checked in wake_impl); otherwise it degrades to the
+        // normal wake.
+        if (prefer_local) {
+            w->wake_with_prefer_local([&] { t.store(nullptr, std::memory_order_release); });
+        } else {
+            w->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
+        }
     }
 
     inline void wait() const {

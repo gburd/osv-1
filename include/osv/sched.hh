@@ -575,10 +575,12 @@ public:
     inline void wake_with_irq_or_preemption_disabled(Action action);
     template <class Action>
     inline void wake_with(Action action);
-    // Like wake_with(), but a receive-path/completion wake that prefers to run
-    // the woken thread on the current CPU (turns a cross-CPU wakeup IPI into a
-    // local reschedule) when OSV_WAKE_LOCAL is armed. Byte-identical no-op wake
-    // when the knob is off. Used by the storage completion / taskq wake path.
+    // OSV_WAKE_LOCAL arm (read once at first use); default off.  Public so the
+    // condvar/mutex wake path (the ZFS ZIL commit) can query it.
+    static bool wake_local_enabled();
+    // Completion-wake variant: when OSV_WAKE_LOCAL is armed, prefer to run the
+    // woken thread on the current (waking) CPU.  Used for the ZFS ZIL commit
+    // wake so an fsync completion does not cost a cross-CPU wakeup IPI.
     template <class Action>
     inline void wake_with_prefer_local(Action action);
     // for mutex internal use
@@ -790,7 +792,7 @@ private:
     void complete() __attribute__((__noreturn__));
     template <class Action>
     inline void do_wake_with(Action action, unsigned allowed_initial_states_mask,
-                             bool prefer_local = false);
+            bool prefer_local = false);
     template <class IntrStrategy, class Mutex, class Pred>
     static void do_wait_until(Mutex& mtx, Pred pred);
     template <typename Mutex, typename... wait_object>
@@ -1032,10 +1034,6 @@ public:
     void reset(thread& t) { _t.assign(t._detached_state.get()); }
     void wake();
     void wake_from_kernel_or_with_irq_disabled();
-    // As above, but hints the scheduler to wake the thread on the current
-    // (calling) CPU when wake-local steering is armed. Used by the receive path
-    // (net_channel) to colocate a woken backend with the RX-serving CPU.
-    void wake_prefer_local_from_kernel_or_with_irq_disabled();
     void clear() { _t.assign(nullptr); }
     operator bool() const { return _t; }
     bool operator==(const thread_handle& x) const {
@@ -1582,7 +1580,7 @@ void thread::wait_for(waitable&&... waitables)
 template <class Action>
 inline
 void thread::do_wake_with(Action action, unsigned allowed_initial_states_mask,
-                           bool prefer_local)
+        bool prefer_local)
 {
     WITH_LOCK(osv::rcu_read_lock) {
         auto ds = _detached_state.get();
@@ -1632,7 +1630,7 @@ void thread::wake_with_prefer_local(Action action)
     arch::ensure_next_stack_page();
 #endif
     return do_wake_with(action, (1 << unsigned(status::waiting)),
-                        /*prefer_local=*/true);
+                        wake_local_enabled());
 }
 
 template <class Action>
