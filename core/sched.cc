@@ -465,6 +465,14 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
         mmu::flush_tlb_local();
     }
 #ifdef __aarch64__
+#if CONF_fork
+    // Park the outgoing app thread's app-stack timers off the shared per-CPU
+    // timer list (its AS is still loaded here, before the sched.S swap).  See
+    // the x86 park_timers(*p) call and cpu::park_timers.
+    if (p->is_app()) {
+        park_timers(*p);
+    }
+#endif
     switch_data.old_thread_state = &(p->_state);
     switch_data.new_thread_state = &(n->_state);
 #if CONF_fork
@@ -513,6 +521,12 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
 #ifdef __aarch64__
 extern "C" void destroy_current_cpu_terminating_thread()
 {
+#if CONF_fork
+    // Re-insert the just-resumed thread's parked app-stack timers (its AS is
+    // now loaded).  Runs on every resume via sched.S, mirroring the x86
+    // cpu::current()->unpark_timers(*thread::current()) after switch_to.
+    cpu::current()->unpark_timers(*thread::current());
+#endif
 #endif
     if (cpu::current()->terminating_thread) {
         cpu::current()->terminating_thread->destroy();
