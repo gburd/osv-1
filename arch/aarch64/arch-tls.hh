@@ -17,12 +17,6 @@
 struct thread_control_block {
     void *tls_base; // Address of the per-thread static TLS block (kernel, pie, etc)
     void *dtv;      // Address of the DTV (Dynamic Thread Vector)
-    // App-installed thread pointer (tpidr_el0) for a foreign (glibc) app that
-    // manages its own TLS.  0 for a musl-on-OSv app that uses OSv per-thread
-    // TLS.  A fork child reads the parent value to decide whether to re-install
-    // the app tpidr_el0 (see arch/aarch64/fork.cc).  Appended at the END to
-    // keep the glibc tcbhead_t-compatible offsets of the fields above intact.
-    unsigned long app_tcb;
 };
 
 #endif /* ARCH_TLS_HH */

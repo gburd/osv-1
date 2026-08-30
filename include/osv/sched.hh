@@ -926,9 +926,17 @@ public:
     mmu::address_space *address_space() const { return _current_as; }
     void set_address_space(mmu::address_space *as) { _current_as = as; }
 #endif
-#if defined(__x86_64__) || defined(__aarch64__)
+#ifdef __x86_64__
     unsigned long get_app_tcb() { return _tcb->app_tcb; }
     void set_app_tcb(unsigned long tcb) { _tcb->app_tcb = tcb; }
+#endif
+#ifdef __aarch64__
+    // aarch64 has no arch_prctl app-TCB path; a musl-on-OSv app uses OSv's own
+    // per-thread TLS (tpidr_el0 = the OSv TCB).  Growing the aarch64 TCB to
+    // carry an app_tcb breaks variant-I TLS offsets, so report 0 (no foreign
+    // app TLS) and ignore sets.  Revisit if a glibc app ever needs its own TCB.
+    unsigned long get_app_tcb() { return 0; }
+    void set_app_tcb(unsigned long) {}
 #endif
 private:
 #ifdef __aarch64__

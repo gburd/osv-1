@@ -973,6 +973,9 @@ objects += arch/$(arch)/interrupt.o
 objects += arch/$(arch)/clone.o
 ifeq ($(conf_fork),1)
 objects += arch/$(arch)/fork.o
+ifeq ($(arch),aarch64)
+objects += arch/aarch64/fork-entry.o
+endif
 objects += core/fork_arena.o
 endif
 ifeq ($(conf_drivers_pci),1)

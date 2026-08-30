@@ -140,7 +140,6 @@ void thread::setup_tcb()
     void* p = aligned_alloc(64, total_tls_size + sizeof(*_tcb));
     _tcb = (thread_control_block *)p;
     _tcb[0].tls_base = &_tcb[1];
-    _tcb[0].app_tcb = 0;   // no foreign (glibc) app TLS by default
     _state.tcb = p;
     //
     // First goes kernel TLS data
