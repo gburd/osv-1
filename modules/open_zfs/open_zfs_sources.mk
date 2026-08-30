@@ -247,9 +247,11 @@ openzfs-icp += $(OPENZFS)/module/icp/spi/kcf_spi.o
 openzfs-icp += $(OPENZFS)/module/icp/io/aes.o
 openzfs-icp += $(OPENZFS)/module/icp/io/sha2_mod.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/aes/aes_impl.o
-openzfs-icp += $(OPENZFS)/module/icp/algs/aes/aes_impl_aesni.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/aes/aes_impl_generic.o
+ifeq ($(arch),x64)
+openzfs-icp += $(OPENZFS)/module/icp/algs/aes/aes_impl_aesni.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/aes/aes_impl_x86-64.o
+endif
 openzfs-icp += $(OPENZFS)/module/icp/algs/aes/aes_modes.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/blake3/blake3.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/blake3/blake3_generic.o
@@ -258,7 +260,9 @@ openzfs-icp += $(OPENZFS)/module/icp/algs/edonr/edonr.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/modes/ccm.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/modes/gcm.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/modes/gcm_generic.o
+ifeq ($(arch),x64)
 openzfs-icp += $(OPENZFS)/module/icp/algs/modes/gcm_pclmulqdq.o
+endif
 openzfs-icp += $(OPENZFS)/module/icp/algs/modes/modes.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/sha2/sha256_impl.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/sha2/sha2_generic.o
@@ -266,13 +270,16 @@ openzfs-icp += $(OPENZFS)/module/icp/algs/sha2/sha512_impl.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/skein/skein.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/skein/skein_block.o
 openzfs-icp += $(OPENZFS)/module/icp/algs/skein/skein_iv.o
+ifeq ($(arch),x64)
 openzfs-icp += $(OPENZFS)/module/icp/asm-x86_64/aes/aeskey.o
+endif
 # Note: generic_impl.c is a template included by other .c files, not compiled directly
 
 # ============================================================
 # ICP Assembly routines (x86_64 SIMD crypto implementations)
 # ============================================================
 openzfs-icp-asm :=
+ifeq ($(arch),x64)
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_amd64.o
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_aesni.o
 # openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/gcm_pclmulqdq.o
@@ -280,6 +287,17 @@ openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/aes/aes_aesni.o
 # openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/modes/ghash-x86_64.o
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha256-x86_64.o
 openzfs-icp-asm += $(OPENZFS)/module/icp/asm-x86_64/sha2/sha512-x86_64.o
+endif
+ifeq ($(arch),aarch64)
+# aarch64 crypto: ARMv8 SHA2 + BLAKE3 NEON.  AES uses the generic C impl
+# (asm-x86_64 aeskey/aesni are x64-only; generic AES suffices for OSv ZFS).
+# zfs_sha{256,512}_available() is forced B_FALSE (see patch) so ZFS uses the
+# ARMv8 sha2 routines below rather than expecting the x86-64 ones.
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/sha2/sha256-armv8.o
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/sha2/sha512-armv8.o
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/blake3/b3_aarch64_sse2.o
+openzfs-icp-asm += $(OPENZFS)/module/icp/asm-aarch64/blake3/b3_aarch64_sse41.o
+endif
 
 # ============================================================
 # ZSTD compression module (from module/zstd/)

@@ -965,7 +965,7 @@ new file mode 100644
 index 000000000..7991a2e47
 --- /dev/null
 +++ b/include/os/osv/spl/sys/isa_defs.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,54 @@
 +// SPDX-License-Identifier: CDDL-1.0
 +/*
 + * OSv SPL isa_defs.h - ISA definitions for OpenZFS.
@@ -995,8 +995,15 @@ index 000000000..7991a2e47
 +#endif
 +#define	_SUNOS_VTOC_16
 +
++#elif defined(__aarch64__)
++
++#if !defined(_LP64)
++#error "_LP64 not defined"
++#endif
++#define	_SUNOS_VTOC_16
++
 +#else
-+#error "ISA not supported - OSv only supports x86_64"
++#error "ISA not supported - OSv only supports x86_64 and aarch64"
 +#endif
 +
 +#if __BYTE_ORDER == __BIG_ENDIAN
@@ -1912,7 +1919,7 @@ new file mode 100644
 index 000000000..7167b1e13
 --- /dev/null
 +++ b/include/os/osv/spl/sys/simd.h
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,183 @@
 +// SPDX-License-Identifier: CDDL-1.0
 +/*
 + * OSv SIMD support header.
@@ -2085,6 +2092,7 @@ index 000000000..7167b1e13
 +#define	zfs_aes_available()		B_FALSE
 +#define	zfs_pclmulqdq_available()	B_FALSE
 +#define	zfs_sha256_available()		B_FALSE
++#define	zfs_sha512_available()		B_FALSE
 +#define	zfs_movbe_available()		B_FALSE
 +
 +#endif /* __x86_64__ || __i386__ */
