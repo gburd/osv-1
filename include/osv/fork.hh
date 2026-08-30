@@ -82,9 +82,9 @@ bool exit_current_child(int status);
 extern "C" pid_t fork(void);
 extern "C" pid_t vfork(void);
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
 namespace osv {
-// x86-64 machine context a forked child must resume with so it continues in
+// Machine context a forked child must resume with so it continues in
 // fork()'s caller EXACTLY as a normal `ret` from fork() would -- restoring all
 // callee-saved registers (rbx, rbp, r12-r15) the caller relies on across the
 // call, plus rsp and the return address.  fork() jmps past its own epilogue
@@ -93,9 +93,23 @@ namespace osv {
 // keeps live values in callee-saved regs across fork() (e.g. an accumulator)
 // computes garbage.  Captured at fork() entry, where the regs still hold the
 // caller's values; restored by the child trampoline (arch/x64/fork.cc).
+#if defined(__x86_64__)
 struct fork_resume_ctx {
     unsigned long rbx, rbp, r12, r13, r14, r15, rsp, rip;
 };
+#elif defined(__aarch64__)
+// aarch64 callee-saved register context: x19-x28 (general callee-saved), x29
+// (frame pointer), sp, and x30 (return address / lr).  The child trampoline
+// (arch/aarch64/fork.cc) restores these and resumes in fork's caller on the
+// parent's EXACT stack VAs (same-VA fork; clone_address_space privatizes the
+// forking stack into the child AS), returning 0 in x0.
+struct fork_resume_ctx {
+    unsigned long x19, x20, x21, x22, x23, x24, x25, x26, x27, x28;
+    unsigned long fp;   // x29
+    unsigned long sp;
+    unsigned long lr;   // x30 (caller return address)
+};
+#endif
 } // namespace osv
 #endif
 

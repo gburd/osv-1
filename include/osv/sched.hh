@@ -926,7 +926,7 @@ public:
     mmu::address_space *address_space() const { return _current_as; }
     void set_address_space(mmu::address_space *as) { _current_as = as; }
 #endif
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
     unsigned long get_app_tcb() { return _tcb->app_tcb; }
     void set_app_tcb(unsigned long tcb) { _tcb->app_tcb = tcb; }
 #endif
