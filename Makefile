@@ -56,9 +56,20 @@ ifeq ($(conf_zfs),openzfs)
 # OpenZFS sources are compiled, so we never maintain an OpenZFS fork.  The stamp
 # file makes this idempotent.
 openzfs_patch_stamp := modules/open_zfs/openzfs/.osv-patches-applied
+# Apply each patch independently, plain `git apply` first, then `--recount`
+# (line counts drifted), then a fuzzy `patch -p1 --fuzz=3` fallback (context
+# offset by an OSv header comment).  Applied one-by-one so a patch that needs a
+# looser mode does not abort the whole series, and stamped only if ALL apply.
 $(shell if [ -d modules/open_zfs/openzfs/module ] && [ ! -f $(openzfs_patch_stamp) ]; then \
-	git -C modules/open_zfs/openzfs apply --whitespace=nowarn $(addprefix ../patches/,$(notdir $(wildcard modules/open_zfs/patches/*.patch))) 2>/dev/null \
-	&& touch $(openzfs_patch_stamp); fi)
+	ok=1; \
+	for p in $(addprefix ../patches/,$(notdir $(wildcard modules/open_zfs/patches/*.patch))); do \
+	  ( cd modules/open_zfs/openzfs && \
+	    { git apply --whitespace=nowarn "$$p" 2>/dev/null \
+	      || git apply --recount --whitespace=nowarn "$$p" 2>/dev/null \
+	      || patch -p1 --fuzz=3 --no-backup-if-mismatch <"$$p" >/dev/null 2>&1; } ) \
+	  || ok=0; \
+	done; \
+	[ $$ok = 1 ] && touch $(openzfs_patch_stamp); fi)
 # The OpenZFS object lists + conf_zfs=openzfs flags are included further
 # below (after bsd_zfs defines the shared `solaris` list), from
 # modules/open_zfs/open_zfs_sources.mk.
