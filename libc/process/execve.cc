@@ -155,6 +155,7 @@ int execve(const char *path, char *const argv[], char *const envp[])
         // stack, then call a lambda that switches CR3, destroys old_as, and
         // runs the program.  It never returns.
         self->set_address_space(mmu::kernel_address_space());
+#if defined(__x86_64__)
         asm volatile(
             "movq %0, %%rsp \n\t"
             "movq %0, %%rbp \n\t"
@@ -174,6 +175,18 @@ int execve(const char *path, char *const argv[], char *const envp[])
                     execve_run_and_exit(&s_path, &s_args, &s_env, s_have_env);
                 }))
             : "memory");
+#elif defined(__aarch64__)
+        asm volatile(
+            "mov sp, %0 \n\t"     // move onto the kernel stack (valid every AS)
+            "mov x29, %0 \n\t"    // frame pointer := new stack
+            "blr %1 \n\t"         // call the continuation (never returns)
+            : : "r"(sp), "r"(reinterpret_cast<void*>(+[]{
+                    mmu::switch_to_runtime_page_tables();
+                    mmu::destroy_address_space(s_old_as);
+                    execve_run_and_exit(&s_path, &s_args, &s_env, s_have_env);
+                }))
+            : "x29", "x30", "memory");
+#endif
         __builtin_unreachable();
     }
 

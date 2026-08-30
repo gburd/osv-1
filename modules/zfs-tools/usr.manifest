@@ -1,0 +1,9 @@
+[manifest]
+/zpool.so: zpool.so
+/zfs.so: zfs.so
+/libzfs.so: libzfs.so
+/libuutil.so: libuutil.so
+/libzfs_core.so: libzfs_core.so
+/libzutil.so: libzutil.so
+/libshare.so: libshare.so
+/libtpool.so: libtpool.so

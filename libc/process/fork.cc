@@ -588,6 +588,7 @@ pid_t fork(void)
     // context so it continues in fork()'s caller as a normal `ret` would --
     // essential for deep call chains (see osv::fork_resume_ctx, tst-fork-deep).
     fork_resume_ctx ctx;
+#if defined(__x86_64__)
     void **fp = static_cast<void**>(__builtin_frame_address(0));
     asm volatile("movq %%rbx, %0\n\t"
                  "movq %%r12, %1\n\t"
@@ -599,11 +600,38 @@ pid_t fork(void)
     ctx.rbp = reinterpret_cast<unsigned long>(fp[0]);          // caller's rbp
     ctx.rip = reinterpret_cast<unsigned long>(__builtin_return_address(0));
     ctx.rsp = reinterpret_cast<unsigned long>(fp + 2);         // fork rbp + 16
-
-    pid_t parent = getpid();
-
     void *caller_ret = reinterpret_cast<void*>(ctx.rip);
     void *caller_sp  = reinterpret_cast<void*>(ctx.rsp);
+#elif defined(__aarch64__)
+    // Capture the caller's callee-saved registers (x19-x28), frame pointer
+    // (x29), and return address (x30) FIRST, before fork()'s body clobbers
+    // them.  __attribute__((noinline)) keeps fork() a real frame so x29/x30
+    // hold the caller's saved fp and the return address into fork()'s caller.
+    // The child (arch/aarch64/fork.cc) restores this context and resumes in
+    // fork()'s caller on the parent's EXACT stack VAs (same-VA; the forking
+    // stack is privatized into the child AS by clone_address_space).
+    asm volatile("stp x19, x20, %0\n\t"
+                 "stp x21, x22, %1\n\t"
+                 "stp x23, x24, %2\n\t"
+                 "stp x25, x26, %3\n\t"
+                 "stp x27, x28, %4\n\t"
+                 : "=m"(ctx.x19), "=m"(ctx.x21), "=m"(ctx.x23),
+                   "=m"(ctx.x25), "=m"(ctx.x27));
+    ctx.fp = reinterpret_cast<unsigned long>(__builtin_frame_address(0));
+    ctx.lr = reinterpret_cast<unsigned long>(__builtin_return_address(0));
+    // The caller's SP after fork() returns == this frame's caller SP.  With a
+    // standard AAPCS64 frame (stp x29,x30,[sp,#-N]!; mov x29,sp), the caller's
+    // SP is the frame pointer plus the frame size.  We recover it as the value
+    // saved SP would have on return: fp points at the saved {x29,x30} pair, and
+    // the caller's original sp is the address just above this function's frame.
+    // Use the frame address: the caller SP is fp + 16 for the minimal frame
+    // that __builtin_frame_address gives after the prologue.
+    ctx.sp = ctx.fp + 16;
+    void *caller_ret = reinterpret_cast<void*>(ctx.lr);
+    void *caller_sp  = reinterpret_cast<void*>(ctx.sp);
+#endif
+
+    pid_t parent = getpid();
 
     void *stack_to_free = nullptr;
     // POSIX: run pthread_atfork prepare handlers in the parent before forking.
