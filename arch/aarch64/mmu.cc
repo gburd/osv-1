@@ -11,6 +11,7 @@
 #include <osv/debug.h>
 #include <osv/irqlock.hh>
 #include <osv/kernel_config_logger_debug.h>
+#include <osv/kernel_config_fork.h>
 
 #include "arch-cpu.hh"
 #include "exceptions.hh"
@@ -140,10 +141,43 @@ void switch_to_runtime_page_tables()
     mmu::flush_tlb_all();
 }
 
+#if CONF_fork
+// Virtual pointer to the current thread's TTBR0 root (a forked child's private
+// cloned root when running in a child AS, else the kernel/AS0 root).  Defined
+// in core/mmu.cc.
+pt_element<4> *current_pt_root();
+
+pt_element<4> *get_root_pt(uintptr_t virt)
+{
+    // Only the low (TTBR0) half is per-address-space.  On OSv aarch64 every
+    // reachable VA lives in TTBR0 (T0SZ=T1SZ=16; TTBR1 maps nothing), so the
+    // (virt >> 63) == 1 case never carries live mappings, but keep it exact.
+    if ((virt >> 63) == 0) {
+        return current_pt_root();
+    }
+    return &page_table_root[1];
+}
+
+// Virtual pointer to the kernel (AS0) TTBR0 root -- the shared base a cloned
+// child root copies its kernel/identity slots from (core/mmu.cc clone).
+pt_element<4> *kernel_pml4()
+{
+    return &page_table_root[0];
+}
+
+// Physical address of the kernel (AS0) TTBR0 root -- the TTBR0_EL1 value that
+// maps OSv text/data + the identity/phys/linear ranges.  Used as AS0's pt_root
+// and the shared base for cloned child address spaces.
+phys kernel_pt_root_phys()
+{
+    return page_table_root[0].next_pt_addr();
+}
+#else
 pt_element<4> *get_root_pt(uintptr_t virt)
 {
     return &page_table_root[virt >> 63];
 }
+#endif // CONF_fork
 
 bool is_page_fault_insn(unsigned int esr) {
     unsigned int ec = esr >> 26;

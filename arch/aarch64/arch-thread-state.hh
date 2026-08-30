@@ -18,6 +18,12 @@ struct thread_state {
 
     void* exception_sp; //SP_EL0
     u64 stack_selector; //1 - selects SP_ELx (default), 0 - selects SP_EL0 (exceptions)
+    // fork COW: TTBR0_EL1 value (phys root of this thread's address space).  Set
+    // by cpu_schedule_next_thread(); sched.S loads it at the context switch when
+    // it differs from the currently-installed TTBR0 (a forked child runs on its
+    // own cloned page-table root).  0 for the very first threads before fork is
+    // active (treated as "no explicit switch" -> the boot/AS0 root stays).
+    u64 ttbr0;
 };
 
 #endif /* ARCH_THREAD_STATE_HH_ */

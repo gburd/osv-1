@@ -9,8 +9,13 @@
 #define _INTERNAL_ATOMIC_H
 
 #include <stdint.h>
-#include <bsd/sys/cddl/compat/opensolaris/sys/types.h>
-#include <machine/atomic.h>
+
+// Self-contained (like arch/x64/atomic.h): do NOT pull in <machine/atomic.h>
+// or the BSD opensolaris <sys/types.h>.  On aarch64 those are absent / collide
+// (machine/atomic.h does not exist here, and the BSD types.h redefines
+// zoneid_t/boolean_t/... conflicting with the system headers when this atomic.h
+// is included by the ZFS userspace tools' libspl).  a_fetch_add uses the GCC
+// atomic builtin instead of FreeBSD's atomic_fetchadd_int.
 
 static inline int a_ctz_64(register uint64_t x)
 {
@@ -26,7 +31,8 @@ static inline int a_ctz_l(unsigned long x)
 
 static inline int a_fetch_add(volatile int *x, int v)
 {
-    return atomic_fetchadd_int((unsigned int *)x, (unsigned int)v);
+    // Returns the PRIOR value (FreeBSD atomic_fetchadd_int semantics).
+    return __atomic_fetch_add(x, v, __ATOMIC_SEQ_CST);
 }
 
 static inline void a_crash()
