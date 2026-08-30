@@ -65,6 +65,20 @@ reschedule_from_interrupt:
         mov     sp, x3            //Restore new thread exception stack pointer
         msr     spsel, x2         //Restore new thread stack selector (1-SP_ELx,0-SP_EL0)
 
+        #fork COW: switch TTBR0_EL1 to the incoming thread's address space root
+        #(offset 56 in thread_state) when it differs from the live one.
+        ldr     x2, [x1, #56]     //x2 = new thread's ttbr0 (0 if fork inactive)
+        cbz     x2, 3f            //no explicit root recorded -> leave TTBR0 as is
+        mrs     x3, ttbr0_el1     //x3 = currently installed TTBR0 (phys | ASID)
+        cmp     x2, x3
+        b.eq    3f                //same address space -> no switch, no flush
+        msr     ttbr0_el1, x2     //install the incoming AS's TTBR0 root
+        isb
+        dsb     ish               //ensure the TTBR write is observed
+        tlbi    vmalle1           //flush TLB (ASID 0 shared across all AS roots)
+        dsb     ish
+        isb
+3:
         blr     x4                //Jump to the new thread pc
 
 1:

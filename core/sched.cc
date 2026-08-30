@@ -467,6 +467,14 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
 #ifdef __aarch64__
     switch_data.old_thread_state = &(p->_state);
     switch_data.new_thread_state = &(n->_state);
+#if CONF_fork
+    // fork COW: record the TTBR0_EL1 root of the incoming thread's address
+    // space so sched.S can install it at the context switch (only when it
+    // differs from the live TTBR0).  A forked child runs on its private cloned
+    // page-table root; every other thread runs on the AS0/kernel root.
+    n->_state.ttbr0 = mmu::pt_root_phys(n->_current_as ? n->_current_as
+                                                       : mmu::kernel_address_space());
+#endif
     return switch_data;
 }
 #else
