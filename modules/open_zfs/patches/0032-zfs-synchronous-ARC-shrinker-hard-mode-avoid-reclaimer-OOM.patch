@@ -32,12 +32,12 @@ against a full ARC benefits from the shrinker actually freeing memory before
 the reclaimer decides it cannot.
 
 NOTE: the two hunks below are anchored on the arc_reduce_target_size_noshrink()
-definition (module/zfs/arc.c) and the osv_arc_lowmem() body (arc_os.c) that
+definition (module/zfs/arc.c) and the osv_arc_lowmem() body (zfs_initialize_osv.c) that
 patch 0009 introduces. If the surrounding line numbers have drifted, apply with
 `git apply --recount` (or `--3way`); the anchor text is unique in both files.
 ---
- module/os/osv/zfs/arc_os.c |  9 +++++++--
- module/zfs/arc.c           | 25 +++++++++++++++++++++++++
+ module/os/osv/zfs/zfs_initialize_osv.c |  9 +++++++--
+ module/zfs/arc.c                       | 25 +++++++++++++++++++++++++
  2 files changed, 32 insertions(+), 2 deletions(-)
 
 diff --git a/module/zfs/arc.c b/module/zfs/arc.c
@@ -75,9 +75,9 @@ diff --git a/module/zfs/arc.c b/module/zfs/arc.c
  /*
   * Determine if the system is under memory pressure and is asking
   * to reclaim memory. A return value of B_TRUE indicates that the system
-diff --git a/module/os/osv/zfs/arc_os.c b/module/os/osv/zfs/arc_os.c
---- a/module/os/osv/zfs/arc_os.c
-+++ b/module/os/osv/zfs/arc_os.c
+diff --git a/module/os/osv/zfs/zfs_initialize_osv.c b/module/os/osv/zfs/zfs_initialize_osv.c
+--- a/module/os/osv/zfs/zfs_initialize_osv.c
++++ b/module/os/osv/zfs/zfs_initialize_osv.c
 @@ -1,4 +1,5 @@
  extern uint64_t arc_reduce_target_size_noshrink(uint64_t to_free);
 +extern uint64_t arc_reduce_target_size_shrink_sync(uint64_t to_free);
