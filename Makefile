@@ -185,8 +185,10 @@ endif
 ifeq (,$(wildcard musl/include))
     $(error Missing musl/ directory. Please run "git submodule update --init --recursive")
 endif
+ifeq ($(arch),x64)
 ifeq (,$(wildcard external/x64/acpica/source))
     $(error Missing external/x64/acpica/ directory. Please run "git submodule update --init --recursive")
+endif
 endif
 
 # This makefile wraps all commands with the $(quiet) or $(very-quiet) macros
