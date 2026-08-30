@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Sat, 30 Aug 2026 12:00:00 +0000
+Subject: [PATCH 32/32] zfs: make the ARC shrinker synchronous in hard mode so
+ the reclaimer does not OOM while eviction is still in flight
+
+OSv's memory reclaimer drives the ARC shrinker and, immediately after calling
+it, checks whether any memory came back (reclaimer::_do_reclaim ->
+wake_waiters); if none did it calls oom() and aborts the guest. The hard-mode
+shrinker (osv_arc_lowmem) only calls arc_reduce_target_size_noshrink(), which
+lowers arc_c and wakes the async arc_evict thread but returns immediately,
+before any pages are actually freed. Under a burst (a large PostgreSQL
+checkpoint stacking dirty buffers plus many backend allocations on top of the
+ARC) the async eviction lags the allocation demand, so the reclaimer sees zero
+freed bytes and OOMs even though eviction is in progress. This is the VU192
+out-of-memory abort seen at high concurrency.
+
+Add a synchronous variant, arc_reduce_target_size_shrink_sync(), that lowers
+the target the same way and then blocks in arc_wait_for_eviction() until the
+requested amount has actually been evicted (lax=B_TRUE so it returns early once
+the ARC is no longer overflowing, and honoring arc_c_min so it cannot wait for
+memory the ARC is not allowed to give up). The hard-mode shrinker now calls the
+synchronous variant, so when the reclaimer is about to OOM the shrinker does
+not return until real memory has come back; soft mode (osv_arc_sized_adjust)
+stays asynchronous and unchanged. The waiter used by arc_wait_for_eviction is
+already fork-COW-coherent (identity-heap, patch 0030), and the reclaimer thread
+is allowed to block (it already blocks on _blocked.wait), so this is safe to
+call from the shrinker context.
+
+This is a generic ZFS-on-OSv memory-pressure fix: any workload that allocates
+against a full ARC benefits from the shrinker actually freeing memory before
+the reclaimer decides it cannot.
+
+NOTE: the two hunks below are anchored on the arc_reduce_target_size_noshrink()
+definition (module/zfs/arc.c) and the osv_arc_lowmem() body (arc_os.c) that
+patch 0009 introduces. If the surrounding line numbers have drifted, apply with
+`git apply --recount` (or `--3way`); the anchor text is unique in both files.
+---
+ module/os/osv/zfs/arc_os.c |  9 +++++++--
+ module/zfs/arc.c           | 25 +++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/module/zfs/arc.c b/module/zfs/arc.c
+--- a/module/zfs/arc.c
++++ b/module/zfs/arc.c
+@@ -4799,6 +4799,31 @@ arc_reduce_target_size_noshrink(uint64_t to_free)
+ 	return (to_free);
+ }
+ 
++/*
++ * OSv: synchronous hard-mode shrink.  Lower the target and kick eviction the
++ * same way arc_reduce_target_size_noshrink() does, then block until the
++ * requested amount has actually been evicted.  Called only from the hard-mode
++ * ARC shrinker (reclaimer about to OOM), so the caller wants real freed memory
++ * before it returns, not just a lowered target.  lax=B_TRUE returns early once
++ * the ARC stops overflowing; use_reserve=B_FALSE.  The waiter is fork-COW-
++ * coherent (identity heap, patch 0030); the OSv reclaimer thread may block.
++ */
++uint64_t
++arc_reduce_target_size_shrink_sync(uint64_t to_free)
++{
++	uint64_t asize_before = aggsum_value(&arc_sums.arcstat_size);
++	uint64_t requested = arc_reduce_target_size_noshrink(to_free);
++
++	if (requested == 0)
++		return (0);
++
++	arc_wait_for_eviction(requested, B_TRUE, B_FALSE);
++
++	uint64_t asize_after = aggsum_value(&arc_sums.arcstat_size);
++	return (asize_before > asize_after ?
++	    (asize_before - asize_after) : 0);
++}
++
+ /*
+  * Determine if the system is under memory pressure and is asking
+  * to reclaim memory. A return value of B_TRUE indicates that the system
+diff --git a/module/os/osv/zfs/arc_os.c b/module/os/osv/zfs/arc_os.c
+--- a/module/os/osv/zfs/arc_os.c
++++ b/module/os/osv/zfs/arc_os.c
+@@ -1,4 +1,5 @@
+ extern uint64_t arc_reduce_target_size_noshrink(uint64_t to_free);
++extern uint64_t arc_reduce_target_size_shrink_sync(uint64_t to_free);
+ extern uint64_t arc_all_memory(void);
+ 
+ /* Called by the shrinker in "hard" mode (evict aggressively). */
+@@ -8,5 +9,9 @@ osv_arc_lowmem(void *arg, int howto)
+ 	uint64_t to_free = arc_all_memory() / 4;
+ 	if (to_free < (16UL << 20))
+ 		to_free = 16UL << 20;
+-	return ((size_t)arc_reduce_target_size_noshrink(to_free));
++	/*
++	 * Hard mode: the reclaimer is about to OOM.  Wait for eviction to
++	 * actually free memory rather than only lowering the target async.
++	 */
++	return ((size_t)arc_reduce_target_size_shrink_sync(to_free));
+ }
