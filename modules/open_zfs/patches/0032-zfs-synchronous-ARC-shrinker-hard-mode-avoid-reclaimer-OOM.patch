@@ -78,13 +78,10 @@ diff --git a/module/zfs/arc.c b/module/zfs/arc.c
 diff --git a/module/os/osv/zfs/zfs_initialize_osv.c b/module/os/osv/zfs/zfs_initialize_osv.c
 --- a/module/os/osv/zfs/zfs_initialize_osv.c
 +++ b/module/os/osv/zfs/zfs_initialize_osv.c
-@@ -1,4 +1,5 @@
+@@ -1,1 +1,2 @@
  extern uint64_t arc_reduce_target_size_noshrink(uint64_t to_free);
 +extern uint64_t arc_reduce_target_size_shrink_sync(uint64_t to_free);
- extern uint64_t arc_all_memory(void);
- 
- /* Called by the shrinker in "hard" mode (evict aggressively). */
-@@ -8,5 +9,9 @@ osv_arc_lowmem(void *arg, int howto)
+@@ -1,7 +1,11 @@ osv_arc_lowmem(void *arg, int howto)
  	uint64_t to_free = arc_all_memory() / 4;
  	if (to_free < (16UL << 20))
  		to_free = 16UL << 20;
