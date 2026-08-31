@@ -645,6 +645,21 @@ ssize_t reclaimer::bytes_until_normal(pressure curr)
 
 void oom()
 {
+    // Diagnostic for the high-VU contiguous-allocation wall: when we abort with
+    // memory still free, the failure is a large single free-range request that
+    // fragmentation cannot satisfy, not true exhaustion.  Report the largest
+    // free range vs total free so the failing request size is visible.
+    size_t total_free = stats::free();
+    size_t largest = 0;
+    {
+        // free_page_ranges_lock is held by the caller (_do_reclaim / wait()).
+        free_page_ranges.for_each([&] (page_range& fp) {
+            if (fp.size > largest) largest = fp.size;
+            return true;
+        });
+    }
+    debug_early_u64("OOM total_free_Kb=", total_free >> 10);
+    debug_early_u64("OOM largest_free_range_Kb=", largest >> 10);
     abort("Out of memory: could not reclaim any further. Current memory: %d Kb", stats::free() >> 10);
 }
 
