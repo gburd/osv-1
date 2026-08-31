@@ -1320,9 +1320,39 @@ void reclaimer::_do_reclaim()
         WITH_LOCK(free_page_ranges_lock) {
             if (target >= 0) {
                 // Wake up all waiters that are waiting and now have a chance to succeed.
-                // If we could not wake any, there is nothing really we can do.
                 if (!_oom_blocked.wake_waiters()) {
-                    oom();
+                    // One shrink pass did not free enough to wake any waiter.
+                    // Rather than OOM immediately, keep shrinking as long as
+                    // each pass still makes progress (frees memory): under a
+                    // burst (a large checkpoint plus many forked backends /
+                    // autovacuum workers) a single pass reclaims only a slice
+                    // (e.g. the ARC shrinker frees a fraction of the ARC per
+                    // call), so the first pass can come up short for a large
+                    // waiter even though the shrinkers still hold plenty of
+                    // evictable memory. Loop until either a waiter can be woken
+                    // or a full pass frees nothing at all -- only then is the
+                    // system genuinely out of reclaimable memory.  Bounded so a
+                    // pathological no-progress case still terminates in oom().
+                    bool woken = false;
+                    for (unsigned pass = 0; pass < _max_reclaim_passes; pass++) {
+                        size_t before = stats::free();
+                        DROP_LOCK(free_page_ranges_lock) {
+                            _shrinker_loop(target,
+                                [this] { return _oom_blocked.has_waiters(); });
+                        }
+                        if (_oom_blocked.wake_waiters()) {
+                            woken = true;
+                            break;
+                        }
+                        // No waiter woken; if this pass freed nothing, no
+                        // amount of further shrinking will help.
+                        if (stats::free() <= before) {
+                            break;
+                        }
+                    }
+                    if (!woken) {
+                        oom();
+                    }
                 }
             }
 
