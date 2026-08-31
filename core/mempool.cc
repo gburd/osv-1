@@ -643,23 +643,15 @@ ssize_t reclaimer::bytes_until_normal(pressure curr)
     }
 }
 
+// Defined after the free_page_ranges global (see below): reports the largest
+// contiguous free range and total free on the OOM path, so the high-VU
+// allocation wall (a large single-range request a fragmented heap cannot
+// satisfy) is distinguishable from true exhaustion in the serial log.
+static void oom_report_fragmentation();
+
 void oom()
 {
-    // Diagnostic for the high-VU contiguous-allocation wall: when we abort with
-    // memory still free, the failure is a large single free-range request that
-    // fragmentation cannot satisfy, not true exhaustion.  Report the largest
-    // free range vs total free so the failing request size is visible.
-    size_t total_free = stats::free();
-    size_t largest = 0;
-    {
-        // free_page_ranges_lock is held by the caller (_do_reclaim / wait()).
-        free_page_ranges.for_each([&] (page_range& fp) {
-            if (fp.size > largest) largest = fp.size;
-            return true;
-        });
-    }
-    debug_early_u64("OOM total_free_Kb=", total_free >> 10);
-    debug_early_u64("OOM largest_free_range_Kb=", largest >> 10);
+    oom_report_fragmentation();
     abort("Out of memory: could not reclaim any further. Current memory: %d Kb", stats::free() >> 10);
 }
 
@@ -993,6 +985,27 @@ void page_range_allocator::for_each(unsigned min_order, Func f)
             }
         }
     }
+}
+
+// OOM-path diagnostic: report total free vs the largest single contiguous free
+// range.  When the guest aborts with a large amount still free, the failure is
+// a large single-range (contiguous) request that a fragmented heap cannot
+// satisfy, not true exhaustion; the largest-free-range value makes that
+// distinguishable in the serial log.  Defined here, after the free_page_ranges
+// global and page_range_allocator::for_each, so the type is complete.  Callers
+// hold free_page_ranges_lock (oom() is reached from _do_reclaim / wait()).
+static void oom_report_fragmentation()
+{
+    size_t total_free = stats::free();
+    size_t largest = 0;
+    free_page_ranges.for_each([&] (page_range& fp) {
+        if (fp.size > largest) {
+            largest = fp.size;
+        }
+        return true;
+    });
+    debug_early_u64("OOM total_free_Kb=", total_free >> 10);
+    debug_early_u64("OOM largest_free_range_Kb=", largest >> 10);
 }
 
 namespace stats {
