@@ -677,6 +677,15 @@ ext_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
         if (ext4_dir_en_get_inode(it.curr) != 0) {
             memset(dir->d_name, 0, sizeof(dir->d_name));
             uint16_t name_length = ext4_dir_en_get_name_len(&fs->sb, it.curr);
+            // On an old-rev (rev0, minor<5) image ext4_dir_en_get_name_len()
+            // folds in name_length_high, so it can return up to entry_len-8
+            // (~block_size, ~4 KiB) while d_name is only 256 bytes.  lwext4's
+            // ext4_dir_iterator_set() only bounds the name against the entry
+            // length, not against d_name, so a crafted rev0 directory entry
+            // memcpy'd here would overflow the fixed-size d_name.  Clamp it.
+            if (name_length >= sizeof(dir->d_name)) {
+                name_length = sizeof(dir->d_name) - 1;
+            }
             memcpy(dir->d_name, it.curr->name, name_length);
             ext_debug("readdir directory with i-node=%ld at offset:%ld => entry name:%s\n", dvp->v_ino, file_offset(fp), dir->d_name);
 
@@ -1386,7 +1395,32 @@ ext_readlink(vnode_t *vp, uio_t *uio)
         return uiomove(content, fsize, uio);
     } else {
         uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+        // A slow symlink's target lives in exactly one block: ext_fsymlink_set()
+        // rejects size > block_size when creating one, and a path is bounded by
+        // PATH_MAX anyway.  But @fsize here is ext4_inode_get_size(), read raw
+        // off disk and fully attacker-controlled on a crafted image, and it is
+        // passed as the read *size* into a block_size heap buffer.  Unclamped,
+        // ext_internal_read() writes up to @fsize bytes (2^64-1) into a
+        // block_size allocation: kernel heap overflow.  Reject the malformed
+        // inode instead (EIO, matching how rofs_readlink() reports corrupt
+        // on-disk symlink metadata).
+        if (fsize > block_size) {
+            return EIO;
+        }
+        // ext_internal_read() clamps its size to (fsize - offset) in unsigned
+        // arithmetic, so an offset at or past EOF underflows that subtraction
+        // and the clamp silently keeps the full @fsize while the block index is
+        // computed from the out-of-range offset -- a read of blocks the symlink
+        // does not own.  With the guard above that is no longer an overflow,
+        // only bogus content, so reject it explicitly.  Both in-tree callers
+        // (sys_readlink, read_link) pass offset 0, so this is defence in depth.
+        if ((uint64_t)uio->uio_offset >= fsize) {
+            return 0;
+        }
         void *buf = malloc(block_size);
+        if (!buf) {
+            return ENOMEM;
+        }
         size_t read_count = 0;
         int ret = ext_internal_read(fs, &inode_ref._ref, uio->uio_offset, buf, fsize, &read_count);
         if (ret) {
