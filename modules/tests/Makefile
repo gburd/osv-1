@@ -112,6 +112,7 @@ zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 	tst-concurrent-read.so tst-solaris-taskq.so
 
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
+ext-only-tests += tst-ext-readlink.so
 
 specific-fs-tests := $($(fs_type)-only-tests)
 
@@ -192,8 +193,6 @@ tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
 endif
 
 tests += testrunner.so
-
-tests += tst-ext-readlink.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
