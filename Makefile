@@ -2233,6 +2233,18 @@ bootfs_dep += $(out)/modules/libext/libext.so
 else
 ifeq ($(fs),zfs)
 bootfs_dep += $(tools:%=$(out)/%) $(out)/libsolaris.so
+else
+# bootfs.manifest.skel names /usr/lib/fs/libsolaris.so unconditionally, so the
+# ZFS library is part of bootfs for every root filesystem, not only fs=zfs.  Any
+# ZFS-enabled build therefore has to list it (and the tools that go with it) as a
+# prerequisite here, or mkbootfs runs before it exists: serially that is a hard
+# failure on the missing file, and under -j it is a race that shows up as an
+# intermittent build break.  Key on the ZFS build itself rather than on the root
+# filesystem choice.  A conf_zfs=openzfs image with, say, fs=ramfs and a runtime
+# data pool is a normal configuration and hits exactly this.
+ifdef conf_zfs_openzfs
+bootfs_dep += $(tools:%=$(out)/%) $(out)/libsolaris.so
+endif
 endif
 endif
 $(out)/bootfs.bin: $(bootfs_dep)
