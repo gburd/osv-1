@@ -430,6 +430,12 @@ struct fork_phase_stats {
     u64 n_cow = 0;       // leaf PTEs write-protected COW
     u64 n_lookups = 0;   // addr_is_shared/privatize calls
     u64 n_share_ranges = 0, n_priv_ranges = 0, n_threads = 0;
+    // ptwalk decomposition (residual-floor characterisation)
+    u64 n_tables = 0;      // intermediate+leaf tables allocated (alloc_page+memset)
+    u64 t_tblalloc = 0;    // cycles in alloc_page+memset for those tables
+    u64 n_priv_copies = 0; // privatized pages (alloc_page + 4K memcpy)
+    u64 t_privcopy = 0;    // cycles in those copies
+    u64 n_lookup_true = 0; // lookups that HIT a range
 };
 static fork_phase_stats *cur_fork_stats;   // set only by clone_address_space
 
@@ -449,12 +455,26 @@ static fork_phase_stats *cur_fork_stats;   // set only by clone_address_space
 // flush.  Merging touching/overlapping ranges preserves the predicate exactly
 // (union of intervals is what the linear scan tested).  Half-open [start,end)
 // throughout, matching the original comparison (va >= start && va < end).
+// CONCURRENCY: these have exactly the same scope and lifetime as the existing
+// cow_share_ranges / cow_privatize_ranges globals -- written only by a thread
+// inside clone_address_space between setting and clearing those pointers, under
+// the parent's vmas_mutex->for_write().  So they are neither more nor less
+// protected than the range pointers they cache, and add no new sharing.  (Two
+// forks from DIFFERENT parent address spaces take different vmas_mutex and so
+// could already race on cow_share_ranges itself; that is pre-existing, and under
+// PostgreSQL only the postmaster forks, so every fork serializes on AS0's lock.)
+static cow_range memo_share{1, 0};      // empty (start > end) == invalid
+static cow_range memo_priv{1, 0};
+
 static std::vector<cow_range> cow_share_sorted;
 static std::vector<cow_range> cow_privatize_sorted;
 
 static void build_sorted_ranges(const std::vector<cow_range> *src,
                                 std::vector<cow_range> &dst)
 {
+    // Invalidate both memos: the range sets are about to change.
+    memo_share = cow_range{1, 0};
+    memo_priv = cow_range{1, 0};
     dst.clear();
     if (!src || src->empty()) return;
     dst.reserve(src->size());
@@ -478,10 +498,18 @@ static void build_sorted_ranges(const std::vector<cow_range> *src,
     dst.resize(dst.empty() ? 0 : w + 1);
 }
 
+// Memo of the last range that matched, per sorted set.  Pure-function cache: a
+// hit returns exactly what the search would have returned, a miss falls through
+// to it.  Reset per fork in build_sorted_ranges.  Cuts the dominant per-PTE cost
+// because the clone walk ascends VAs and one MAP_SHARED range (e.g. an 8 GB
+// shared_buffers segment) covers millions of consecutive PTEs.
 // Exact same predicate as the linear scan, in O(log n) on a sorted+disjoint set.
 static inline bool sorted_ranges_contain(const std::vector<cow_range> &v,
-                                         uintptr_t va)
+                                         uintptr_t va, cow_range &memo)
 {
+    if (va >= memo.start && va < memo.end) {
+        return true;
+    }
     // First range with start > va; the candidate is the one before it.
     auto it = std::upper_bound(v.begin(), v.end(), va,
                                [](uintptr_t a, const cow_range &r) {
@@ -489,7 +517,11 @@ static inline bool sorted_ranges_contain(const std::vector<cow_range> &v,
                                });
     if (it == v.begin()) return false;
     --it;
-    return va >= it->start && va < it->end;
+    if (va >= it->start && va < it->end) {
+        memo = *it;
+        return true;
+    }
+    return false;
 }
 
 static bool addr_is_shared(uintptr_t va)
@@ -497,7 +529,9 @@ static bool addr_is_shared(uintptr_t va)
     if (cur_fork_stats) cur_fork_stats->n_lookups++;
     if (!cow_share_ranges) return false;
     if (fork_range_bsearch_enabled()) {
-        return sorted_ranges_contain(cow_share_sorted, va);
+        bool r = sorted_ranges_contain(cow_share_sorted, va, memo_share);
+        if (r && cur_fork_stats) cur_fork_stats->n_lookup_true++;
+        return r;
     }
     for (auto &r : *cow_share_ranges) {
         if (va >= r.start && va < r.end) return true;
@@ -509,7 +543,7 @@ static bool addr_is_privatize(uintptr_t va)
 {
     if (!cow_privatize_ranges) return false;
     if (fork_range_bsearch_enabled()) {
-        return sorted_ranges_contain(cow_privatize_sorted, va);
+        return sorted_ranges_contain(cow_privatize_sorted, va, memo_priv);
     }
     for (auto &r : *cow_privatize_ranges) {
         if (va >= r.start && va < r.end) return true;
@@ -537,8 +571,13 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             // untouched -- only the child diverges -- so the parent keeps
             // writing its own stack with irqs off and never faults, and the
             // child owns/frees this page on address-space teardown.
+            u64 _tp = cur_fork_stats ? processor::ticks() : 0;
             void *child_page = memory::alloc_page();
             memcpy(child_page, phys_to_virt(ppte.addr()), page_size);
+            if (cur_fork_stats) {
+                cur_fork_stats->t_privcopy += processor::ticks() - _tp;
+                cur_fork_stats->n_priv_copies++;
+            }
             pt_element<0> pv = ppte;
             if (pte_is_cow(pv)) {
                 pv = pte_mark_cow(pv, false);
@@ -606,8 +645,13 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
             split_large_page(hw_ptep<1>::force(&parent_pt[i]));
             ppte = parent_pt[i]; // re-read: now a non-large intermediate pte
         }
+        u64 _ta = cur_fork_stats ? processor::ticks() : 0;
         void *child_sub = memory::alloc_page();
         memset(child_sub, 0, page_size);
+        if (cur_fork_stats) {
+            cur_fork_stats->t_tblalloc += processor::ticks() - _ta;
+            cur_fork_stats->n_tables++;
+        }
         auto parent_sub = phys_cast<pt_element<0>>(ppte.next_pt_addr());
         clone_pt_level0(parent_sub, static_cast<pt_element<0>*>(child_sub),
                         base_virt + (uintptr_t)i * step);
@@ -891,6 +935,11 @@ address_space *clone_address_space(address_space *parent)
         debug_early_u64("  n_lookups=", fst.n_lookups);
         debug_early_u64("  n_share_r=", fst.n_share_ranges);
         debug_early_u64("  n_threads=", fst.n_threads);
+        debug_early_u64("  n_tables=", fst.n_tables);
+        debug_early_u64("  tblalloc_kc=", fst.t_tblalloc / 1000);
+        debug_early_u64("  n_privcp=", fst.n_priv_copies);
+        debug_early_u64("  privcp_kc=", fst.t_privcopy / 1000);
+        debug_early_u64("  n_lk_true=", fst.n_lookup_true);
     }
     return child;
 }
