@@ -26,7 +26,7 @@ default; a future zfs_arc_max wired to the boot cmdline could override it.
 diff --git a/module/os/osv/zfs/arc_os.c b/module/os/osv/zfs/arc_os.c
 --- a/module/os/osv/zfs/arc_os.c
 +++ b/module/os/osv/zfs/arc_os.c
-@@ -100,6 +100,14 @@ arc_default_max(uint64_t min, uint64_t allmem)
+@@ -100,5 +100,15 @@ arc_default_max(uint64_t min, uint64_t allmem)
  	else
  		size = allmem / 8;
  
