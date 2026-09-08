@@ -495,6 +495,16 @@ void file::load_segment(const Elf64_Phdr& phdr)
         const char *e = getenv("OSV_FORK_SHARE_DLOPEN");
         return !(e && e[0] == '0');
     }();
+    // Only the FIRST load of this object registers its shared ranges.  A remap
+    // into an additional address space (see
+    // object::remap_segments_in_current_address_space) maps the same VAs, which
+    // are already registered; re-registering would grow the process-global
+    // range vector without bound, and that growth would realloc/free on the
+    // calling address space's fork arena rather than the shared kernel heap.
+    if (_segments_registered_fork_shared) {
+        elf_debug("Re-mapped PT_LOAD segment at: %018p of size: 0x%x\n", _base + vstart, filesz);
+        return;
+    }
     bool is_libsolaris =
         _pathname.size() >= 13 &&
         _pathname.compare(_pathname.size() - 13, 13, "libsolaris.so") == 0;
@@ -556,6 +566,96 @@ void object::load_segments()
         }
     }
 }
+
+#if CONF_fork
+// Is this object's first PT_LOAD segment mapped in the address space of the
+// calling thread?  Segment mappings are per-address-space (see the note in
+// program::load_object), so a cached object may be fully mapped in one AS and
+// entirely absent from another.
+bool object::mapped_in_current_address_space()
+{
+    // The kernel's own object is a memory_image (no backing file, base 0) and
+    // is mapped by the boot path in every address space; it must never be
+    // re-mapped or re-read here.
+    if (is_core() || !has_backing_file()) {
+        return true;
+    }
+    for (auto& phdr : _phdrs) {
+        if (phdr.p_type != PT_LOAD) {
+            continue;
+        }
+        ulong vstart = align_down(phdr.p_vaddr, mmu::page_size);
+        return mmu::ismapped(_base + vstart, mmu::page_size);
+    }
+    // No PT_LOAD (e.g. the kernel memory_image): nothing to map.
+    return true;
+}
+
+// Map this already-loaded object's segments into the CURRENT address space at
+// its existing base, so a cached object shared through program::_files is
+// usable from an address space that did not load it.  load_segment() maps
+// mmap_fixed at _base + p_vaddr, so this reproduces exactly the original
+// layout.  Because a re-mapped writable segment comes back with its
+// unrelocated on-disk contents, this also re-runs the object's relocations,
+// permission fixups and constructors for this address space (see below).
+void object::remap_segments_in_current_address_space()
+{
+    // Mark the object as already-registered so load_segment() below skips the
+    // one-time, per-object fork-shared range registration.
+    _segments_registered_fork_shared = true;
+    for (unsigned i = 0; i < _ehdr.e_phnum; ++i) {
+        auto &phdr = _phdrs[i];
+        if (phdr.p_type == PT_LOAD) {
+            load_segment(phdr);
+        }
+    }
+    // Mapping the segments is not enough to make the object usable here.  A
+    // WRITABLE segment (.data/.got/.got.plt) is mapped MAP_PRIVATE from the
+    // file, so re-mapping it in this address space restores its ORIGINAL,
+    // UNRELOCATED on-disk contents: the GOT entries are zero and the PLT jump
+    // slots point at the raw resolver stubs.  Calling a function from the
+    // object then dereferences a NULL GOT entry (observed as a fault at
+    // address 0 right after a successful dlsym).  Relocations are recorded
+    // relative to _base, which is unchanged, so simply re-running them
+    // rebuilds an identical, correct GOT for this address space.
+    relocate();
+    // Re-apply the RELRO / non-writable-text protections that fix_permissions()
+    // applied at first load, so this address space ends up with the same
+    // permissions rather than the raw PT_LOAD ones.  Must run AFTER relocate(),
+    // which writes to the RELRO region.
+    fix_permissions();
+    // Finally, the object's constructors (DT_INIT / DT_INIT_ARRAY) have run
+    // only in the address space that first loaded it.  Its writable data in
+    // THIS address space is a fresh private copy from the file, so any state a
+    // constructor established is absent here: run them for this address space
+    // too.  _init_called is deliberately left as-is: it tracks whether the
+    // object's fini functions must run, which stays a per-object property.
+    run_init_funcs_for_new_address_space();
+}
+
+// Run the object's DT_INIT / DT_INIT_ARRAY functions again for an address space
+// that has just re-mapped its segments.  Kept separate from run_init_funcs()
+// so the normal load path and its _init_called bookkeeping are untouched.
+void object::run_init_funcs_for_new_address_space()
+{
+    if (is_statically_linked_executable() || is_linux_dl()) {
+        return;
+    }
+    if (dynamic_exists(DT_INIT)) {
+        auto func = dynamic_ptr<void>(DT_INIT);
+        if (func) {
+            reinterpret_cast<void(*)(int, char**)>(func)(0, nullptr);
+        }
+    }
+    if (dynamic_exists(DT_INIT_ARRAY)) {
+        auto funcs = dynamic_ptr<void(*)(int, char**)>(DT_INIT_ARRAY);
+        auto nr = dynamic_val(DT_INIT_ARRAYSZ) / sizeof(*funcs);
+        for (auto i = 0u; i < nr; ++i) {
+            funcs[i](0, nullptr);
+        }
+    }
+}
+#endif
 
 void object::process_headers()
 {
@@ -1600,6 +1700,31 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
     if (_files.count(name)) {
         auto obj = _files[name].lock();
         if (obj) {
+#if CONF_fork
+            // The object cache (_files) and the module list are process-GLOBAL,
+            // but an object's PT_LOAD segments are mapped into whichever
+            // ADDRESS SPACE was current when it was first loaded (map_file
+            // inserts into cur_vma_list(), i.e. the current AS's own vma_list).
+            // Under fork() each child gets its own address space whose
+            // application PML4 slots (and vma_list) are private, so a cached
+            // object loaded by a DIFFERENT address space has NO mapping here:
+            // returning it hands the caller a _dynamic_table / symbol pointer
+            // into a VA that is unmapped in this AS, and the first dereference
+            // (elf::object::dynamic_tag via dlsym -> lookup_symbol_deep) takes
+            // a fatal "page fault outside application".
+            //
+            // Re-establish this object's segment mappings in the CURRENT
+            // address space at the SAME base VA it already has, so the shared
+            // object's _base / _dynamic_table / symbol addresses stay valid
+            // process-wide.  The segments are file-backed and mapped
+            // mmap_fixed, so re-mapping is idempotent per address space and
+            // costs no extra physical memory for read-only/exec text: the page
+            // cache hands out the same physical pages for the same file
+            // offsets.
+            if (!obj->mapped_in_current_address_space()) {
+                obj->remap_segments_in_current_address_space();
+            }
+#endif
             return obj;
         }
     }
