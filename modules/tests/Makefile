@@ -80,6 +80,10 @@ $(out)/tests/tst-fork-vislookup.so: \
 		$(out)/tests/libforksym.so
 	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ tests/tst-fork-vislookup.o $(LIBS) tests/libforksym.so, LD tests/tst-fork-vislookup.so)
 
+# tst-fork-dlopen-as dlopen()s libdlopenas.so at runtime (it must NOT be linked
+# against it), so the test decides which address space loads it first.
+$(out)/tests/tst-fork-dlopen-as.so: $(out)/tests/libdlopenas.so
+
 $(out)/tests/tst-elf-circular-reloc.so: \
 		$(out)/tests/tst-elf-circular-reloc.o \
 		$(out)/tests/lib-circular-reloc1.so \
@@ -169,6 +173,8 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-smoke.so tst-bsd-evh.
 	tst-fork-symlookup.so \
 	tst-fork-vislookup.so \
 	libforksym.so \
+	tst-fork-dlopen-as.so \
+	libdlopenas.so \
 	tst-fork-child-mmap.so \
 	tst-fork-file-mmap.so \
 	tst-fork-socket.so \
