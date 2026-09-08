@@ -373,6 +373,17 @@ public:
     Elf64_Sym* lookup_symbol(const char* name, bool self_lookup);
     symbol_module lookup_symbol_deep(const char* name);
     void load_segments();
+#if CONF_fork
+    bool mapped_in_current_address_space();
+    // False for objects with no backing file (the kernel memory_image), whose
+    // segments cannot be re-read or re-mapped per address space.
+    virtual bool has_backing_file() const { return false; }
+    // Set once this object's fork-shared module ranges have been registered, so
+    // a remap into another address space does not register them again.
+    bool _segments_registered_fork_shared = false;
+    void remap_segments_in_current_address_space();
+    void run_init_funcs_for_new_address_space();
+#endif
     void process_headers();
     void unload_segments();
     void fix_permissions();
@@ -534,6 +545,7 @@ class file : public object {
 public:
     explicit file(program& prog, fileref f, std::string pathname);
     virtual ~file();
+    virtual bool has_backing_file() const override { return true; }
     void load_program_headers();
     void load_elf_header();
 protected:
