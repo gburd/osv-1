@@ -78,7 +78,7 @@ port::port(u32 pnr, hba *hba)
 void port::reset()
 {
     // Disable FIS and Command
-    for (;;) {
+    for (int i = 0; i < PORT_POLL_LIMIT; i++) {
         auto cmd = port_readl(PORT_CMD);
         if (!(cmd & (PORT_CMD_FRE | PORT_CMD_FR | PORT_CMD_ST | PORT_CMD_CR)))
             break;
@@ -129,7 +129,10 @@ void port::setup()
     port_writel(PORT_SERR, err);
 
     // Wait for Device Becoming Ready
-    wait_device_ready();
+    if (!wait_device_ready()) {
+        _linkup = false;
+        return;
+    }
 
     // Start Device
     cmd |= PORT_CMD_ST;
@@ -151,24 +154,36 @@ void port::enable_irq()
     port_writel(PORT_IE, val);
 }
 
-void port::wait_device_ready()
+bool port::wait_device_ready()
 {
     // Wait for Device Becoming Ready
-    for (;;) {
+    for (int i = 0; i < PORT_POLL_LIMIT; i++) {
         auto tfd = port_readl(PORT_TFD);
         if (!(tfd & (PORT_TFD_BSY | PORT_TFD_DRQ)))
-            break;
+            return true;
+        if (tfd & PORT_TFD_ERR) {
+            debugf("AHCI: port %d device reported an error while becoming "
+                   "ready, PxTFD=0x%08x\n", _pnr, tfd);
+            return false;
+        }
     }
+    debugf("AHCI: port %d timed out waiting for the device to become ready, "
+           "PxTFD=0x%08x\n", _pnr, port_readl(PORT_TFD));
+    return false;
 }
 
-void port::wait_ci_ready(u8 slot)
+bool port::wait_ci_ready(u8 slot)
 {
     // Wait for Command Issue Becoming Ready
-    for (;;) {
+    for (int i = 0; i < PORT_POLL_LIMIT; i++) {
         auto ci = port_readl(PORT_CI);
         if (!(ci & (1U << slot)))
-            break;
+            return true;
     }
+    debugf("AHCI: port %d timed out waiting for slot %d to retire, "
+           "PxCI=0x%08x PxTFD=0x%08x\n", _pnr, slot,
+           port_readl(PORT_CI), port_readl(PORT_TFD));
+    return false;
 }
 
 int port::send_cmd(u8 slot, int iswrite, void *buffer, u32 bsize)
@@ -218,7 +233,7 @@ bool port::wait_cmd_poll(u8 slot)
     auto host_is = _hba->hba_readl(HOST_IS);
     bool ok = false;
 
-    for (;;) {
+    for (int i = 0; i < PORT_POLL_LIMIT; i++) {
         auto is = port_readl(PORT_IS);
         if (!is) {
             continue;
@@ -241,8 +256,9 @@ bool port::wait_cmd_poll(u8 slot)
 
         port_writel(PORT_IS, is);
 
-        wait_device_ready();
-        wait_ci_ready(slot);
+        if (!wait_device_ready() || !wait_ci_ready(slot)) {
+            break;
+        }
 
         if (is & PORT_IS_PSS) {
             auto error = _recv_fis->psfis[3];
@@ -501,7 +517,9 @@ hba::hba(pci::device& pci_dev)
     _driver_name = "ahci";
     parse_pci_config();
 
-    reset();
+    if (!reset()) {
+        return;
+    }
     setup();
     enable_irq();
     scan();
@@ -515,7 +533,7 @@ hba::~hba()
     }
 }
 
-void hba::reset()
+bool hba::reset()
 {
     auto val = hba_readl(HOST_GHC);
 
@@ -530,12 +548,17 @@ void hba::reset()
     val |= HOST_GHC_HR;
     hba_writel(HOST_GHC, val);
 
-    // Wait reset of HBA to finish
-    for (;;) {
+    // Wait reset of HBA to finish. HR is self-clearing and the reset has to
+    // complete within one second (AHCI 1.3.1, section 10.4.3), so a controller
+    // that never clears it is broken and must not hold up the boot.
+    for (int i = 0; i < PORT_POLL_LIMIT; i++) {
         val = hba_readl(HOST_GHC);
         if ((val & HOST_GHC_HR) == 0x00)
-            break;
+            return true;
     }
+    debugf("AHCI: HBA reset did not complete, HOST_GHC=0x%08x\n",
+           hba_readl(HOST_GHC));
+    return false;
 }
 
 void hba::setup()

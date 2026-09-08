@@ -114,6 +114,13 @@ enum port_reg_ssts_bits {
     PORT_SSTS_RETRY     = 0x0F,
 };
 
+// Upper bound on the number of MMIO polls spent waiting for a register bit to
+// settle. AHCI defines no completion deadline for an individual command, so
+// any such wait has to be bounded by the driver: a device that never sets the
+// awaited bit must fail one command rather than wedge the kernel. Sized
+// generously so that a healthy but slow device is never given up on.
+enum { PORT_POLL_LIMIT = 20000000 };
+
 // CIFS: Command FIS
 struct cfis {
     // DWORD 0
@@ -204,7 +211,7 @@ public:
     void dump_config();
     bool ack_irq();
     void enable_irq();
-    void reset();
+    bool reset();
     void setup();
     void scan();
     void add_port(u32 pnr, port * port);
@@ -242,8 +249,8 @@ public:
     void disk_rw(struct bio *bio, bool iswrite);
     int make_request(struct bio *bio);
     void enable_irq();
-    void wait_device_ready();
-    void wait_ci_ready(u8 slot);
+    bool wait_device_ready();
+    bool wait_ci_ready(u8 slot);
     void wakeup() { _irq_thread->wake_with_irq_disabled(); }
     bool linkup() { return _linkup; }
 
