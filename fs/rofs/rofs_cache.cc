@@ -14,6 +14,33 @@
 #include <osv/debug.h>
 #include <osv/sched.hh>
 #include <sys/mman.h>
+#include <osv/fork_arena.hh>
+#include <osv/mmu.hh>
+
+#if CONF_fork
+// The rofs file cache is process-GLOBAL kernel infrastructure (one
+// global_file_cache map, one file_cache per inode, segments underneath), but it
+// is populated LAZILY by whichever thread happens to read a file first.  Under
+// fork() that thread may be a child backend, whose allocations land in the COW
+// fork arena, so a node written by one address space is garbage in another --
+// and the first free from a different address space (a rehash of the global map,
+// or cache teardown from AS0) trips fork_arena::free()'s chunk-magic assert and
+// aborts the whole VM.  Observed as:
+//
+//   Assertion failed: h->magic == chunk_magic (core/fork_arena.cc: recover: 257)
+//   ... _Hashtable<rofs::rofs_cache_key, ...>::_M_rehash
+//   ... rofs::cache_read -> vfs_file::read -> getnameinfo
+//
+// under sustained concurrent load (many PostgreSQL backends resolving client
+// addresses, i.e. reading /etc/* off the rofs root).  Force every allocation
+// made on behalf of this shared cache onto the identity kernel heap, so all
+// address spaces share ONE coherent set of nodes -- the same rule already
+// applied to struct file, f_epolls, thread objects and the epoll containers
+// (see the note in core/epoll.cc).  A no-op in a non-fork build.
+#define ROFS_CACHE_KH() fork_arena::kernel_heap_scope _rofs_cache_kh
+#else
+#define ROFS_CACHE_KH() do {} while (0)
+#endif
 
 /*
  * From cache perspective let us divide each file into sequence of contiguous 32K segments.
@@ -271,6 +298,12 @@ plan_cache_transactions(struct file_cache *cache, struct uio *uio) {
 // at a time and no thread synchronization is needed.
 int
 cache_read(struct rofs_inode *inode, struct device *device, struct rofs_super_block *sb, struct uio *uio) {
+    // Everything this function allocates on behalf of the process-global rofs
+    // cache -- the global_file_cache map nodes (incl. a rehash), the per-inode
+    // file_cache, its segments_by_index nodes, the file_cache_segment objects and
+    // the transaction vector -- must live on the identity kernel heap rather than
+    // the calling address space's COW fork arena.  See ROFS_CACHE_KH() above.
+    ROFS_CACHE_KH();
     //
     // Find existing one or create new file cache
     struct file_cache *cache = get_or_create_file_cache(inode, sb);
