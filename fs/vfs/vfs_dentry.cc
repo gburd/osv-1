@@ -200,6 +200,25 @@ dentry_move(struct dentry *dp, struct dentry *parent_dp, char *path)
 {
     struct dentry *old_pdp = dp->d_parent;
     char *old_path = dp->d_path;
+    // Duplicate the new path BEFORE taking dentry_hash_lock.  strdup() can
+    // block in the page allocator, and dentry_hash_lock is a leaf lock held
+    // by every lookup in the system; sleeping under it stalls all VFS name
+    // resolution for the duration.  Nothing here needs the lock.
+    //
+    // d_path is shared dentry-cache infrastructure inherited across fork(), so
+    // keep it off the COW fork arena and in the kernel heap: a rename from a
+    // forked backend (e.g. PG WAL-segment recycling during a checkpoint) must
+    // not leave d_path in that backend's COW-private arena, or a later drele()
+    // from AS0/another backend faults on the diverged header.
+#if CONF_fork
+    char *new_path;
+    {
+        fork_arena::kernel_heap_scope kh;
+        new_path = strdup(path);
+    }
+#else
+    char *new_path = strdup(path);
+#endif
 
     if (old_pdp) {
         WITH_LOCK(old_pdp->d_lock) {
@@ -222,20 +241,9 @@ dentry_move(struct dentry *dp, struct dentry *parent_dp, char *path)
         dentry_children_remove(dp);
         // Remove dp with outdated hash info from the hashtable.
         LIST_REMOVE(dp, d_link);
-        // Update dp.  Like dentry_alloc, d_path is shared dentry-cache
-        // infrastructure inherited across fork(); keep it off the COW fork
-        // arena so it stays freeable from any address space -- a rename from
-        // a forked backend (e.g. PG WAL-segment recycling during a checkpoint)
-        // must not leave d_path in that backend's COW-private arena, or a
-        // later drele() from AS0/another backend faults on the diverged header.
-#if CONF_fork
-        {
-            fork_arena::kernel_heap_scope kh;
-            dp->d_path = strdup(path);
-        }
-#else
-        dp->d_path = strdup(path);
-#endif
+        // Update dp with the path duplicated above, outside the lock and in
+        // the kernel heap (see the strdup at the top of this function).
+        dp->d_path = new_path;
         dp->d_parent = parent_dp;
         // Insert dp updated hash info into the hashtable.
         LIST_INSERT_HEAD(&dentry_hash_table[dentry_hash(dp->d_mount, path)],
