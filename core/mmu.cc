@@ -425,6 +425,19 @@ static bool fork_range_bsearch_enabled()
     }
     return v != 0;
 }
+// OSV_FORK_LARGE_SHARE=0 : split writable MAP_SHARED 2 MB large pages into 512
+// 4 K PTEs during the clone walk (the original behaviour), instead of sharing
+// the large PTE verbatim.  Same-binary A/B for the large-page fast path.
+static bool fork_large_share_enabled()
+{
+    static std::atomic<int> cached{-1};
+    int v = cached.load(std::memory_order_relaxed);
+    if (v < 0) {
+        v = env_flag_on("OSV_FORK_LARGE_SHARE", true) ? 1 : 0;
+        cached.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
+}
 
 // Per-fork phase accounting (only written by the single forking thread while it
 // holds the parent's vmas_mutex, plus its own locals -- no cross-thread state).
@@ -438,6 +451,7 @@ struct fork_phase_stats {
     u64 n_ptes = 0;      // leaf PTEs examined
     u64 n_cow = 0;       // leaf PTEs write-protected COW
     u64 n_lookups = 0;   // addr_is_shared/privatize calls
+    u64 n_large_shared = 0; // writable 2 MB pages shared verbatim (not split)
     u64 n_share_ranges = 0, n_priv_ranges = 0, n_threads = 0;
     // ptwalk decomposition (residual-floor characterisation)
     u64 n_tables = 0;      // intermediate+leaf tables allocated (alloc_page+memset)
@@ -560,6 +574,45 @@ static bool addr_is_privatize(uintptr_t va)
     return false;
 }
 
+// Is the WHOLE half-open range [start,end) inside one "share, do not COW" range,
+// and clear of every privatize range?  Used to decide whether a writable 2 MB
+// large page can be shared verbatim instead of split into 512 4 K PTEs.
+//
+// The share set is sorted and coalesced (build_sorted_ranges), so full
+// containment is: the one candidate range that could contain `start` also
+// reaches `end`.  Privatize ranges are thread stacks, which need genuinely
+// private per-child copies, so ANY overlap disqualifies the fast path and falls
+// back to the split.  Conservative on purpose: a false negative only costs the
+// old split cost, while a false positive would share a page that must diverge.
+static bool range_is_wholly_shared(uintptr_t start, uintptr_t end)
+{
+    if (!cow_share_ranges || !fork_range_bsearch_enabled()) return false;
+    if (!fork_large_share_enabled()) return false;
+    const auto &sv = cow_share_sorted;
+    auto it = std::upper_bound(sv.begin(), sv.end(), start,
+                               [](uintptr_t a, const cow_range &r) {
+                                   return a < r.start;
+                               });
+    if (it == sv.begin()) return false;
+    --it;
+    if (!(start >= it->start && end <= it->end)) return false;
+
+    // No overlap with any privatize range.  Same trick: the only candidate that
+    // can overlap [start,end) is the last one starting at or before `end`.
+    const auto &pv = cow_privatize_sorted;
+    if (!pv.empty()) {
+        auto pit = std::upper_bound(pv.begin(), pv.end(), end,
+                                    [](uintptr_t a, const cow_range &r) {
+                                        return a < r.start;
+                                    });
+        if (pit != pv.begin()) {
+            --pit;
+            if (pit->end > start && pit->start < end) return false;
+        }
+    }
+    return true;
+}
+
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
@@ -651,6 +704,28 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
             // stays shared, read-only -> shared as-is).  Reuses the whole 4 K
             // COW machinery; cost is one 4 K page table per split large page.
             if (!ppte.writable()) { child_pt[i] = ppte; continue; }
+            // EXCEPT when the whole 2 MB is inside a MAP_SHARED range (and
+            // clear of any thread stack): then every one of those 512 4 K PTEs
+            // would take the addr_is_shared() branch below and end up
+            // "writable, shared in both" -- which is exactly what the large PTE
+            // already is.  Splitting to reach an identical result costs a page
+            // table, 512 PTE writes and 512 range lookups PER 2 MB.
+            //
+            // This is the dominant remaining fork cost for PostgreSQL: a 16 GB
+            // shared_buffers segment is 8192 large pages, so the split path
+            // walks 4.19M leaf PTEs per fork (measured: 99.9% of fork time,
+            // n_tables ~ 8192).  Sharing verbatim visits 8192 entries instead.
+            //
+            // Teardown is already correct for this: free_child_pt_level<1>
+            // skips large entries, so the jointly-owned 2 MB frame is never
+            // freed by a dying child -- the same guarantee the pte_shared tag
+            // gives the 4 K path.
+            if (range_is_wholly_shared(base_virt + (uintptr_t)i * step,
+                                       base_virt + (uintptr_t)(i + 1) * step)) {
+                child_pt[i] = ppte;
+                if (cur_fork_stats) cur_fork_stats->n_large_shared++;
+                continue;
+            }
             split_large_page(hw_ptep<1>::force(&parent_pt[i]));
             ppte = parent_pt[i]; // re-read: now a non-large intermediate pte
         }
@@ -949,6 +1024,7 @@ address_space *clone_address_space(address_space *parent)
         debug_early_u64("  n_privcp=", fst.n_priv_copies);
         debug_early_u64("  privcp_kc=", fst.t_privcopy / 1000);
         debug_early_u64("  n_lk_true=", fst.n_lookup_true);
+        debug_early_u64("  n_lg_shared=", fst.n_large_shared);
     }
     return child;
 }
