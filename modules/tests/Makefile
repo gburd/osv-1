@@ -160,6 +160,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-smoke.so tst-bsd-evh.
 	tst-mmap-file.so misc-mmap-big-file.so tst-mmap.so tst-huge.so \
 	tst-pthread-timedlock.so \
 	tst-signal-fills.so \
+	tst-dentry-lock.so \
 	tst-epoll-pwait2.so \
 	tst-prctl.so \
 	tst-mmap-file-cow.so \
