@@ -393,8 +393,17 @@ static mutex fork_shared_module_lock;
 static bool env_flag_on(const char *name, bool dflt)
 {
     const char *e = getenv(name);
-    if (!e || !e[0]) return dflt;
-    return e[0] != '0';
+    // PROOF OF BINDING: print what the flag actually resolved to, once, the
+    // first time it is read.  Both flags below default to a NON-inert value
+    // (bsearch on), so a typo'd or dropped --env= would silently give the same
+    // behaviour in both arms of an A/B and be read as "the fix does nothing".
+    // Do not trust an A/B result without this line in the boot log.
+    bool v = (!e || !e[0]) ? dflt : (e[0] != '0');
+    debug_early("FORKFLAG ");
+    debug_early(name);
+    debug_early(e ? "=" : " unset, default ");
+    debug_early(v ? "1\n" : "0\n");
+    return v;
 }
 static bool fork_timing_enabled()
 {
