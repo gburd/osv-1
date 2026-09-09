@@ -643,8 +643,15 @@ ssize_t reclaimer::bytes_until_normal(pressure curr)
     }
 }
 
+// Defined after the free_page_ranges global (see below): reports the largest
+// contiguous free range and total free on the OOM path, so the high-VU
+// allocation wall (a large single-range request a fragmented heap cannot
+// satisfy) is distinguishable from true exhaustion in the serial log.
+static void oom_report_fragmentation();
+
 void oom()
 {
+    oom_report_fragmentation();
     abort("Out of memory: could not reclaim any further. Current memory: %d Kb", stats::free() >> 10);
 }
 
@@ -978,6 +985,27 @@ void page_range_allocator::for_each(unsigned min_order, Func f)
             }
         }
     }
+}
+
+// OOM-path diagnostic: report total free vs the largest single contiguous free
+// range.  When the guest aborts with a large amount still free, the failure is
+// a large single-range (contiguous) request that a fragmented heap cannot
+// satisfy, not true exhaustion; the largest-free-range value makes that
+// distinguishable in the serial log.  Defined here, after the free_page_ranges
+// global and page_range_allocator::for_each, so the type is complete.  Callers
+// hold free_page_ranges_lock (oom() is reached from _do_reclaim / wait()).
+static void oom_report_fragmentation()
+{
+    size_t total_free = stats::free();
+    size_t largest = 0;
+    free_page_ranges.for_each([&] (page_range& fp) {
+        if (fp.size > largest) {
+            largest = fp.size;
+        }
+        return true;
+    });
+    debug_early_u64("OOM total_free_Kb=", total_free >> 10);
+    debug_early_u64("OOM largest_free_range_Kb=", largest >> 10);
 }
 
 namespace stats {
@@ -1320,9 +1348,39 @@ void reclaimer::_do_reclaim()
         WITH_LOCK(free_page_ranges_lock) {
             if (target >= 0) {
                 // Wake up all waiters that are waiting and now have a chance to succeed.
-                // If we could not wake any, there is nothing really we can do.
                 if (!_oom_blocked.wake_waiters()) {
-                    oom();
+                    // One shrink pass did not free enough to wake any waiter.
+                    // Rather than OOM immediately, keep shrinking as long as
+                    // each pass still makes progress (frees memory): under a
+                    // burst (a large checkpoint plus many forked backends /
+                    // autovacuum workers) a single pass reclaims only a slice
+                    // (e.g. the ARC shrinker frees a fraction of the ARC per
+                    // call), so the first pass can come up short for a large
+                    // waiter even though the shrinkers still hold plenty of
+                    // evictable memory. Loop until either a waiter can be woken
+                    // or a full pass frees nothing at all -- only then is the
+                    // system genuinely out of reclaimable memory.  Bounded so a
+                    // pathological no-progress case still terminates in oom().
+                    bool woken = false;
+                    for (unsigned pass = 0; pass < _max_reclaim_passes; pass++) {
+                        size_t before = stats::free();
+                        DROP_LOCK(free_page_ranges_lock) {
+                            _shrinker_loop(target,
+                                [this] { return _oom_blocked.has_waiters(); });
+                        }
+                        if (_oom_blocked.wake_waiters()) {
+                            woken = true;
+                            break;
+                        }
+                        // No waiter woken; if this pass freed nothing, no
+                        // amount of further shrinking will help.
+                        if (stats::free() <= before) {
+                            break;
+                        }
+                    }
+                    if (!woken) {
+                        oom();
+                    }
                 }
             }
 

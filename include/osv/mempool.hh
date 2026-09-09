@@ -187,6 +187,11 @@ public:
 private:
     void _do_reclaim();
     void _shrinker_loop(size_t target, std::function<bool ()> hard);
+    // Upper bound on shrink passes before declaring OOM.  _do_reclaim retries
+    // shrinking as long as each pass frees memory (see _do_reclaim); this cap
+    // guarantees termination if a pass ever reports progress without actually
+    // making room for a waiter.
+    static constexpr unsigned _max_reclaim_passes = 16;
     // We could just check if the semaphore's wait_list is empty. But since we
     // don't control the internals of the primitives we use for the
     // implementation of semaphore, we are concerned that unlocked access may
