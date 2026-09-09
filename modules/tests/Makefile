@@ -269,6 +269,7 @@ tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa.so
 tests += tst-random-flush.so
+tests += tst-dentry-lock.so
 internal-api-tests += tst-random-flush.so
 
 # Tests with special compilation parameters needed...
