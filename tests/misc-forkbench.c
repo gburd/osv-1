@@ -286,8 +286,15 @@ int main(int argc, char **argv)
 	if (fork_fail || reap_fail || nsample == 0) {
 		printf("FORKBENCH RESULT=FAIL (fork_fail=%d reap_fail=%d n=%d)\n",
 		       fork_fail, reap_fail, nsample);
-		return 1;
+		fflush(NULL);
+		/* _exit, not return: the -t threads are parked in usleep() and OSv
+		 * keeps the guest alive until every application thread exits, so a
+		 * plain return hangs the run until the harness timeout kills it --
+		 * which silently turns every threaded cell into a 15-minute stall.
+		 * The measurement is complete and printed by now, so leave hard. */
+		_exit(1);
 	}
 	printf("FORKBENCH RESULT=OK\n");
-	return 0;
+	fflush(NULL);
+	_exit(0);
 }
