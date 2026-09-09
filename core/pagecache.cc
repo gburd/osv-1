@@ -24,6 +24,40 @@
 #include <osv/prio.hh>
 #include <osv/sched.hh>
 #include <osv/clock.hh>
+#include <osv/fork_arena.hh>
+
+#if CONF_fork
+// The page cache is process-GLOBAL kernel infrastructure: ONE read_cache, ONE
+// write_cache (plus write_lru) and ONE arc_read_cache, each protected by a
+// single global mutex, holding cached_page objects whose _ptes sets are mutated
+// by whichever thread faults on or unmaps the page.
+//
+// It is populated and mutated LAZILY by whatever thread touches a file first.
+// Under fork() that thread may be a child backend, whose allocations land in
+// the COW fork arena -- so a node (or a cached_page, or an _ptes set node)
+// written by one address space is garbage in another, and the first free from a
+// DIFFERENT address space (a rehash of a global map, an LRU eviction in AS0, the
+// writeback thread flushing a page inserted by a child) trips
+// fork_arena::free()'s chunk-magic assert and aborts the whole VM.
+//
+// This is the same fork-arena coherence rule already applied to struct file,
+// f_epolls and thread objects, to epoll's `map`/`_activity` containers (see the
+// note in core/epoll.cc) and to the rofs shared file cache (fs/rofs/rofs_cache.cc).
+// The page cache is reachable on every supported config: ROFS and the OpenZFS
+// port both route reads through read_cache (see the comment at the top of this
+// file), and PostgreSQL's MAP_SHARED file mappings route through write_cache.
+//
+// Force every allocation made on behalf of these shared containers onto the
+// identity kernel heap, so all address spaces share ONE coherent set of nodes
+// that any address space may free.  Applied at the ENTRY POINTS (each of which
+// takes one of the three global locks) rather than at individual `new`/emplace
+// sites, so nested bookkeeping -- map()/unmap() growing a cached_page's _ptes
+// set, an unordered_map rehash, the write LRU deque's blocks -- is covered too.
+// A no-op in a non-fork build.
+#define PAGECACHE_KH() fork_arena::kernel_heap_scope _pagecache_kh
+#else
+#define PAGECACHE_KH() do {} while (0)
+#endif
 
 // The OSv page cache serves two filesystem families through one set of
 // entry points (get()/release()/sync()):
@@ -409,6 +443,7 @@ static void remove_arc_read_mapping(cached_page_arc* cp, mmu::hw_ptep<0> ptep)
 
 void remove_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
 {
+    PAGECACHE_KH();
     SCOPE_LOCK(read_lock);
     cached_page* cp = find_in_cache(read_cache, key);
     if (cp) {
@@ -437,6 +472,7 @@ void remove_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
 
 void remove_arc_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
 {
+    PAGECACHE_KH();
     SCOPE_LOCK(arc_read_lock);
     cached_page_arc* cp = find_in_cache(arc_read_cache, key);
     if (cp) {
@@ -466,6 +502,7 @@ static unsigned drop_arc_read_cached_page(cached_page_arc* cp, bool flush)
 
 static void drop_read_cached_page(hashkey& key)
 {
+    PAGECACHE_KH();
     SCOPE_LOCK(read_lock);
     cached_page* cp = find_in_cache(read_cache, key);
     if (cp) {
@@ -476,6 +513,7 @@ static void drop_read_cached_page(hashkey& key)
 TRACEPOINT(trace_drop_read_cached_page, "buf=%p, addr=%p", void*, void*);
 static void drop_arc_read_cached_page(hashkey& key)
 {
+    PAGECACHE_KH();
     SCOPE_LOCK(arc_read_lock);
     cached_page_arc* cp = find_in_cache(arc_read_cache, key);
     if (cp) {
@@ -488,6 +526,7 @@ TRACEPOINT(trace_unmap_arc_buf, "buf=%p", void*);
 void unmap_arc_buf(arc_buf_t* ab)
 {
     trace_unmap_arc_buf(ab);
+    PAGECACHE_KH();
     SCOPE_LOCK(arc_read_lock);
     cached_page_arc::unmap_arc_buf(ab);
 }
@@ -496,6 +535,7 @@ TRACEPOINT(trace_map_arc_buf, "buf=%p page=%p", void*, void*);
 void map_arc_buf(hashkey *key, arc_buf_t* ab, void *page)
 {
     trace_map_arc_buf(ab, page);
+    PAGECACHE_KH();
     SCOPE_LOCK(arc_read_lock);
     cached_page_arc* pc = new cached_page_arc(*key, page, ab);
     arc_read_cache.emplace(*key, pc);
@@ -513,6 +553,7 @@ void map_arc_buf(hashkey *key, arc_buf_t* ab, void *page)
 // collision).  So the caller decides what to do with a false return.
 bool map_read_cached_page(hashkey *key, void *page)
 {
+    PAGECACHE_KH();
     SCOPE_LOCK(read_lock);
     cached_page* pc = new cached_page(*key, page);
     auto res = read_cache.emplace(*key, pc);
@@ -582,6 +623,7 @@ public:
 extern "C" void osv_pagecache_map_arc_page(void *key, void *db, void *page)
 {
     hashkey* hk = static_cast<hashkey*>(key);
+    PAGECACHE_KH();
     SCOPE_LOCK(read_lock);
     if (find_in_cache(read_cache, *hk)) {
         if (arc_dbuf_rele) {
@@ -645,6 +687,7 @@ extern "C" int osv_pagecache_map_page_if_absent(dev_t dev, ino_t ino,
                                                   off_t offset, void *page)
 {
     hashkey key {dev, ino, offset};
+    PAGECACHE_KH();
     SCOPE_LOCK(read_lock);
     if (find_in_cache(read_cache, key))
         return 1;   /* already cached - caller owns page */
@@ -655,6 +698,7 @@ extern "C" int osv_pagecache_map_page_if_absent(dev_t dev, ino_t ino,
 
 static int create_read_cached_page(vfs_file* fp, hashkey& key)
 {
+    PAGECACHE_KH();
     return fp->read_page_from_cache(&key, key.offset);
 }
 
@@ -677,6 +721,7 @@ static constexpr int READAHEAD_WINDOW = 4;
  */
 static void prefetch_one_page(vfs_file* fp, hashkey key, off_t file_size)
 {
+    PAGECACHE_KH();
     struct vnode *vp = fp->f_dentry->d_vnode;
 
     if (!vp->v_op->vop_cache)
@@ -775,6 +820,7 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
     struct stat st;
     fp->stat(&st);
     hashkey key {st.st_dev, st.st_ino, offset};
+    PAGECACHE_KH();
     SCOPE_LOCK(write_lock);
     cached_page_write* wcp = find_in_cache(write_cache, key);
 
@@ -867,6 +913,7 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
     struct stat st;
     fp->stat(&st);
     hashkey key {st.st_dev, st.st_ino, offset};
+    PAGECACHE_KH();
 
     auto old = clear_pte(ptep);
 
@@ -924,6 +971,7 @@ int sync(vfs_file* fp, off_t start, off_t end)
     struct stat st;
     fp->stat(&st);
     hashkey key {st.st_dev, st.st_ino, 0};
+    PAGECACHE_KH();
 
     std::vector<cached_page_write*> to_flush;
 
@@ -985,6 +1033,7 @@ int sync(vfs_file* fp, off_t start, off_t end)
  */
 static void flush_write_cache_dirty()
 {
+    PAGECACHE_KH();
     std::vector<cached_page_write*> to_flush;
 
     SCOPE_LOCK(write_lock);
@@ -1036,6 +1085,7 @@ static void flush_write_cache_dirty()
 int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
 {
     hashkey key {dev, ino, 0};
+    PAGECACHE_KH();
     std::vector<cached_page_write*> to_flush;
 
     SCOPE_LOCK(write_lock);
