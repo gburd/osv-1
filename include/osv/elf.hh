@@ -545,7 +545,9 @@ class file : public object {
 public:
     explicit file(program& prog, fileref f, std::string pathname);
     virtual ~file();
+#if CONF_fork
     virtual bool has_backing_file() const override { return true; }
+#endif
     void load_program_headers();
     void load_elf_header();
 protected:
