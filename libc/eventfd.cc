@@ -194,16 +194,18 @@ int eventfd(unsigned int initval, int flags)
         of |= O_NONBLOCK;
     }
 
-    if (flags & EFD_CLOEXEC) {
-        of |= O_CLOEXEC;
-    }
-
     bool is_semaphore = (flags & EFD_SEMAPHORE);
 
     try {
         fileref f = make_file<event_fd>(initval, is_semaphore, of);
         fdesc fd(f);
-        return fd.release();
+        int newfd = fd.release();
+        // EFD_CLOEXEC sets FD_CLOEXEC on the DESCRIPTOR (per-process table),
+        // not on the shared open file description.
+        if (flags & EFD_CLOEXEC) {
+            fd_set_cloexec(newfd, true);
+        }
+        return newfd;
     } catch (int error) {
         return libc_error(error);
     }

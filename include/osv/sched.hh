@@ -29,6 +29,7 @@
 #include <osv/export.h>
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
+#include <osv/kernel_config_fork.h>
 #include <string.h>
 
 typedef float runtime_t;
@@ -74,6 +75,11 @@ class application;
 struct application_runtime;
 
 }
+
+// The per-process file descriptor table (fs/vfs/kern_descrip.cc).  Declared at
+// global scope so thread::_fd_table below names ::fd_table rather than a
+// sched-local incomplete type.
+struct fd_table;
 
 /**
  * OSV Scheduler namespace
@@ -836,8 +842,37 @@ private:
     std::vector<char*> _tls;
     bool _app;
     std::shared_ptr<osv::application_runtime> _app_runtime;
+#if CONF_fork
+    // This thread's file descriptor table (POSIX's per-process descriptor
+    // table).  nullptr means "table 0" -- the kernel plus the initial
+    // application's table, which is what the historic global gfdt[] was.
+    //
+    // Cached HERE, as a plain pointer, rather than looked up by process identity,
+    // because fget()/fdalloc() are on the read()/write() path: resolving the
+    // table has to be a single load.
+    //
+    // Inheritance is what distinguishes a THREAD from a fork CHILD, and it falls
+    // out of the POSIX rules rather than from any heuristic:
+    //   - a thread created normally (pthread_create, kernel threads) COPIES its
+    //     creator's pointer below, so it SHARES that table -- POSIX: threads of
+    //     a process share one descriptor table;
+    //   - a fork child gets a fresh CLONE installed on it explicitly by fork()
+    //     (via set_fdtable(), between fork_thread() and start()), because
+    //     fork_thread() is the only fork-child creator -- POSIX: processes get
+    //     independent tables.
+    // So the default is "share", and only fork() opts out.  Nothing has to guess
+    // which kind of thread it is.
+    ::fd_table *_fd_table;
+#endif
 public:
     void destroy();
+#if CONF_fork
+    // This thread's descriptor table (nullptr => table 0).  See _fd_table.
+    // set_fdtable() is called by fork() on the newly created child thread,
+    // before it starts, to install the child's private clone.
+    ::fd_table *fdtable() const { return _fd_table; }
+    void set_fdtable(::fd_table *t) { _fd_table = t; }
+#endif
 #ifdef __x86_64__
     unsigned long get_app_tcb() { return _tcb->app_tcb; }
     void set_app_tcb(unsigned long tcb) { _tcb->app_tcb = tcb; }
