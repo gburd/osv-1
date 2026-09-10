@@ -22,7 +22,7 @@
 // parent's user stack, returning 0 in the child.  Hands back the copied stack
 // via out_stack_to_free so fork() can release it when the child is reaped.
 extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
-                                  void **out_stack_to_free);
+                                  void *resume_ctx, void **out_stack_to_free);
 
 // atfork handler chains (defined in libc/pthread.cc).  glibc/musl register
 // these internally; fork() must run prepare() in the parent before forking,
@@ -164,18 +164,60 @@ extern "C"
 __attribute__((noinline))
 pid_t fork(void)
 {
+    // Capture the caller's full callee-saved register context FIRST, before
+    // fork()'s body clobbers rbx/r12-r15.  Right after fork's prologue those
+    // registers still hold the CALLER's values, and fork's own rbp frame gives
+    // us the caller's saved rbp ([rbp]), its return address ([rbp+8]) and its
+    // post-return rsp (rbp+16).  The child resumes with exactly this context, so
+    // it continues in fork()'s caller as a normal `ret` would.  Without it the
+    // child inherits the child THREAD's registers and every caller local the
+    // compiler kept in one (an fd, a loop counter) is garbage in the child.
+    osv::fork_resume_ctx ctx;
+    void **fp = static_cast<void**>(__builtin_frame_address(0));
+#ifdef __x86_64__
+    asm volatile("movq %%rbx, %0\n\t"
+                 "movq %%r12, %1\n\t"
+                 "movq %%r13, %2\n\t"
+                 "movq %%r14, %3\n\t"
+                 "movq %%r15, %4\n\t"
+                 : "=m"(ctx.rbx), "=m"(ctx.r12), "=m"(ctx.r13),
+                   "=m"(ctx.r14), "=m"(ctx.r15));
+    ctx.rbp = reinterpret_cast<unsigned long>(fp[0]);      // caller's rbp
+    ctx.rip = reinterpret_cast<unsigned long>(__builtin_return_address(0));
+    ctx.rsp = reinterpret_cast<unsigned long>(fp + 2);     // fork's rbp + 16
+#else // __aarch64__
+    asm volatile("str x19, %0\n\t" "str x20, %1\n\t" "str x21, %2\n\t"
+                 "str x22, %3\n\t" "str x23, %4\n\t" "str x24, %5\n\t"
+                 "str x25, %6\n\t" "str x26, %7\n\t" "str x27, %8\n\t"
+                 "str x28, %9\n\t"
+                 : "=m"(ctx.x19), "=m"(ctx.x20), "=m"(ctx.x21), "=m"(ctx.x22),
+                   "=m"(ctx.x23), "=m"(ctx.x24), "=m"(ctx.x25), "=m"(ctx.x26),
+                   "=m"(ctx.x27), "=m"(ctx.x28));
+    // AAPCS64 frame: [fp] = caller's fp, [fp+8] = return address; the caller's
+    // post-return sp is the slot just above this frame.
+    ctx.x29 = reinterpret_cast<unsigned long>(fp[0]);
+    ctx.pc  = reinterpret_cast<unsigned long>(__builtin_return_address(0));
+    ctx.sp  = reinterpret_cast<unsigned long>(fp + 2);
+#endif
+
     pid_t parent = getpid();
 
-    // Capture the point fork() will return to in its caller, and the caller's
-    // stack pointer (fork()'s own frame base == caller SP at the return).  The
-    // child thread resumes exactly there, on a private copy of the stack.
-    void *caller_ret = __builtin_return_address(0);
-    void *caller_sp  = __builtin_frame_address(0);
+    // The child resumes at the point fork() would have returned to, with the
+    // caller's post-return SP.  (Both come from ctx above: taking caller_sp as
+    // fork()'s own frame address would place the child two slots low, inside
+    // fork's frame rather than at its caller's resume point.)
+#ifdef __x86_64__
+    void *caller_ret = reinterpret_cast<void*>(ctx.rip);
+    void *caller_sp  = reinterpret_cast<void*>(ctx.rsp);
+#else
+    void *caller_ret = reinterpret_cast<void*>(ctx.pc);
+    void *caller_sp  = reinterpret_cast<void*>(ctx.sp);
+#endif
 
     void *stack_to_free = nullptr;
     // POSIX: run pthread_atfork prepare handlers in the parent before forking.
     __osv_run_atfork_prepare();
-    sched::thread *child = fork_thread(caller_ret, caller_sp, &stack_to_free);
+    sched::thread *child = fork_thread(caller_ret, caller_sp, &ctx, &stack_to_free);
     if (!child) {
         __osv_run_atfork_parent();  // undo prepare-side locking
         errno = ENOMEM;

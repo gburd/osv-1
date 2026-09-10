@@ -9,6 +9,7 @@
 #define OSV_FORK_HH
 
 #include <sys/types.h>
+#include <cstddef>
 #include <osv/app.hh>
 
 // fork() emulation on OSv.
@@ -63,6 +64,56 @@ bool exit_current_child(int status);
 
 } // namespace fork
 } // namespace osv
+
+// fork() must hand the child the caller's FULL callee-saved register context,
+// not just the stack.  The C ABI lets the compiler keep a caller's live locals in
+// callee-saved registers (x86-64: rbx/rbp/r12-r15; aarch64: x19-x28/x29) across
+// the fork() call, and the child trampoline branches straight to fork()'s return
+// address, skipping fork()'s own epilogue.  So unless these are restored the
+// child resumes in its caller with the CHILD THREAD's register values and reads
+// garbage where the source says "int fd".  Captured at fork() entry, where the
+// registers still hold the caller's values; restored by the child trampoline in
+// arch/<arch>/fork.cc.
+namespace osv {
+#ifdef __x86_64__
+struct fork_resume_ctx {
+    // rbp/x29 (the frame pointer) is CAPTURED but not restored by the child: this
+    // fork relocates the child's stack, so a frame pointer would need rebasing,
+    // and the rebase is wrong for an outermost frame.  The field is kept so the
+    // trampolines' hardcoded offsets stay stable and a future same-VA fork (which
+    // needs no bias) can restore it.
+    unsigned long rbx, rbp, r12, r13, r14, r15, rsp, rip;
+};
+#else // __aarch64__
+struct fork_resume_ctx {
+    // x19-x28 are callee-saved, x29 is the frame pointer (captured, not
+    // restored: see above), x30 the return address; sp is the caller's
+    // post-return stack pointer.
+    unsigned long x19, x20, x21, x22, x23, x24, x25, x26, x27, x28;
+    unsigned long x29, sp, pc;
+};
+#endif
+}
+
+// The child trampolines in arch/<arch>/fork.cc load these fields with hardcoded
+// offsets, so pin the layout here rather than letting a field reorder silently
+// corrupt the child's registers.
+#ifdef __x86_64__
+static_assert(offsetof(osv::fork_resume_ctx, rbx) == 0,  "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, rbp) == 8,  "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, r12) == 16, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, r13) == 24, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, r14) == 32, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, r15) == 40, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, rsp) == 48, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, rip) == 56, "fork ctx layout");
+#else
+static_assert(offsetof(osv::fork_resume_ctx, x19) == 0,  "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, x28) == 72, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, x29) == 80, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, sp)  == 88, "fork ctx layout");
+static_assert(offsetof(osv::fork_resume_ctx, pc)  == 96, "fork ctx layout");
+#endif
 
 // The syscall/libc entry points.
 extern "C" pid_t fork(void);

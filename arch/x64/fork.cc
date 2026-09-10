@@ -12,9 +12,20 @@
  *   caller_ret  = the address fork() would return to  (__builtin_return_address)
  *   caller_sp   = the parent's SP at fork()'s return   (fork()'s frame base)
  * We copy the parent stack region [caller_sp .. stack_base) into a fresh stack,
- * bias caller_sp into the copy, and start a child thread whose trampoline sets
- * rsp=child_sp, rax=0, and jumps to caller_ret -- i.e. the child returns from
- * fork() with value 0 on its own private stack, in the caller.
+ * bias caller_sp into the copy, and start a child thread whose trampoline
+ * restores the caller's callee-saved register context, sets rsp into the copy,
+ * rax=0, and jumps to caller_ret -- i.e. the child returns from fork() with
+ * value 0 on its own private stack, in the caller.
+ *
+ * Restoring the callee-saved registers is not optional: the trampoline jmps
+ * straight to fork()'s return address, skipping fork()'s epilogue, and the SysV
+ * ABI lets the caller keep live locals in rbx/rbp/r12-r15 across the call.  With
+ * only rsp installed, the child resumes in its caller holding the CHILD THREAD's
+ * register values, so a local the compiler parked in rbx reads as a kernel
+ * pointer.  rbx/r12-r15 hold plain values and are carried across unchanged; rbp
+ * is NOT restored, because this port relocates the stack and a frame pointer
+ * would need a bias that is wrong for an outermost frame (see the comment at the
+ * restore site).
  */
 
 #include "arch.hh"
@@ -23,13 +34,16 @@
 #include <string.h>
 #include <cstdlib>
 #include <osv/sched.hh>
+#include <osv/fork.hh>
 
 // pthread_atfork child-handler chain (defined in libc/pthread.cc), run in the
 // child's context before it resumes user code.
 extern "C" void __osv_run_atfork_child();
 
-sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_to_free)
+sched::thread *fork_thread(void *caller_ret, void *caller_sp,
+                           void *resume_ctx, void **out_stack_to_free)
 {
+    auto ctx = static_cast<osv::fork_resume_ctx*>(resume_ctx);
     auto parent = sched::thread::current();
     auto parent_pinned_cpu = parent->pinned() ? sched::cpu::current() : nullptr;
 
@@ -56,9 +70,33 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
     memcpy(child_base - live, sp, live);
     char *child_sp = sp + bias;
 
-    volatile u64 resume_sp = reinterpret_cast<u64>(child_sp);
-    volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
     char *stack_to_free = child_stack_mem;
+
+    // The child's resume context: the caller's callee-saved registers, with rsp
+    // pointed at the child's copied stack.
+    //
+    // rbx/r12-r15 hold plain VALUES and are carried across unchanged; those are
+    // the ones that matter for correctness here, because they are where the
+    // compiler parks a caller's live locals (an fd, a counter) across the call.
+    //
+    // rbp is deliberately NOT rebased.  This port RELOCATES the child's stack to
+    // a different virtual address, so a frame pointer is only meaningful after a
+    // bias, and a bias is only correct for a pointer that actually lies inside
+    // the copied region [caller_sp, stack_base).  The outermost frame of a
+    // thread (a fork() called directly from main()) has an rbp that does not,
+    // and biasing it produced a wild pointer and a "missing symbol" fault in the
+    // child.  Instead we keep fork()'s own frame pointer, which the existing
+    // stack-copy machinery already leaves valid in the copy: the child resumes
+    // with a correct rsp and correct value registers, and the caller re-derives
+    // rbp from its own prologue/epilogue as normal.
+    //
+    // ponytail: no rbp rebase, so a child that unwinds THROUGH fork()'s caller
+    // (a deep backtrace, a C++ exception crossing the fork point) can still see
+    // a stale frame pointer.  The real fix is to stop relocating the stack and
+    // give the child the parent's exact VAs with private physical pages, as the
+    // address-space-aware fork does downstream; that removes the bias entirely.
+    osv::fork_resume_ctx rc = *ctx;
+    rc.rsp = reinterpret_cast<u64>(child_sp);
 
     // TLS handling.  The child is a real OSv sched::thread, so its constructor
     // already ran setup_tcb() and installed a FRESH, private OSv TLS block
@@ -76,7 +114,7 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
     //      OSv's libc takes path (1) and avoids this entirely.
     u64 parent_app_tcb = parent->get_app_tcb();
 
-    auto t = sched::thread::make([resume_sp, resume_pc, parent_app_tcb] {
+    auto t = sched::thread::make([rc, parent_app_tcb] {
         // Only override the child's own (fresh) TLS if the parent had installed
         // an app TCB via arch_prctl; otherwise keep the child's private OSv TCB.
         if (parent_app_tcb) {
@@ -85,11 +123,25 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
         // Run pthread_atfork child handlers in the child's context (e.g. reset
         // the malloc arena lock) before resuming user code.
         __osv_run_atfork_child();
+        // Restore the caller's callee-saved context and resume in fork()'s caller
+        // with return value 0, on the private copied stack.  All loads are based
+        // off rax pointing at a LOCAL copy of the context, and rsp is loaded
+        // last: rax is never in the restore set, so the sequence cannot clobber
+        // its own base pointer.  Offsets match struct fork_resume_ctx
+        // { rbx, rbp, r12, r13, r14, r15, rsp, rip }.
+        osv::fork_resume_ctx c = rc;   // local copy the asm can address stably
         asm volatile
-          ("movq %0, %%rsp \n\t"    // install the private copied stack
-           "xorq %%rax, %%rax \n\t" // fork() returns 0 in the child
-           "jmpq *%1 \n\t"          // resume in fork()'s caller
-           : : "r"(resume_sp), "r"(resume_pc) : "memory");
+          ("movq %0, %%rax        \n\t"  // rax = &c (base; not restored)
+           "movq  0(%%rax), %%rbx \n\t"  // rbp deliberately NOT restored
+           "movq 16(%%rax), %%r12 \n\t"
+           "movq 24(%%rax), %%r13 \n\t"
+           "movq 32(%%rax), %%r14 \n\t"
+           "movq 40(%%rax), %%r15 \n\t"
+           "movq 56(%%rax), %%rcx \n\t"  // rcx = caller rip (scratch)
+           "movq 48(%%rax), %%rsp \n\t"  // adopt the biased child stack pointer
+           "xorq %%rax, %%rax     \n\t"  // fork() returns 0 in the child
+           "jmpq *%%rcx           \n\t"  // resume in fork()'s caller
+           : : "r"(&c) : "rax", "rcx", "memory");
     }, sched::thread::attr().
         stack(4096 * 4).
         // Detached: nobody join()s the fork child (the parent reaps it via the
