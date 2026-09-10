@@ -12,3 +12,7 @@ conf_cxx_level=gnu++14
 
 conf_lazy_stack=0
 conf_lazy_stack_invariant=0
+
+# fork()/vfork()/execve()/waitpid() emulation (documentation/fork.md).  Off by
+# default.  Set to 1 here to build a kernel with fork() support.
+conf_fork=0

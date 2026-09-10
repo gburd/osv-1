@@ -8,8 +8,7 @@ config lazy_stack
 
 config fork
   prompt "Include fork()/vfork() support (thread-backed, off by default)"
-  bool
-  default n
+  def_bool $(shell,grep -q ^conf_fork=1 conf/base.mk && echo y || echo n)
   help
     Enable OSv's thread-backed fork()/vfork()/execve()/waitpid() emulation.
     A forked child is a new OSv thread that resumes at the fork() call site on

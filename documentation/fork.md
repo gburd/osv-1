@@ -18,10 +18,22 @@ implementations and the private user-stack copy - is gated behind the
 which defaults to **n**. When it is disabled (the default), NONE of this code
 is compiled into the kernel: the fork object files are excluded from the build,
 fork()/vfork() return ENOSYS as before, and OSv behaves exactly as it did with
-no change to its single-address-space model or performance. Build with
-`conf_fork=1` (or enable "Include fork() support" in `make menuconfig`) only for
-workloads that need fork(). This keeps the default OSv unchanged while offering
-fork() to those who require it.
+no change to its single-address-space model or performance.
+
+To build a kernel with fork() support, set `conf_fork=1` in `conf/base.mk` (or
+enable "Include fork() support" in `make menuconfig`), then build as usual:
+
+```
+sed -i 's/^conf_fork=0/conf_fork=1/' conf/base.mk
+./scripts/build -j$(nproc) fs=rofs image=tests
+```
+
+As for the other `conf/base.mk` options (`conf_lazy_stack`, `conf_preempt`, ...)
+the setting is read from that file by the kconfig shell hook in
+`conf/kconfig/threads`. Passing `conf_fork=1` on the *make command line* instead
+would set only the make variable and not the `CONF_fork` preprocessor symbol,
+leaving the two halves of the build disagreeing. This keeps the default OSv
+unchanged while offering fork() to those who require it.
 
 ## What works
 
