@@ -38,6 +38,7 @@
 
 #include <osv/mutex.h>
 #include <osv/uio.h>
+#include <osv/kernel_config_fork.h>
 
 #include <bsd/sys/sys/queue.h>
 #include <osv/dentry.h>
@@ -233,6 +234,24 @@ int fdset(int fd, struct file* fp);
 void fdfree(int fd);
 int fdclose(int fd);
 
+/*
+ * FD_CLOEXEC is a property of the file DESCRIPTOR (private to a process), not of
+ * the open file description, so it is stored in the descriptor table rather than
+ * in file::f_flags.  These read and write the current table's bit for @fd.
+ */
+bool fd_get_cloexec(int fd);
+void fd_set_cloexec(int fd, bool on);
+
+/*
+ * The per-process file descriptor table (fs/vfs/kern_descrip.cc).  Opaque here:
+ * an array of rcu_ptr<file> slots, the FD_CLOEXEC bitmap for those slots, and
+ * the lock protecting slot mutation.  Every fd accessor above operates on the
+ * CURRENT thread's table.  A build without fork() has exactly one table ("table
+ * 0", the kernel plus the initial application), which is what the historic
+ * global gfdt[] was.
+ */
+struct fd_table;
+
 __BEGIN_DECLS
 
 filetype_t file_type(struct file *fp);
@@ -247,6 +266,31 @@ void file_setoffset(struct file *fp, off_t off);
  */
 void fhold(struct file* fp);
 int fdrop(struct file* fp);
+
+#if CONF_fork
+/*
+ * fork()/execve() support for per-process descriptor tables (implemented in
+ * fs/vfs/kern_descrip.cc).
+ *
+ * fork_clone_fd_table() implements the POSIX fork() rule: the child gets a COPY
+ * of the parent's descriptor table in which every open fd refers to the SAME
+ * open file description (one extra reference taken per open file, so the offset
+ * and status flags stay shared), but the table ENTRIES are independent -- so the
+ * child's close()/dup2()/F_SETFD do not disturb the parent, and the child may
+ * reuse an fd number the parent still holds.  The FD_CLOEXEC bitmap is copied
+ * too (per-descriptor state, inherited across fork).
+ *
+ * fork_free_fd_table() drops the table's reference on every fd still open in it
+ * and frees the table; called when a child is reaped.
+ *
+ * fork_fd_table_close_on_exec() closes the FD_CLOEXEC descriptors of the current
+ * table; called by execve(), which otherwise keeps the table (POSIX: exec
+ * preserves descriptors not marked close-on-exec).
+ */
+struct fd_table *fork_clone_fd_table(void);
+void fork_free_fd_table(struct fd_table *tbl);
+void fork_fd_table_close_on_exec(void);
+#endif
 
 __END_DECLS
 

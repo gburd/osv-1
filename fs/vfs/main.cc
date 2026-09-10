@@ -151,6 +151,12 @@ int open(const char *pathname, int flags, ...)
     error = fdalloc(fp, &fd);
     if (error)
         goto out_fput;
+    // O_CLOEXEC at open() time sets FD_CLOEXEC on the new DESCRIPTOR.  It is
+    // per-descriptor state kept in the per-process table, not a flag on the
+    // shared open file description (fp->f_flags).
+    if (flags & O_CLOEXEC) {
+        fd_set_cloexec(fd, true);
+    }
     fdrop(fp);
     trace_vfs_open_ret(fd);
     return fd;
@@ -1678,8 +1684,9 @@ int dup3(int oldfd, int newfd, int flags)
 
     trace_vfs_dup3(oldfd, newfd, flags);
     /*
-     * Don't allow any argument but O_CLOEXEC.  But we even ignore
-     * that as we don't support exec() and thus don't care.
+     * Only O_CLOEXEC is a valid dup3() flag.  It sets FD_CLOEXEC on the NEW
+     * descriptor (a descriptor flag, kept in the per-process table); plain
+     * dup2()/dup3(...,0) leaves it clear, which fdset() does for us.
      */
     if ((flags & ~O_CLOEXEC) != 0) {
         error = EINVAL;
@@ -1699,6 +1706,9 @@ int dup3(int oldfd, int newfd, int flags)
     if (error) {
         fdrop(fp);
         goto out_errno;
+    }
+    if (flags & O_CLOEXEC) {
+        fd_set_cloexec(newfd, true);
     }
 
     fdrop(fp);
@@ -1741,36 +1751,37 @@ int fcntl(int fd, int cmd, int arg)
     if (error)
         goto out_errno;
 
-    // An important note about our handling of FD_CLOEXEC / O_CLOEXEC:
-    // close-on-exec shouldn't have been a file flag (fp->f_flags) - it is a
-    // file descriptor flag, meaning that that two dup()ed file descriptors
-    // could have different values for FD_CLOEXEC. Our current implementation
-    // *wrongly* makes close-on-exec an f_flag (using the bit O_CLOEXEC).
-    // There is little practical difference, though, because this flag is
-    // ignored in OSv anyway, as it doesn't support exec().
+    // FD_CLOEXEC is a property of the file DESCRIPTOR, not of the open file
+    // description: two dup()ed fds, and the same fd in a fork parent and child,
+    // can hold different values.  It therefore lives in the per-process
+    // descriptor table (fs/vfs/kern_descrip.cc), reached through
+    // fd_get_cloexec()/fd_set_cloexec(), and NOT in fp->f_flags -- which is
+    // state on the SHARED file description, so keeping it there made one
+    // process's F_SETFD visible to every other holder of the same file.
     switch (cmd) {
     case F_DUPFD:
-    // On Linux F_DUPFD_CLOEXEC is used to affect behavior of duplicated file descriptor
-    // across execve() boundaries, but on OSv there is single process so we make it
-    // behave exactly like F_DUPFD does
-    case F_DUPFD_CLOEXEC:
         error = _fdalloc(fp, &ret, arg);
         if (error)
             goto out_errno;
         break;
+    // F_DUPFD_CLOEXEC sets FD_CLOEXEC on the NEW descriptor only; the original
+    // fd's flag is untouched (POSIX).
+    case F_DUPFD_CLOEXEC:
+        error = _fdalloc(fp, &ret, arg);
+        if (error)
+            goto out_errno;
+        fd_set_cloexec(ret, true);
+        break;
     case F_GETFD:
-        ret = (fp->f_flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+        ret = fd_get_cloexec(fd) ? FD_CLOEXEC : 0;
         break;
     case F_SETFD:
-        FD_LOCK(fp);
-        fp->f_flags = (fp->f_flags & ~O_CLOEXEC) |
-                ((arg & FD_CLOEXEC) ? O_CLOEXEC : 0);
-        FD_UNLOCK(fp);
+        fd_set_cloexec(fd, (arg & FD_CLOEXEC) != 0);
         break;
     case F_GETFL:
-        // As explained above, the O_CLOEXEC should have been in f_flags,
-        // and shouldn't be returned. Linux always returns 0100000 ("the
-        // flag formerly known as O_LARGEFILE) so let's do it too.
+        // O_CLOEXEC is a descriptor flag (see above) and is not reported by
+        // F_GETFL.  Linux always returns 0100000 ("the flag formerly known as
+        // O_LARGEFILE") so let's do it too.
         ret = (oflags(fp->f_flags) & ~O_CLOEXEC) | 0100000;
         break;
     case F_SETFL:

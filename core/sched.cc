@@ -1087,6 +1087,14 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
     , _joiner(nullptr)
 {
     trace_thread_create(this);
+#if CONF_fork
+    // Inherit the creating thread's descriptor table (nullptr => table 0), so a
+    // normally created thread SHARES its creator's table -- POSIX: the threads
+    // of a process share one descriptor table.  A fork CHILD is the sole
+    // exception, and fork() marks it as such explicitly via set_fdtable() before
+    // starting it; see thread::_fd_table.
+    _fd_table = sched::s_current ? sched::s_current->_fd_table : nullptr;
+#endif
 
     if (!main && sched::s_current) {
         auto app = application::get_current().get();
