@@ -15,6 +15,7 @@
 #include <osv/mutex.h>
 #include <osv/condvar.h>
 #include <osv/app.hh>
+#include <osv/file.h>
 #include "../libc.hh"
 
 // Arch hook (arch/<arch>/fork.cc): create a child thread that resumes in
@@ -225,6 +226,22 @@ pid_t fork(void)
     }
     pid_t cpid = child->id();
 
+    // POSIX: the child gets its OWN COPY of the descriptor table.  Each open fd
+    // in the copy refers to the SAME open file description as the parent's, so
+    // the offset, status flags and locks stay SHARED (a read() in the child
+    // advances the parent's offset) and one extra reference is taken per open
+    // file -- but the table ENTRIES are independent, so the child's close(),
+    // dup2() and FD_CLOEXEC changes are private to it, and it may reuse an fd
+    // number the parent still holds.
+    //
+    // This is also what distinguishes a fork CHILD from an ordinary new thread:
+    // a thread created by pthread_create inherits (SHARES) its creator's table
+    // pointer in the thread constructor, whereas the child gets a private clone
+    // installed here.  fork_thread() above is the only fork-child creator, and
+    // the child has not started yet, so this is the one place the distinction
+    // needs to be made -- no heuristic is involved.
+    child->set_fdtable(fork_clone_fd_table());
+
     // Register the child BEFORE starting it so a fast child->exit cannot race
     // ahead of the parent's bookkeeping.
     fork::register_child(cpid, parent);
@@ -244,6 +261,13 @@ pid_t fork(void)
         if (stack_to_free) {
             free(stack_to_free);
         }
+        // Free the child's descriptor table, dropping its reference on every fd
+        // still open in it.  An open file description the parent (or a sibling
+        // child) still holds survives on their own references; one that only
+        // this child held is genuinely released here, so a pipe or socket peer
+        // sees EOF/EPIPE exactly as it would when a real process exits.
+        fork_free_fd_table(child->fdtable());
+        child->set_fdtable(nullptr);
         sched::thread::dispose(child);
     });
 
