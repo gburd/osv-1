@@ -101,7 +101,8 @@ int pipe2(int pipefd[2], int flags) {
         fdesc fd1(f1);
         fdesc fd2(f2);
 
-        // O_CLOEXEC ignored by now
+        // O_CLOEXEC is a DESCRIPTOR flag (per-process table), applied to both
+        // new descriptors below rather than to the shared file description.
         if (flags & O_NONBLOCK) {
             f1->f_flags |= FNONBLOCK;
             f2->f_flags |= FNONBLOCK;
@@ -110,6 +111,10 @@ int pipe2(int pipefd[2], int flags) {
         // all went well, user owns descriptors now
         pipefd[0] = fd1.release();
         pipefd[1] = fd2.release();
+        if (flags & O_CLOEXEC) {
+            fd_set_cloexec(pipefd[0], true);
+            fd_set_cloexec(pipefd[1], true);
+        }
         return 0;
     } catch (int error) {
         return libc_error(error);
