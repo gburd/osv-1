@@ -26,6 +26,7 @@ int execve(const char *path, char *const argv[], char *const envp[])
 #include <osv/stubbing.hh>
 #include "../libc.hh"
 #include <osv/fork.hh>
+#include <osv/file.h>
 
 // execve() on OSv.
 //
@@ -86,6 +87,14 @@ int execve(const char *path, char *const argv[], char *const envp[])
         // rather than reporting every launch failure inaccurately.
         return libc_error(ENOENT);
     }
+
+    // POSIX: execve() keeps the descriptor table, minus the descriptors marked
+    // FD_CLOEXEC, which it closes.  Done only once the target is known to have
+    // loaded, so a failed exec (which returns to the caller above) leaves the
+    // caller's descriptors untouched.  The flag is per-descriptor, so this
+    // closes only THIS table's copies: a fork parent holding the same open file
+    // description in its own table is unaffected.
+    fork_fd_table_close_on_exec();
 
     // Record the exec'd app so the fork/wait layer can reap it under the pid
     // of the thread that called execve() (Linux keeps the pid across exec).

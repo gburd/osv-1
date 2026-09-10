@@ -18,6 +18,10 @@
 #include <boost/range/algorithm/find.hpp>
 
 #include <bsd/sys/sys/queue.h>
+#include <osv/kernel_config_fork.h>
+#if CONF_fork
+#include <osv/sched.hh>
+#endif
 
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
@@ -26,11 +30,76 @@
 using namespace osv;
 
 /*
- * Global file descriptors table - in OSv we have a single process so file
- * descriptors are maintained globally.
+ * The file descriptor table.
+ *
+ * POSIX makes the descriptor table per-process: fork() gives the child a COPY
+ * of it, in which each open fd refers to the SAME open file description (so the
+ * offset, status flags and locks are shared and refcounted) while the table
+ * ENTRIES are independent -- the child's close(), dup2() and FD_CLOEXEC changes
+ * are private, and the child may reuse an fd number the parent still holds.
+ *
+ * So the slots, the FD_CLOEXEC bits (per-DESCRIPTOR state, unlike the shared
+ * f_flags that live on the open file description) and the mutation lock all
+ * live in this object, and every accessor below operates on the CURRENT
+ * thread's table.
+ *
+ * Table 0 below is the historic global gfdt[]: it belongs to the kernel and to
+ * the initial application, so a build without fork() -- or one that never forks
+ * -- resolves every lookup to it and behaves exactly as before.
  */
-rcu_ptr<file> gfdt[FDMAX] = {};
-mutex_t gfdt_lock = MUTEX_INITIALIZER;
+struct fd_table {
+    rcu_ptr<file> fd[FDMAX] = {};
+    // FD_CLOEXEC, one bit per descriptor.  A property of the DESCRIPTOR, so it
+    // is private to this table: two dup()ed fds, or the same fd in a fork
+    // parent and child, can differ here.  (It is emphatically NOT a flag on the
+    // open file description, which is shared.)
+    uint64_t cloexec[(FDMAX + 63) / 64] = {};
+    mutex_t lock = MUTEX_INITIALIZER;
+};
+
+/*
+ * Table 0: the kernel + initial application's descriptor table.  Statically
+ * allocated and never freed; this is what the global gfdt[] was.
+ */
+static fd_table fdt0;
+
+/*
+ * The current thread's descriptor table.
+ *
+ * This is on the read()/write() path, so it must stay cheap.  Without fork it
+ * folds to "&fdt0" and the compiler inlines the whole thing away.  With fork it
+ * is ONE pointer load from the current thread (sched::thread::fdtable(), which
+ * fork() sets on the child thread and which every thread inherits from its
+ * creator) -- deliberately not a map lookup keyed by process identity, which
+ * would put a hash lookup in every read() and write().
+ */
+static inline fd_table *current_fd_table()
+{
+#if CONF_fork
+    auto *t = sched::thread::current();
+    if (t) {
+        if (fd_table *tbl = t->fdtable()) {
+            return tbl;
+        }
+    }
+#endif
+    return &fdt0;
+}
+
+static inline bool cloexec_get(const fd_table *t, int fd)
+{
+    return (t->cloexec[fd / 64] >> (fd % 64)) & 1;
+}
+
+static inline void cloexec_put(fd_table *t, int fd, bool on)
+{
+    uint64_t bit = uint64_t(1) << (fd % 64);
+    if (on) {
+        t->cloexec[fd / 64] |= bit;
+    } else {
+        t->cloexec[fd / 64] &= ~bit;
+    }
+}
 
 /*
  * Allocate a file descriptor and assign fd to it atomically.
@@ -40,22 +109,26 @@ mutex_t gfdt_lock = MUTEX_INITIALIZER;
 int _fdalloc(struct file *fp, int *newfd, int min_fd)
 {
     int fd;
+    fd_table *t = current_fd_table();
 
     fhold(fp);
 
     for (fd = min_fd; fd < FDMAX; fd++) {
-        if (gfdt[fd])
+        if (t->fd[fd])
             continue;
 
-        WITH_LOCK(gfdt_lock) {
+        WITH_LOCK(t->lock) {
             /* Now that we hold the lock,
              * make sure the entry is still available */
-            if (gfdt[fd].read_by_owner()) {
+            if (t->fd[fd].read_by_owner()) {
                 continue;
             }
 
             /* Install */
-            gfdt[fd].assign(fp);
+            t->fd[fd].assign(fp);
+            /* A fresh descriptor starts without FD_CLOEXEC (the slot may still
+             * carry the flag of a previously closed fd of this number). */
+            cloexec_put(t, fd, false);
             *newfd = fd;
         }
 
@@ -85,15 +158,25 @@ int fdalloc(struct file *fp, int *newfd)
 int fdclose(int fd)
 {
     struct file* fp;
+    fd_table *t = current_fd_table();
 
-    WITH_LOCK(gfdt_lock) {
+    if (fd < 0 || fd >= FDMAX)
+        return EBADF;
 
-        fp = gfdt[fd].read_by_owner();
+    WITH_LOCK(t->lock) {
+
+        fp = t->fd[fd].read_by_owner();
         if (fp == nullptr) {
             return EBADF;
         }
 
-        gfdt[fd].assign(nullptr);
+        /* Clear only THIS table's entry.  Another table (a fork parent, or a
+         * sibling child) that holds the same open file description keeps its own
+         * entry and its own reference, so the file survives until the last one
+         * goes -- POSIX's "close() in the child does not close the parent's
+         * fd".  The descriptor number becomes free in this table alone. */
+        t->fd[fd].assign(nullptr);
+        cloexec_put(t, fd, false);
     }
 
     fdrop(fp);
@@ -102,22 +185,129 @@ int fdclose(int fd)
 }
 
 /*
+ * FD_CLOEXEC accessors.  The flag belongs to the descriptor (this table's slot),
+ * not to the open file description, so it is private to the calling process and
+ * is not visible through a dup() of the same file into another slot.
+ */
+bool fd_get_cloexec(int fd)
+{
+    if (fd < 0 || fd >= FDMAX) {
+        return false;
+    }
+    fd_table *t = current_fd_table();
+    WITH_LOCK(t->lock) {
+        return cloexec_get(t, fd);
+    }
+}
+
+void fd_set_cloexec(int fd, bool on)
+{
+    if (fd < 0 || fd >= FDMAX) {
+        return;
+    }
+    fd_table *t = current_fd_table();
+    WITH_LOCK(t->lock) {
+        cloexec_put(t, fd, on);
+    }
+}
+
+#if CONF_fork
+/*
+ * fork(): give the child a COPY of the caller's descriptor table.
+ *
+ * Every open fd in the copy refers to the SAME struct file -- the same open file
+ * description -- with one extra reference taken for the child.  So the offset,
+ * status flags and locks are shared exactly as POSIX requires, and a read() in
+ * the child advances the parent's offset.  The FD_CLOEXEC bits are copied too
+ * (per-descriptor state, inherited across fork).  Everything after this point is
+ * independent: either side may close, dup2 or renumber without the other
+ * noticing.
+ */
+struct fd_table *fork_clone_fd_table(void)
+{
+    fd_table *child = new fd_table();
+    fd_table *parent = current_fd_table();
+
+    WITH_LOCK(parent->lock) {
+        for (int fd = 0; fd < FDMAX; fd++) {
+            struct file *fp = parent->fd[fd].read_by_owner();
+            if (!fp) {
+                continue;
+            }
+            fhold(fp);                  /* the child's own reference */
+            child->fd[fd].assign(fp);
+        }
+        memcpy(child->cloexec, parent->cloexec, sizeof(child->cloexec));
+    }
+    return child;
+}
+
+/*
+ * Child teardown: drop this table's reference on every fd still open in it, then
+ * free the table.  An open file description the parent (or a sibling child)
+ * still holds survives on their references; one that only this child held is
+ * genuinely released here, so the peer of a pipe or socket sees EOF/EPIPE just
+ * as it would when a real process exits.
+ */
+void fork_free_fd_table(struct fd_table *tbl)
+{
+    if (!tbl || tbl == &fdt0) {
+        return;
+    }
+    for (int fd = 0; fd < FDMAX; fd++) {
+        struct file *fp = tbl->fd[fd].read_by_owner();
+        if (fp) {
+            tbl->fd[fd].assign(nullptr);
+            fdrop(fp);
+        }
+    }
+    delete tbl;
+}
+
+/*
+ * execve(): close the descriptors marked FD_CLOEXEC in the current table and
+ * keep the rest (POSIX).  This is what makes FD_CLOEXEC mean anything, and it
+ * works only because the flag is per-table: a parent that did NOT set
+ * FD_CLOEXEC on its own copy of the same open file description is unaffected by
+ * the child's exec.
+ */
+void fork_fd_table_close_on_exec(void)
+{
+    fd_table *t = current_fd_table();
+    for (int fd = 0; fd < FDMAX; fd++) {
+        bool close_it;
+        WITH_LOCK(t->lock) {
+            close_it = cloexec_get(t, fd) && t->fd[fd].read_by_owner();
+        }
+        if (close_it) {
+            fdclose(fd);
+        }
+    }
+}
+#endif // CONF_fork
+
+/*
  * Assigns a file pointer to a specific file descriptor.
  * Grabs a reference to the file pointer if successful.
  */
 int fdset(int fd, struct file *fp)
 {
     struct file *orig;
+    fd_table *t = current_fd_table();
 
     if (fd < 0 || fd >= FDMAX)
         return EBADF;
 
     fhold(fp);
 
-    WITH_LOCK(gfdt_lock) {
-        orig = gfdt[fd].read_by_owner();
+    WITH_LOCK(t->lock) {
+        orig = t->fd[fd].read_by_owner();
         /* Install new file structure in place */
-        gfdt[fd].assign(fp);
+        t->fd[fd].assign(fp);
+        /* dup2()/dup3() clear FD_CLOEXEC on the new descriptor (dup3 with
+         * O_CLOEXEC sets it afterwards).  Either way it is the NEW descriptor's
+         * flag and is never inherited from whatever occupied the slot before. */
+        cloexec_put(t, fd, false);
     }
 
     if (orig)
@@ -139,8 +329,9 @@ static bool fhold_if_positive(file* f)
 }
 
 /*
- * Retrieves a file structure from the gfdt and increases its refcount in a
- * synchronized way, this ensures that a concurrent close will not interfere.
+ * Retrieves a file structure from the current thread's descriptor table and
+ * increases its refcount in a synchronized way; this ensures that a concurrent
+ * close will not interfere.
  */
 int fget(int fd, struct file **out_fp)
 {
@@ -155,8 +346,9 @@ int fget(int fd, struct file **out_fp)
 #if CONF_lazy_stack
     arch::ensure_next_stack_page();
 #endif
+    fd_table *t = current_fd_table();
     WITH_LOCK(rcu_read_lock) {
-        fp = gfdt[fd].read();
+        fp = t->fd[fd].read();
         if (fp == nullptr) {
             return EBADF;
         }
