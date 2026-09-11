@@ -9,6 +9,9 @@
 #include <sys/kcondvar.h>
 /* Need hrtime_t and gethrtime() for cv_timedwait_hires below */
 #include <sys/time.h>
+/* BENCH ONLY: getenv()/printf() for the OSV_ZFS_HIRES_CV A/B switch. */
+#include <stdlib.h>
+#include <stdio.h>
 
 /*
  * OpenZFS expects these additional condvar variants.
@@ -62,6 +65,29 @@ cv_timedwait_hires(kcondvar_t *cvp, mutex_t *mp, long long tim,
 	}
 	if (delta_ns <= 0) {
 		return (-1);
+	}
+
+	/*
+	 * BENCH ONLY, not part of the upstream change: OSV_ZFS_HIRES_CV=0
+	 * reproduces the old tick-converting behaviour so the same binary can
+	 * serve both arms of an A/B.  Default is the fixed path.
+	 */
+	{
+		static int ab = -1;
+		if (ab < 0) {
+			const char *e = getenv("OSV_ZFS_HIRES_CV");
+			ab = (!e || !e[0]) ? 1 : (e[0] != '0');
+			/* proof of binding, so a dropped flag cannot read as "no effect" */
+			printf("ZFSFLAG OSV_ZFS_HIRES_CV=%d (%s)\n", ab,
+			    e ? "set" : "unset, default");
+		}
+		if (!ab) {
+			long long t = tim;
+			if (flag == 0)
+				t += gethrtime();
+			return (cv_timedwait(cvp, mp,
+			    (clock_t)(t / (1000000000LL / hz))));
+		}
 	}
 
 	/*
