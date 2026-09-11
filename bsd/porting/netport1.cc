@@ -6,6 +6,8 @@
  */
 
 #include <osv/types.h>
+#include <cstdio>   // printf, bench-only OSV_ZFS_HIRES_CV announce
+#include <cstdlib>  // getenv, bench-only OSV_ZFS_HIRES_CV switch
 #include <osv/sched.hh>
 #include <osv/mempool.hh>
 #include "bsd/sys/cddl/compat/opensolaris/sys/kcondvar.h"
@@ -125,6 +127,24 @@ int openzfs_cv_timedwait_hires(kcondvar_t *cv, mutex_t *mutex,
     }
     if (delta_ns <= 0) {
         return -1;
+    }
+    // BENCH ONLY, not for upstream: OSV_ZFS_HIRES_CV=0 reproduces the old
+    // tick-granular behaviour (sub-millisecond delays round to zero) so one
+    // image can serve both arms of an A/B.  Default is the fixed nanosecond
+    // path.  Resolved once and announced so a dropped --env cannot read as
+    // "no effect".
+    {
+        static int ab = -1;
+        if (ab < 0) {
+            const char *e = getenv("OSV_ZFS_HIRES_CV");
+            ab = (!e || !e[0]) ? 1 : (e[0] != '0');
+            printf("ZFSFLAG OSV_ZFS_HIRES_CV=%d (%s)\n", ab,
+                e ? "set" : "unset, default");
+        }
+        if (!ab) {
+            clock_t ticks = (clock_t)(delta_ns / (1000000000LL / hz));
+            return cv_timedwait(cv, mutex, ticks);
+        }
     }
     auto ret = cv->wait(mutex, std::chrono::nanoseconds(delta_ns));
     return ret == ETIMEDOUT ? -1 : 0;
