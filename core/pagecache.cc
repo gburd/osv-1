@@ -25,6 +25,8 @@
 #include <osv/sched.hh>
 #include <osv/clock.hh>
 #include <osv/fork_arena.hh>
+#include <cstdlib>       // BENCH ONLY: getenv for OSV_PAGECACHE_FSYNC_SCAN
+#include <osv/debug.h>   // BENCH ONLY: debug_early for the A/B announce
 
 #if CONF_fork
 // The page cache is process-GLOBAL kernel infrastructure: ONE read_cache, ONE
@@ -1101,8 +1103,20 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
      * cache cannot contain a dirty page for this inode, so there is nothing to
      * promote, collect, or write back.
      */
-    if (write_cache.empty())
-        return 0;
+    if (write_cache.empty()) {
+        /* BENCH ONLY, not for upstream: OSV_PAGECACHE_FSYNC_SCAN=1 forces the
+         * old unconditional whole-file scan so one image can A/B the guard.
+         * Default (unset or 0) keeps the fix.  Announced once. */
+        static int force_scan = -1;
+        if (force_scan < 0) {
+            const char *e = getenv("OSV_PAGECACHE_FSYNC_SCAN");
+            force_scan = (e && e[0] && e[0] != '0') ? 1 : 0;
+            debug_early(force_scan ? "PGCFLAG OSV_PAGECACHE_FSYNC_SCAN=1 (old scan)\n"
+                                   : "PGCFLAG OSV_PAGECACHE_FSYNC_SCAN default (guard on)\n");
+        }
+        if (!force_scan)
+            return 0;
+    }
     /* ponytail: whole-cache empty guard removes the O(file-size) scan for the
      * write()/pwrite() case (no writable mmap pages anywhere).  A large file
      * with a few dirty mmap pages elsewhere in the guest still scans its whole
