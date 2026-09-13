@@ -188,12 +188,32 @@ physio(struct device *dev, struct uio *uio, int ioflags)
 		return EINVAL;
 	if (uio->uio_resid == 0)
 		return 0;
-    
+
+	/*
+	 * Issue one bio per iovec.  Two bugs are fixed here relative to the
+	 * previous loop:
+	 *
+	 *  - bio_bcount was set to uio_resid, the total remaining length of the
+	 *    whole uio, but bio_data points at a single iovec's base.  When the
+	 *    uio carried more than one iovec the bio described uio_resid bytes
+	 *    starting at iov[0].iov_base while only iov[0].iov_len bytes are
+	 *    valid there, so a multi-iovec write sent adjacent stack/heap memory
+	 *    to the device as data.  A driver that checksums each block (for
+	 *    example an over-the-wire block protocol) rejects it; a plain disk
+	 *    silently writes garbage.  Use iov->iov_len.
+	 *
+	 *  - a zero-length leading iovec hit `continue` without advancing
+	 *    uio_iov/uio_iovcnt, so the loop spun forever on it.  Skip it
+	 *    properly instead.
+	 */
 	while (uio->uio_resid > 0) {
 		struct iovec *iov = uio->uio_iov;
 
-		if (!iov->iov_len)
+		if (!iov->iov_len) {
+			uio->uio_iov++;
+			uio->uio_iovcnt--;
 			continue;
+		}
 
 		bio = alloc_bio();
 		if (!bio)
@@ -207,7 +227,7 @@ physio(struct device *dev, struct uio *uio, int ioflags)
 		bio->bio_dev = dev;
 		bio->bio_data = iov->iov_base;
 		bio->bio_offset = uio->uio_offset;
-		bio->bio_bcount = uio->uio_resid;
+		bio->bio_bcount = iov->iov_len;
 
 		dev->driver->devops->strategy(bio);
 
@@ -216,10 +236,10 @@ physio(struct device *dev, struct uio *uio, int ioflags)
 		if (ret)
 			return ret;
 
-	        uio->uio_iov++;
-        	uio->uio_iovcnt--;
-        	uio->uio_resid -= iov->iov_len;
-        	uio->uio_offset += iov->iov_len;
+		uio->uio_iov++;
+		uio->uio_iovcnt--;
+		uio->uio_resid -= iov->iov_len;
+		uio->uio_offset += iov->iov_len;
 	}
 
 	return 0;
