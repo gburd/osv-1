@@ -483,11 +483,14 @@ void blk::req_done_q(int qid)
     while (1) {
         sched::thread::wait_until([this, qid] { return this->queue_not_empty(qid); });
         trace_virtio_blk_wake();
-        WITH_LOCK(_queue_locks[qid]) {
-            auto* q_ring = get_virt_queue(qid);
-            drain_queue(q_ring);
-            q_ring->wakeup_waiter();
-        }
+        // Do NOT take _queue_locks[qid] here: make_request() holds it across a
+        // sleeping add_buf_wait() when the ring is full, so a completion thread
+        // taking it would deadlock against a producer waiting on this thread to
+        // free ring space.  Each queue is drained by exactly one thread, so the
+        // drain races the producer only on the u16 used-ring head, lock-free.
+        auto* q_ring = get_virt_queue(qid);
+        drain_queue(q_ring);
+        q_ring->wakeup_waiter();
     }
 }
 
