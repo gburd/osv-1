@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 12:00:00 -0400
+Subject: [PATCH] zfs: STEP-2 issuer instrumentation (zl_parallel latch,
+ zl_last_lwb_latency, commit-window sleep)
+
+The M1 residual (after MQ_COMPLETE) is that OSv sustains a lower MEAN
+in-flight lwb depth than Linux at the same per-flush latency -> ~2x lower
+flush rate.  The pipeline-fill decision is zilog->zl_parallel; the batch
+window is sleep = zl_last_lwb_latency * zfs_commit_timeout_pct / 100.
+
+This probe records, without changing behaviour:
+  - zp_open / zp_prevnf / zp_decay: how often the commit-writer loop takes
+    the "OPENED -> ZIL_BURSTS" latch, the "prev not FLUSH_DONE -> BURSTS/2"
+    latch, or neither (the decay branch, i.e. it thinks single-threaded).
+  - zl_last_lwb_latency accumulated (mean/max/last) -- should be ~the flush
+    latency (~300-400us); if ~0 a clock/units bug collapses the window.
+  - the commit-waiter computed sleep (mean/max) and whether the waiter
+    actually TIMED OUT (issued the lwb itself) vs was signalled first.
+Exposed via zilwake_dump() (RESULT ZILISSUER).
+---
+ module/zfs/zil.c | 60 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index b0f278c68..c0f278c69 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -246,6 +246,20 @@ zw_depth_accum(int delta)
+ 	}
+ }
+ 
++/* STEP-2 issuer probe: why does OSv not fill the pipeline (low mean depth)? */
++static volatile uint64_t zp_open;      /* commit loop: lwb OPENED -> ZIL_BURSTS */
++static volatile uint64_t zp_prevnf;    /* prev lwb not FLUSH_DONE -> BURSTS/2 */
++static volatile uint64_t zp_decay;     /* neither -> think single-threaded, decay */
++static volatile uint64_t zi_lwblat_sum; /* sum zl_last_lwb_latency samples (ns) */
++static volatile uint64_t zi_lwblat_max; /* max zl_last_lwb_latency (ns) */
++static volatile uint64_t zi_lwblat_last;/* last zl_last_lwb_latency (ns) */
++static volatile uint64_t zi_lwblat_n;   /* # samples */
++static volatile uint64_t zi_sleep_sum;  /* sum computed commit-waiter sleep (ns) */
++static volatile uint64_t zi_sleep_max;  /* max computed sleep (ns) */
++static volatile uint64_t zi_sleep_n;    /* # commit-waiter sleeps computed */
++static volatile uint64_t zi_waiter_timedout; /* waiter reached timeout, issued lwb */
++
+ void zilwake_dump(void);
+ __attribute__((visibility("default"))) void
+ zilwake_dump(void)
+@@ -281,6 +295,17 @@ zilwake_dump(void)
+ 	    zw_issue_gap_ns / 1000.0, zw_issue_gap_max / 1000.0,
+ 	    zw_issues ? (zw_issue_gap_ns / 1000.0) / zw_issues : 0.0);
++	printf("RESULT ZILISSUER zp_open=%llu zp_prevnf=%llu zp_decay=%llu "
++	    "lwblat_us_mean=%.3f lwblat_us_max=%.3f lwblat_us_last=%.3f "
++	    "sleep_us_mean=%.3f sleep_us_max=%.3f "
++	    "waiter_timedout=%llu sleeps=%llu\n",
++	    (unsigned long long)zp_open, (unsigned long long)zp_prevnf,
++	    (unsigned long long)zp_decay,
++	    zi_lwblat_n ? (zi_lwblat_sum / 1000.0) / zi_lwblat_n : 0.0,
++	    zi_lwblat_max / 1000.0, zi_lwblat_last / 1000.0,
++	    zi_sleep_n ? (zi_sleep_sum / 1000.0) / zi_sleep_n : 0.0,
++	    zi_sleep_max / 1000.0,
++	    (unsigned long long)zi_waiter_timedout,
++	    (unsigned long long)zi_sleep_n);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -1474,6 +1499,11 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 	mutex_enter(&zilog->zl_lock);
+ 
+ 	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 7 + t) / 8;
++	/* STEP-2: sample the flush latency the issuer will use for its window. */
++	atomic_add_64(&zi_lwblat_sum, (uint64_t)zilog->zl_last_lwb_latency);
++	if ((uint64_t)zilog->zl_last_lwb_latency > zi_lwblat_max)
++		zi_lwblat_max = (uint64_t)zilog->zl_last_lwb_latency;
++	zi_lwblat_last = (uint64_t)zilog->zl_last_lwb_latency;
++	atomic_inc_64(&zi_lwblat_n);
+ 
+ 	lwb->lwb_root_zio = NULL;
+ 
+@@ -3168,10 +3198,13 @@ zil_process_commit_list(zilog_t *zilog, zil_commit_waiter_t *zcw, list_t *ilwbs)
+ 		if (lwb->lwb_state == LWB_STATE_OPENED) {
+ 			zilog->zl_parallel = ZIL_BURSTS;
++			atomic_inc_64(&zp_open);
+ 		} else if ((plwb = list_prev(&zilog->zl_lwb_list, lwb))
+ 		    != NULL && plwb->lwb_state != LWB_STATE_FLUSH_DONE) {
+ 			zilog->zl_parallel = MAX(zilog->zl_parallel,
+ 			    ZIL_BURSTS / 2);
++			atomic_inc_64(&zp_prevnf);
++		} else {
++			atomic_inc_64(&zp_decay);
+ 		}
+ 	}
+ 
+@@ -3599,6 +3632,10 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 	int pct = MAX(zfs_commit_timeout_pct, 1);
+ 	hrtime_t sleep = (zilog->zl_last_lwb_latency * pct) / 100;
++	/* STEP-2: record the window the waiter intends to hold. */
++	atomic_add_64(&zi_sleep_sum, (uint64_t)sleep);
++	if ((uint64_t)sleep > zi_sleep_max) zi_sleep_max = (uint64_t)sleep;
++	atomic_inc_64(&zi_sleep_n);
+ 	hrtime_t wakeup = gethrtime() + sleep;
+ 	boolean_t timedout = B_FALSE;
+ 
+@@ -3639,6 +3676,7 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 			if (rc != -1 || zcw->zcw_done)
+ 				continue;
+ 
+ 			timedout = B_TRUE;
++			atomic_inc_64(&zi_waiter_timedout);
+ 			zil_commit_waiter_timeout(zilog, zcw);
+ 
+ 			if (!zcw->zcw_done) {
+-- 
+2.54.0
