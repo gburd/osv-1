@@ -1,0 +1,110 @@
+From 0e34358098e28eaa0359265c9ff8f92490f460de Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Tue, 15 Sep 2026 08:20:25 -0400
+Subject: [PATCH] zfs: wake ZIL commit waiters outside zl_lock
+ (OSV_ZIL_WAKE_UNLOCKED)
+
+zil_lwb_flush_vdevs_done() walks lwb_waiters and wakes each backend
+(zil_commit_waiter_done -> cv_broadcast) while holding zilog->zl_lock, so
+the next commit and the woken backends stall behind the whole fan-out.
+
+OSV_ZIL_WAKE_UNLOCKED=1 drains the waiters into a local list under
+zl_lock, drops zl_lock, then wakes them.  Each zcw is already unlinked
+from the lwb before the lock is dropped, so it is safe to hold locally;
+zil_commit_waiter_done() only takes the per-waiter zcw_lock, never
+zl_lock, so there is no ordering hazard.
+
+Measured on a 32-way concurrent durable-write isolate (OSv, OpenZFS
+2.4.2, m5d.metal): the zl_lock hold across the fan-out drops ~7x (52us
+-> 7us at threads=32).  Filed on contention-reduction merit: it does NOT
+raise aggregate op/s on that isolate (per-queue block completion already
+parallelizes the fan-out across threads there), but it removes a real
+zl_lock hold that serializes concurrent zil_commit against every other
+zl_lock user, so it should reduce p99/latency variance under fsync
+concurrency.  Default off; resolved value printed once.
+---
+ module/zfs/zil.c | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index 0307df55a..578b0cbad 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -147,6 +147,32 @@ static uint64_t zil_slog_bulk = 64 * 1024 * 1024;
+ static kmem_cache_t *zil_lwb_cache;
+ static kmem_cache_t *zil_zcw_cache;
+ 
++/*
++ * OSv: zil_lwb_flush_vdevs_done() wakes every waiter batched into an lwb while
++ * holding zilog->zl_lock, so the next commit and the woken backends stall
++ * behind the whole fan-out.  OSV_ZIL_WAKE_UNLOCKED=1 drains the waiters into a
++ * local list under zl_lock, DROPS zl_lock, then runs zil_commit_waiter_done()
++ * on each - each zcw is already unlinked from the lwb, so it is safe to hold
++ * locally, and zil_commit_waiter_done() only takes the per-waiter zcw_lock.
++ * This collapses the zl_lock hold (measured ~7x, 52us->7us on a 32-way durable
++ * -write isolate) and reduces zl_lock contention.  Default off; the resolved
++ * value is printed once so a dropped env cannot read as "no effect".
++ */
++static int zil_wake_unlocked = -1;
++
++static int
++zil_wake_unlocked_enabled(void)
++{
++	if (zil_wake_unlocked < 0) {
++		extern char *getenv(const char *);
++		const char *e = getenv("OSV_ZIL_WAKE_UNLOCKED");
++		zil_wake_unlocked = (e && e[0] && e[0] != '0') ? 1 : 0;
++		printf("OSV_ZIL_WAKE_UNLOCKED: zil wake fan-out mode=%s\n",
++		    zil_wake_unlocked ? "unlocked" : "under-zl_lock");
++	}
++	return (zil_wake_unlocked);
++}
++
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+ static itx_t *zil_itx_clone(itx_t *oitx);
+ static uint64_t zil_max_waste_space(zilog_t *zilog);
+@@ -1493,6 +1519,12 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 	while ((itx = list_remove_head(&lwb->lwb_itxs)) != NULL)
+ 		zil_itx_destroy(itx, 0);
+ 
++	int wake_unlocked = zil_wake_unlocked_enabled();
++	list_t local_waiters;
++	if (wake_unlocked)
++		list_create(&local_waiters, sizeof (zil_commit_waiter_t),
++		    offsetof(zil_commit_waiter_t, zcw_node));
++
+ 	while ((zcw = list_remove_head(&lwb->lwb_waiters)) != NULL) {
+ 		/*
+ 		 * We expect any ZIO errors from child ZIOs to have been
+@@ -1508,6 +1540,14 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 		 * errors not being handled correctly here. See the
+ 		 * comment above the call to "zio_flush" for details.
+ 		 */
++		if (wake_unlocked) {
++			/*
++			 * OSv: zcw is already unlinked from the lwb; defer the
++			 * wake until after zl_lock is dropped (below).
++			 */
++			list_insert_tail(&local_waiters, zcw);
++			continue;
++		}
+ 		zil_commit_waiter_done(zcw, zio->io_error);
+ 	}
+ 
+@@ -1516,6 +1556,13 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 	/* Once we drop the lock, lwb may be freed by zil_sync(). */
+ 	mutex_exit(&zilog->zl_lock);
+ 
++	if (wake_unlocked) {
++		/* OSv: wake the drained waiters OUTSIDE zl_lock. */
++		while ((zcw = list_remove_head(&local_waiters)) != NULL)
++			zil_commit_waiter_done(zcw, zio->io_error);
++		list_destroy(&local_waiters);
++	}
++
+ 	mutex_enter(&zilog->zl_lwb_io_lock);
+ 	ASSERT3U(zilog->zl_lwb_inflight[txg & TXG_MASK], >, 0);
+ 	zilog->zl_lwb_inflight[txg & TXG_MASK]--;
+-- 
+2.54.0
+
