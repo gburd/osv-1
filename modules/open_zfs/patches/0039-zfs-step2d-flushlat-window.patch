@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 15:00:00 -0400
+Subject: [PATCH] zfs: STEP-2d flush-latency split + env-gated commit window
+
+(1) Split whole-lwb latency into write (issue->WRITE_DONE) vs flush portion
+so we can see if OSv's FLUSH round-trip is the ~2x cost vs Linux-direct.
+RESULT ZILFLUSHLAT. (2) OSV_ZIL_COMMIT_TIMEOUT_PCT overrides the compiled
+zfs_commit_timeout_pct (default 10) to A/B the batching window. Resolved
+once, printed once, default 0=use compiled. Env-gated, no default change.
+---
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -268,6 +268,11 @@
+ static volatile uint64_t zc_alloc_n;
+ static volatile uint64_t zc_dmutx_sum;  /* sum dmu_tx create->commit (ns) */
+ static volatile uint64_t zc_dmutx_n;
++/* STEP-2d: split whole-lwb latency into write vs flush. write latency measured
++ * at WRITE_DONE (issue->write-done); whole (zi_lwblat) - write = flush portion. */
++static volatile uint64_t zc_wrlat_sum;  /* sum issue->write-done (ns) */
++static volatile uint64_t zc_wrlat_max;
++static volatile uint64_t zc_wrlat_n;
+ 
+ void zilwake_dump(void);
+ __attribute__((visibility("default"))) void
+@@ -327,6 +332,14 @@
+ 	    zc_alloc_n ? (zc_alloc_sum / 1000.0) / zc_alloc_n : 0.0,
+ 	    zc_alloc_max / 1000.0,
+ 	    zc_dmutx_n ? (zc_dmutx_sum / 1000.0) / zc_dmutx_n : 0.0);
++	printf("RESULT ZILFLUSHLAT wrlat_us_mean=%.3f wrlat_us_max=%.3f wr_n=%llu "
++	    "whole_lwblat_us_mean=%.3f est_flush_us_mean=%.3f\n",
++	    zc_wrlat_n ? (zc_wrlat_sum / 1000.0) / zc_wrlat_n : 0.0,
++	    zc_wrlat_max / 1000.0, (unsigned long long)zc_wrlat_n,
++	    zi_lwblat_n ? (zi_lwblat_sum / 1000.0) / zi_lwblat_n : 0.0,
++	    (zi_lwblat_n && zc_wrlat_n) ?
++	    ((zi_lwblat_sum / 1000.0) / zi_lwblat_n) -
++	    ((zc_wrlat_sum / 1000.0) / zc_wrlat_n) : 0.0);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -1824,6 +1837,12 @@
+ 	mutex_enter(&zilog->zl_lock);
+ 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_ISSUED);
+ 	lwb->lwb_state = LWB_STATE_WRITE_DONE;
++	if (lwb->lwb_issued_timestamp) {
++		uint64_t zc_wl = (uint64_t)(gethrtime() - lwb->lwb_issued_timestamp);
++		atomic_add_64(&zc_wrlat_sum, zc_wl);
++		if (zc_wl > zc_wrlat_max) zc_wrlat_max = zc_wl;
++		atomic_inc_64(&zc_wrlat_n);
++	}
+ 	lwb->lwb_child_zio = NULL;
+ 	lwb->lwb_write_zio = NULL;
+ 
+@@ -3857,7 +3876,22 @@
+ 	 * For more details, see the comment at the bottom of the
+ 	 * zil_process_commit_list() function.
+ 	 */
+-	int pct = MAX(zfs_commit_timeout_pct, 1);
++	/*
++	 * OSv A/B: allow OSV_ZIL_COMMIT_TIMEOUT_PCT to override the compiled
++	 * zfs_commit_timeout_pct (default 10). Larger window -> more commits
++	 * aggregate per lwb (bigger batches). Resolved once, printed once.
++	 */
++	static int zc_pct_env = -1;
++	if (zc_pct_env < 0) {
++		extern char *getenv(const char *);
++		extern int atoi(const char *);
++		const char *e = getenv("OSV_ZIL_COMMIT_TIMEOUT_PCT");
++		zc_pct_env = (e && e[0]) ? atoi(e) : 0;
++		if (zc_pct_env < 0) zc_pct_env = 0;
++		printf("OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=%d (0=default %u)\n",
++		    zc_pct_env, zfs_commit_timeout_pct);
++	}
++	int pct = MAX(zc_pct_env > 0 ? (uint_t)zc_pct_env : zfs_commit_timeout_pct, 1);
+ 	hrtime_t sleep = (zilog->zl_last_lwb_latency * pct) / 100;
+ 	/* STEP-2: record the window the waiter intends to hold. */
+ 	atomic_add_64(&zi_sleep_sum, (uint64_t)sleep);
