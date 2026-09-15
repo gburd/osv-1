@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 14:00:00 -0400
+Subject: [PATCH] zfs: STEP-2c localize the serial issue-path cost
+
+Times zil_lwb_write_issue per lwb (issue_us), the zio_alloc_zil block
+allocation (alloc_us), and the dmu_tx create->commit region (dmutx_us),
+all under zl_issuer_lock. STEP-2b showed the ~250-500us mean_issue_gap is
+spent in the issue path, not the waiter wait. This splits WHERE. Emitted
+via zilwake_dump (RESULT ZILISSUEPATH). No behaviour change.
+---
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -259,6 +259,15 @@
+ static volatile uint64_t zi_wait_n;     /* # waits timed */
+ static volatile uint64_t zi_wait_to_sum;/* sum actual wait when it TIMED OUT (ns) */
+ static volatile uint64_t zi_wait_to_n;  /* # timed-out waits */
++/* STEP-2c: localize the serial issue-path cost under zl_issuer_lock. */
++static volatile uint64_t zc_issue_sum;  /* sum whole zil_lwb_write_issue per lwb (ns) */
++static volatile uint64_t zc_issue_max;
++static volatile uint64_t zc_issue_n;
++static volatile uint64_t zc_alloc_sum;  /* sum zio_alloc_zil (ns) */
++static volatile uint64_t zc_alloc_max;
++static volatile uint64_t zc_alloc_n;
++static volatile uint64_t zc_dmutx_sum;  /* sum dmu_tx create->commit (ns) */
++static volatile uint64_t zc_dmutx_n;
+ 
+ void zilwake_dump(void);
+ __attribute__((visibility("default"))) void
+@@ -311,6 +320,13 @@
+ 	    zi_wait_max / 1000.0, (unsigned long long)zi_wait_n,
+ 	    zi_wait_to_n ? (zi_wait_to_sum / 1000.0) / zi_wait_to_n : 0.0,
+ 	    (unsigned long long)zi_wait_to_n);
++	printf("RESULT ZILISSUEPATH issue_us_mean=%.3f issue_us_max=%.3f issues=%llu "
++	    "alloc_us_mean=%.3f alloc_us_max=%.3f dmutx_us_mean=%.3f\n",
++	    zc_issue_n ? (zc_issue_sum / 1000.0) / zc_issue_n : 0.0,
++	    zc_issue_max / 1000.0, (unsigned long long)zc_issue_n,
++	    zc_alloc_n ? (zc_alloc_sum / 1000.0) / zc_alloc_n : 0.0,
++	    zc_alloc_max / 1000.0,
++	    zc_dmutx_n ? (zc_dmutx_sum / 1000.0) / zc_dmutx_n : 0.0);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -2182,6 +2198,8 @@
+ 	mutex_exit(&zilog->zl_lock);
+ 
+ next_lwb:
++	;
++	hrtime_t zc_issue_t0 = gethrtime();
+ 	if (lwb->lwb_flags & LWB_FLAG_SLIM)
+ 		zilc = (zil_chain_t *)lwb->lwb_buf;
+ 	else
+@@ -2232,6 +2250,7 @@
+ 	 * Open transaction to allocate the next block pointer.
+ 	 */
+ 	dmu_tx_t *tx = dmu_tx_create(zilog->zl_os);
++	hrtime_t zc_dmutx_t0 = gethrtime();
+ 	VERIFY0(dmu_tx_assign(tx,
+ 	    DMU_TX_WAIT | DMU_TX_NOTHROTTLE | DMU_TX_SUSPEND));
+ 	dsl_dataset_dirty(dmu_objset_ds(zilog->zl_os), tx);
+@@ -2275,8 +2294,15 @@
+ 			min_size = max_size = nlwb->lwb_sz;
+ 		}
+ 
++		hrtime_t zc_alloc_t0 = gethrtime();
+ 		error = zio_alloc_zil(spa, zilog->zl_os, txg, bp,
+ 		    min_size, max_size, &slog, flexible);
++		{
++			uint64_t zc_ad = (uint64_t)(gethrtime() - zc_alloc_t0);
++			atomic_add_64(&zc_alloc_sum, zc_ad);
++			if (zc_ad > zc_alloc_max) zc_alloc_max = zc_ad;
++			atomic_inc_64(&zc_alloc_n);
++		}
+ 		if (error == 0) {
+ 			if (closed_slim)
+ 				ASSERT3U(BP_GET_LSIZE(bp), ==, max_size);
+@@ -2306,6 +2332,11 @@
+ 	zilog->zl_lwb_max_issued_txg = MAX(txg, zilog->zl_lwb_max_issued_txg);
+ 	mutex_exit(&zilog->zl_lwb_io_lock);
+ 	dmu_tx_commit(tx);
++	{
++		uint64_t zc_dd = (uint64_t)(gethrtime() - zc_dmutx_t0);
++		atomic_add_64(&zc_dmutx_sum, zc_dd);
++		atomic_inc_64(&zc_dmutx_n);
++	}
+ 
+ 	spa_config_enter(spa, SCL_STATE, lwb, RW_READER);
+ 
+@@ -2347,6 +2378,12 @@
+ 		    BP_GET_LSIZE(&lwb->lwb_blk));
+ 	}
+ 	lwb->lwb_issued_timestamp = gethrtime();
++	{
++		uint64_t zc_id = (uint64_t)(lwb->lwb_issued_timestamp - zc_issue_t0);
++		atomic_add_64(&zc_issue_sum, zc_id);
++		if (zc_id > zc_issue_max) zc_issue_max = zc_id;
++		atomic_inc_64(&zc_issue_n);
++	}
+ 	if (lwb->lwb_child_zio)
+ 		zio_nowait(lwb->lwb_child_zio);
+ 	zio_nowait(lwb->lwb_write_zio);
