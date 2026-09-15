@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 22:00:00 -0400
+Subject: [PATCH] zfs: STEP-2 wake-to-committer-entry latency probe
+
+committers_max=1 + issue_gap ~= round-trip means the next lwb issues only
+after a flush wakes a blocked backend that re-enters zil_commit as the next
+committer.  This probe decomposes that recycle: it stamps gethrtime() when a
+committer-waiter is woken (zil_commit_waiter_done cv_broadcast) and measures
+the latency until the next committer ENTERS zil_commit_writer (RESULT
+ZILWAKE2 wake2ent).  This isolates the OSv wake+reschedule cost (lever b)
+from the device round-trip (lever a, ~195us write-service already measured),
+to decide whether a faster next-committer wakeup would raise depth without a
+dedicated issuer thread (upstream has none).  Pure probe, no behaviour change.
+---
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index da2fc25..efa10eb 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -158,6 +158,12 @@ static volatile uint64_t zc2_issue_n;
+ static volatile uint64_t zc2_c2i_sum;
+ static volatile uint64_t zc2_c2i_max;
+ static volatile uint64_t zc2_c2i_n;
++/* STEP-2 wake-latency: time from a flush waking a committer-waiter to the next
++ * committer entering zil_commit_writer (the OSv recycle cost, lever b). */
++static volatile uint64_t zw_last_wake_ns;   /* gethrtime at last waiter wake */
++static volatile uint64_t zw_wake2ent_sum;   /* sum wake->next-committer-entry (ns) */
++static volatile uint64_t zw_wake2ent_max;
++static volatile uint64_t zw_wake2ent_n;
+ 
+ /*
+  * OSv M1 probe + Lever-1 A/B for the post-commit wakeup fan-out.
+@@ -376,6 +382,10 @@ zilwake_dump(void)
+ 	    zc2_passes ? (double)zc2_issue_n / (double)zc2_passes : 0.0,
+ 	    zc2_c2i_n ? (zc2_c2i_sum / 1000.0) / zc2_c2i_n : 0.0,
+ 	    zc2_c2i_max / 1000.0);
++
++	printf("RESULT ZILWAKE2 wake2ent_us_mean=%.3f wake2ent_us_max=%.3f n=%llu\n",
++	    zw_wake2ent_n ? (zw_wake2ent_sum / 1000.0) / zw_wake2ent_n : 0.0,
++	    zw_wake2ent_max / 1000.0, (unsigned long long)zw_wake2ent_n);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -1563,6 +1573,7 @@ zil_commit_waiter_done(zil_commit_waiter_t *zcw, int err)
+ 	zcw->zcw_lwb = NULL;
+ 	zcw->zcw_error = err;
+ 	zcw->zcw_done = B_TRUE;
++	zw_last_wake_ns = (uint64_t)gethrtime();
+ 	cv_broadcast(&zcw->zcw_cv);
+ 	mutex_exit(&zcw->zcw_lock);
+ }
+@@ -3759,6 +3770,15 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 	zc2_issue_before = zc2_issue_n;
+ 	atomic_inc_64(&zc2_passes);
+ 	zc2_active = B_TRUE;
++	{
++		uint64_t lw = zw_last_wake_ns;
++		if (lw != 0) {
++			uint64_t w2e = (uint64_t)(gethrtime() - (hrtime_t)lw);
++			atomic_add_64(&zw_wake2ent_sum, w2e);
++			if (w2e > zw_wake2ent_max) zw_wake2ent_max = w2e;
++			atomic_inc_64(&zw_wake2ent_n);
++		}
++	}
+ 
+ 	ZIL_STAT_BUMP(zilog, zil_commit_writer_count);
+ 
+
+-- 
+2.54.0
