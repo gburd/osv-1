@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 13:00:00 -0400
+Subject: [PATCH] zfs: STEP-2b measure ACTUAL commit-waiter wait vs computed sleep
+
+Times the actual cv_timedwait_hires blocking duration (enter->return) in
+the OPENED branch so we can compare intended (~40us) vs actual issue
+cadence (~300-450us). If actual >> intended, the OSv hires-timer/wakeup
+latency is the ~2x cost. Split by rc (timed out vs signalled). Exposed via
+zilwake_dump() (RESULT ZILWAIT).
+---
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -253,6 +253,12 @@
+ static volatile uint64_t zi_sleep_max;  /* max computed sleep (ns) */
+ static volatile uint64_t zi_sleep_n;    /* # commit-waiter sleeps computed */
+ static volatile uint64_t zi_waiter_timedout; /* waiter reached timeout, issued lwb */
++/* STEP-2b: actual cv_timedwait_hires blocking duration in the OPENED branch. */
++static volatile uint64_t zi_wait_sum;   /* sum actual wait (ns) */
++static volatile uint64_t zi_wait_max;   /* max actual wait (ns) */
++static volatile uint64_t zi_wait_n;     /* # waits timed */
++static volatile uint64_t zi_wait_to_sum;/* sum actual wait when it TIMED OUT (ns) */
++static volatile uint64_t zi_wait_to_n;  /* # timed-out waits */
+ 
+ void zilwake_dump(void);
+ __attribute__((visibility("default"))) void
+@@ -299,6 +305,12 @@
+ 	    zi_sleep_max / 1000.0,
+ 	    (unsigned long long)zi_waiter_timedout,
+ 	    (unsigned long long)zi_sleep_n);
++	printf("RESULT ZILWAIT wait_us_mean=%.3f wait_us_max=%.3f waits=%llu "
++	    "wait_timedout_us_mean=%.3f timedout_waits=%llu\n",
++	    zi_wait_n ? (zi_wait_sum / 1000.0) / zi_wait_n : 0.0,
++	    zi_wait_max / 1000.0, (unsigned long long)zi_wait_n,
++	    zi_wait_to_n ? (zi_wait_to_sum / 1000.0) / zi_wait_to_n : 0.0,
++	    (unsigned long long)zi_wait_to_n);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -3852,9 +3864,20 @@
+ 			 * timeout is reached; responsibility (2) from
+ 			 * the comment above this function.
+ 			 */
++			hrtime_t zi_w0 = gethrtime();
+ 			int rc = cv_timedwait_hires(&zcw->zcw_cv,
+ 			    &zcw->zcw_lock, wakeup, USEC2NSEC(1),
+ 			    CALLOUT_FLAG_ABSOLUTE);
++			{
++				uint64_t zi_wd = (uint64_t)(gethrtime() - zi_w0);
++				atomic_add_64(&zi_wait_sum, zi_wd);
++				if (zi_wd > zi_wait_max) zi_wait_max = zi_wd;
++				atomic_inc_64(&zi_wait_n);
++				if (rc == -1) {
++					atomic_add_64(&zi_wait_to_sum, zi_wd);
++					atomic_inc_64(&zi_wait_to_n);
++				}
++			}
+ 
+ 			if (rc != -1 || zcw->zcw_done)
+ 				continue;
