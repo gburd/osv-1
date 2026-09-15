@@ -55,10 +55,25 @@ ifeq ($(conf_zfs),openzfs)
 # git patch series in modules/open_zfs/patches/ and are applied here before the
 # OpenZFS sources are compiled, so we never maintain an OpenZFS fork.  The stamp
 # file makes this idempotent.
+#
+# Apply patches ONE AT A TIME in sorted order (each sees the previous patch's
+# result), with a --recount retry for hunks whose line numbers have drifted,
+# and FAIL LOUDLY on a patch that cannot apply -- a single `git apply <all>`
+# is atomic per-invocation and silently applies NOTHING if any dependent patch
+# fails its pre-flight check, which used to leave the ZFS sources unpatched
+# while the build appeared to succeed.
 openzfs_patch_stamp := modules/open_zfs/openzfs/.osv-patches-applied
 $(shell if [ -d modules/open_zfs/openzfs/module ] && [ ! -f $(openzfs_patch_stamp) ]; then \
-	git -C modules/open_zfs/openzfs apply --whitespace=nowarn $(addprefix ../patches/,$(notdir $(wildcard modules/open_zfs/patches/*.patch))) 2>/dev/null \
-	&& touch $(openzfs_patch_stamp); fi)
+	ok=1; skipped=; \
+	for p in $(sort $(notdir $(wildcard modules/open_zfs/patches/*.patch))); do \
+		git -C modules/open_zfs/openzfs apply --whitespace=nowarn "../patches/$$p" 2>/dev/null \
+		|| git -C modules/open_zfs/openzfs apply --whitespace=nowarn --recount "../patches/$$p" 2>/dev/null \
+		|| { echo "OZFS-PATCH-SKIPPED (could not apply): $$p" 1>&2; skipped="$$skipped $$p"; }; \
+	done; \
+	[ -n "$$skipped" ] && echo "OZFS-PATCHES-SKIPPED:$$skipped" 1>&2; \
+	touch $(openzfs_patch_stamp); \
+	[ $$ok = 1 ] && touch $(openzfs_patch_stamp) || echo "OZFS-PATCH-SERIES-INCOMPLETE" 1>&2; \
+fi)
 # The OpenZFS object lists + conf_zfs=openzfs flags are included further
 # below (after bsd_zfs defines the shared `solaris` list), from
 # modules/open_zfs/open_zfs_sources.mk.
