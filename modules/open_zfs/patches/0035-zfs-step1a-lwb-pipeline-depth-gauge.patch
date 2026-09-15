@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 10:00:00 -0400
+Subject: [PATCH] zfs: STEP-1a probe - count LWBs concurrently in flight
+ (pipeline depth)
+
+The M1 ceiling hypothesis is that OSv issues+flushes ONE lwb at a time
+(pipeline depth ~1) where upstream OpenZFS keeps many lwb flushes in
+flight.  This probe measures that depth DIRECTLY.
+
+An lwb is "in flight" from the moment it enters LWB_STATE_ISSUED (write
+zio issued via zio_nowait in zil_lwb_write_issue) until it reaches
+LWB_STATE_FLUSH_DONE (flush completion in zil_lwb_flush_vdevs_done).  We
+keep a gauge:
+  - zw_inflight        current count (inc at ISSUED, dec at FLUSH_DONE)
+  - zw_inflight_max    max ever seen
+  - a time-weighted running integral (sum of depth*dt) so the bench can
+    print a MEAN in-flight depth, not just the max.
+
+We also record, per issue, the gap since the PREVIOUS lwb was issued
+(zw_issue_gap_ns) - if issuance is serialized behind the prior flush,
+this gap ~= the flush latency (~333us); if it pipelines, the gap is
+small.  This localizes STEP 2.
+
+Pure counters, atomic, no new locks.  Exposed via zilwake_dump().
+---
+ module/zfs/zil.c | 58 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index a0f278c67..b0f278c68 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -225,6 +225,42 @@ zw_note_n(uint64_t n)
+ 	if (n > zw_waiters_max) zw_waiters_max = n; /* racy, fine for a probe */
+ }
+ 
++/*
++ * STEP-1a: LWB pipeline-depth gauge.  An lwb is "in flight" from
++ * LWB_STATE_ISSUED to LWB_STATE_FLUSH_DONE.  If OSv serializes flushes
++ * the gauge peaks at ~1; upstream keeps many in flight.
++ */
++static volatile uint64_t zw_inflight;        /* current in-flight lwbs */
++static volatile uint64_t zw_inflight_max;    /* max in-flight seen */
++static volatile uint64_t zw_issues;          /* total lwb issues */
++static volatile int64_t  zw_depth_integral;  /* sum of depth*dt (ns) */
++static volatile int64_t  zw_depth_last_ns;   /* last transition time */
++static volatile uint64_t zw_last_issue_ns;   /* time of previous issue */
++static volatile uint64_t zw_issue_gap_ns;    /* sum of gaps between issues */
++static volatile uint64_t zw_issue_gap_max;   /* max gap between issues */
++
++static void
++zw_depth_accum(int delta)
++{
++	/* integrate old depth over the elapsed time, then apply delta. */
++	hrtime_t now = gethrtime();
++	int64_t last = zw_depth_last_ns;
++	uint64_t cur = zw_inflight;
++	if (last != 0)
++		atomic_add_64((volatile uint64_t *)&zw_depth_integral,
++		    (uint64_t)((int64_t)cur * (now - last)));
++	zw_depth_last_ns = now;
++	if (delta > 0) {
++		atomic_inc_64(&zw_inflight);
++		uint64_t v = zw_inflight; /* read-after-inc; racy max is fine */
++		if (v > zw_inflight_max) zw_inflight_max = v;
++		atomic_inc_64(&zw_issues);
++		uint64_t li = zw_last_issue_ns;
++		if (li != 0) {
++			uint64_t g = (uint64_t)(now - (hrtime_t)li);
++			atomic_add_64(&zw_issue_gap_ns, g);
++			if (g > zw_issue_gap_max) zw_issue_gap_max = g;
++		}
++		zw_last_issue_ns = (uint64_t)now;
++	} else {
++		atomic_add_64(&zw_inflight, (uint64_t)-1);
++	}
++}
++
+ void zilwake_dump(void);
+ __attribute__((visibility("default"))) void
+ zilwake_dump(void)
+@@ -246,6 +282,17 @@ zilwake_dump(void)
+ 	    (unsigned long long)zw_nhist[4], (unsigned long long)zw_nhist[5],
+ 	    (unsigned long long)zw_nhist[6]);
++	printf("RESULT ZILDEPTH inflight_now=%llu inflight_max=%llu issues=%llu "
++	    "depth_integral_ns=%lld issue_gap_us_total=%.1f "
++	    "issue_gap_us_max=%.1f mean_issue_gap_us=%.3f\n",
++	    (unsigned long long)zw_inflight,
++	    (unsigned long long)zw_inflight_max,
++	    (unsigned long long)zw_issues,
++	    (long long)zw_depth_integral,
++	    zw_issue_gap_ns / 1000.0, zw_issue_gap_max / 1000.0,
++	    zw_issues ? (zw_issue_gap_ns / 1000.0) / zw_issues : 0.0);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -1478,6 +1525,7 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 
+ 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_WRITE_DONE);
+ 	lwb->lwb_state = LWB_STATE_FLUSH_DONE;
++	zw_depth_accum(-1);
+ 
+ 	if (zilog->zl_last_lwb_opened == lwb) {
+ 		/*
+@@ -2098,6 +2146,7 @@ next_lwb:
+ 	mutex_enter(&zilog->zl_lock);
+ 	zil_lwb_set_zio_dependency(zilog, lwb);
+ 	lwb->lwb_state = LWB_STATE_ISSUED;
++	zw_depth_accum(+1);
+ 
+ 	if (nlwb) {
+ 		nlwb->lwb_blk = *bp;
+-- 
+2.54.0
