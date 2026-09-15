@@ -32,6 +32,8 @@
  */
 extern int osv_run_app(const char *app_path, const char *args[], int args_len);
 extern void zfsdev_init(void);
+/* zilwake fan-out probe (OpenZFS build only); weak so a BSD-ZFS .so still loads. */
+extern void zilwake_dump(void) __attribute__((weak));
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -611,6 +613,8 @@ int main(int ac, char **av) {
         report_stat(nm, vp50, o.reps, "us");
         snprintf(nm, sizeof nm, "syncwrite%s%s_p99", o.nofsync?"_nofsync":"", tag);
         report_stat(nm, vp99, o.reps, "us");
+        /* Dump the ZIL wakeup fan-out probe (N, zl_lock hold, wake-loop time). */
+        if (zilwake_dump) zilwake_dump();
     } else if (!strcmp(wl, "meta")) {
         for (unsigned long r=0;r<o.reps;r++) v[r] = wl_meta(ds,&o);
         report_stat("meta_opspers", v, o.reps, "ops/s");

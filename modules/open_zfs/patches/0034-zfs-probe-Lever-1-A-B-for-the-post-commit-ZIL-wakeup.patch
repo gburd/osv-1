@@ -1,0 +1,183 @@
+From 6a9946da96e0dc091ff957e3edda0a9269c388a3 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Tue, 15 Sep 2026 07:08:07 -0400
+Subject: [PATCH] zfs: probe + Lever-1 A/B for the post-commit ZIL wakeup
+ fan-out
+
+Instrument zil_lwb_flush_vdevs_done() with gethrtime() to measure, per
+fan-out, N (waiters walked), the total zl_lock hold (blocks the next
+commit), the wake-loop time, and the whole-function time.  Expose the
+accumulated counters + an N histogram via zilwake_dump() (default
+visibility so the bench .so can call it).
+
+OSV_ZIL_WAKE_UNLOCKED=1 turns on Lever 1: drain the lwb waiters into a
+local list under zl_lock, DROP zl_lock, then run zil_commit_waiter_done()
+on each - so the next commit and the woken backends no longer stall
+behind the serial wake fan-out.  Resolved mode printed once.  Default off.
+---
+ module/zfs/zil.c | 122 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 122 insertions(+)
+
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index 0307df55a..a0f278c67 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -147,6 +147,84 @@ static uint64_t zil_slog_bulk = 64 * 1024 * 1024;
+ static kmem_cache_t *zil_lwb_cache;
+ static kmem_cache_t *zil_zcw_cache;
+ 
++/*
++ * OSv M1 probe + Lever-1 A/B for the post-commit wakeup fan-out.
++ *
++ * zil_lwb_flush_vdevs_done() runs on one zio completion thread and, holding
++ * zilog->zl_lock across the whole walk, wakes every waiter batched into this
++ * lwb (cv_broadcast -> thread::wake -> per-backend IPI).  The counters below
++ * measure, per fan-out: N (waiters walked), the total time under zl_lock (the
++ * part that blocks the next commit), and the time spent purely in the wake
++ * loop.  They are read by the bench via zilwake_dump().
++ *
++ * OSV_ZIL_WAKE_UNLOCKED=1 (Lever 1): collect the waiters into a local list
++ * under zl_lock, DROP zl_lock, then run zil_commit_waiter_done() on each.  The
++ * next commit and the woken backends no longer stall behind the fan-out.
++ */
++static volatile uint64_t zw_fanouts;       /* # of fan-outs with >=1 waiter */
++static volatile uint64_t zw_waiters_total;  /* sum of N across fan-outs */
++static volatile uint64_t zw_waiters_max;    /* max N seen */
++static volatile uint64_t zw_lockhold_ns;    /* sum: zl_lock enter->exit (blocks next commit) */
++static volatile uint64_t zw_wakeloop_ns;    /* sum: time in the waiter wake loop */
++static volatile uint64_t zw_fanout_ns;      /* sum: whole fn (spa_config_exit->done) */
++/* N histogram buckets: [0]=1, [1]=2, [2]=3-4, [3]=5-8, [4]=9-16, [5]=17-32, [6]=33+ */
++static volatile uint64_t zw_nhist[7];
++static int zw_wake_unlocked = -1;           /* -1 unresolved, 0 off, 1 on */
++
++static int
++zw_resolve_unlocked(void)
++{
++	if (zw_wake_unlocked < 0) {
++		extern char *getenv(const char *);
++		const char *e = getenv("OSV_ZIL_WAKE_UNLOCKED");
++		zw_wake_unlocked = (e && e[0] && e[0] != '0') ? 1 : 0;
++		printf("OSV_ZIL_WAKE_UNLOCKED: zil wake fan-out mode=%s\n",
++		    zw_wake_unlocked ? "unlocked (Lever1)" : "under-zl_lock (baseline)");
++	}
++	return (zw_wake_unlocked);
++}
++
++static void
++zw_note_n(uint64_t n)
++{
++	int b;
++	if (n <= 1) b = 0;
++	else if (n == 2) b = 1;
++	else if (n <= 4) b = 2;
++	else if (n <= 8) b = 3;
++	else if (n <= 16) b = 4;
++	else if (n <= 32) b = 5;
++	else b = 6;
++	atomic_inc_64(&zw_nhist[b]);
++	if (n > zw_waiters_max) zw_waiters_max = n; /* racy, fine for a probe */
++}
++
++void zilwake_dump(void);
++__attribute__((visibility("default"))) void
++zilwake_dump(void)
++{
++	uint64_t f = zw_fanouts, w = zw_waiters_total;
++	printf("RESULT ZILWAKE fanouts=%llu waiters_total=%llu "
++	    "mean_N=%.2f max_N=%llu "
++	    "lockhold_us_total=%.1f wakeloop_us_total=%.1f fanout_us_total=%.1f "
++	    "mean_lockhold_us=%.3f mean_wakeloop_us=%.3f mean_fanout_us=%.3f "
++	    "wakeloop_frac=%.3f mode=%s\n",
++	    (unsigned long long)f, (unsigned long long)w,
++	    f ? (double)w / (double)f : 0.0, (unsigned long long)zw_waiters_max,
++	    zw_lockhold_ns / 1000.0, zw_wakeloop_ns / 1000.0, zw_fanout_ns / 1000.0,
++	    f ? (zw_lockhold_ns / 1000.0) / f : 0.0,
++	    f ? (zw_wakeloop_ns / 1000.0) / f : 0.0,
++	    f ? (zw_fanout_ns / 1000.0) / f : 0.0,
++	    zw_fanout_ns ? (double)zw_wakeloop_ns / (double)zw_fanout_ns : 0.0,
++	    (zw_wake_unlocked > 0) ? "unlocked" : "baseline");
++	printf("RESULT ZILWAKE_NHIST n1=%llu n2=%llu n3_4=%llu n5_8=%llu "
++	    "n9_16=%llu n17_32=%llu n33plus=%llu\n",
++	    (unsigned long long)zw_nhist[0], (unsigned long long)zw_nhist[1],
++	    (unsigned long long)zw_nhist[2], (unsigned long long)zw_nhist[3],
++	    (unsigned long long)zw_nhist[4], (unsigned long long)zw_nhist[5],
++	    (unsigned long long)zw_nhist[6]);
++}
++
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+ static itx_t *zil_itx_clone(itx_t *oitx);
+ static uint64_t zil_max_waste_space(zilog_t *zilog);
+@@ -1471,6 +1549,15 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 
+ 	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
+ 
++	/* OSv M1 probe: time the whole fan-out and the zl_lock hold. */
++	hrtime_t zw_fan_t0 = gethrtime();
++	int zw_unlocked = zw_resolve_unlocked();
++	list_t zw_local;
++	if (zw_unlocked)
++		list_create(&zw_local, sizeof (zil_commit_waiter_t),
++		    offsetof(zil_commit_waiter_t, zcw_node));
++
++	hrtime_t zw_lock_t0 = gethrtime();
+ 	mutex_enter(&zilog->zl_lock);
+ 
+ 	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 7 + t) / 8;
+@@ -1493,7 +1580,20 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 	while ((itx = list_remove_head(&lwb->lwb_itxs)) != NULL)
+ 		zil_itx_destroy(itx, 0);
+ 
++	uint64_t zw_n = 0;
++	hrtime_t zw_wl_t0 = gethrtime();
+ 	while ((zcw = list_remove_head(&lwb->lwb_waiters)) != NULL) {
++		zw_n++;
++		if (zw_unlocked) {
++			/*
++			 * Lever 1: defer the wake to after zl_lock is
++			 * dropped.  zcw is already unlinked from the lwb, so
++			 * it is safe to hold in a local list; the waiting
++			 * thread only frees it after zcw_done is set below.
++			 */
++			list_insert_tail(&zw_local, zcw);
++			continue;
++		}
+ 		/*
+ 		 * We expect any ZIO errors from child ZIOs to have been
+ 		 * propagated "up" to this specific LWB's root ZIO, in
+@@ -1510,11 +1610,33 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
+ 		 */
+ 		zil_commit_waiter_done(zcw, zio->io_error);
+ 	}
++	hrtime_t zw_wl_t1 = gethrtime();
+ 
+ 	uint64_t txg = lwb->lwb_issued_txg;
+ 
+ 	/* Once we drop the lock, lwb may be freed by zil_sync(). */
+ 	mutex_exit(&zilog->zl_lock);
++	hrtime_t zw_lock_t1 = gethrtime();
++
++	if (zw_unlocked) {
++		/* Lever 1: wake the drained waiters OUTSIDE zl_lock. */
++		while ((zcw = list_remove_head(&zw_local)) != NULL)
++			zil_commit_waiter_done(zcw, zio->io_error);
++		list_destroy(&zw_local);
++	}
++
++	/* Record the probe (only fan-outs that actually woke someone). */
++	if (zw_n > 0) {
++		hrtime_t zw_fan_t1 = gethrtime();
++		atomic_inc_64(&zw_fanouts);
++		atomic_add_64(&zw_waiters_total, zw_n);
++		atomic_add_64(&zw_lockhold_ns, (uint64_t)(zw_lock_t1 - zw_lock_t0));
++		atomic_add_64(&zw_wakeloop_ns, (uint64_t)(zw_wl_t1 - zw_wl_t0));
++		atomic_add_64(&zw_fanout_ns, (uint64_t)(zw_fan_t1 - zw_fan_t0));
++		zw_note_n(zw_n);
++	} else if (zw_unlocked) {
++		list_destroy(&zw_local);
++	}
+ 
+ 	mutex_enter(&zilog->zl_lwb_io_lock);
+ 	ASSERT3U(zilog->zl_lwb_inflight[txg & TXG_MASK], >, 0);
+-- 
+2.54.0
+
