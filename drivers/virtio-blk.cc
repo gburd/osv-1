@@ -177,23 +177,24 @@ blk::blk(virtio_device& virtio_dev)
     // callback inline, and the ZFS path (vdev_disk_bio_done) overruns the
     // default kernel stack.
     //
-    // OSV_BLK_MQ_COMPLETE=1 spawns ONE completion thread per virtqueue, each
-    // draining only its own queue, so the biodone -> vdev_disk_bio_done ->
-    // zio_interrupt -> zil_lwb_flush_vdevs_done (cv_broadcast) completion work
-    // parallelizes across CPUs instead of serializing in one thread.
-    // Default off = the historical single completion thread that drains every
-    // queue.  Left off by default because the win only appears on a multiqueue
-    // guest under concurrent durable I/O and it costs one kernel thread per
-    // queue; a single-queue guest behaves identically either way.  Measured
-    // gain on a 32-vCPU guest under a concurrent fsync workload on ZFS-on-NVMe:
-    // aggregate throughput +58% at 16 writers and +48% at 32, NVMe going from
-    // 40% to 75% busy -- the single completion thread was the ceiling.  The
-    // resolved mode + queue count is printed once at boot so a dropped env
+    // OSV_BLK_MQ_COMPLETE controls whether one completion thread per virtqueue
+    // drains its own queue (so the biodone -> vdev_disk_bio_done -> zio_interrupt
+    // -> zil_lwb_flush_vdevs_done cv_broadcast completion work parallelizes
+    // across CPUs) or a single thread drains every queue serially.  Enabled by
+    // default; set OSV_BLK_MQ_COMPLETE=0 to force the historical single thread.
+    // A single-queue guest behaves identically either way; the cost otherwise
+    // is one kernel thread per queue.  Measured on a 32-vCPU guest under a
+    // concurrent fsync workload on ZFS-on-NVMe, per-queue completion raised
+    // aggregate durable-write throughput about +33 to +38% and the ZIL log
+    // flush rate about +40 to +43% at 16 and 32 concurrent writers, halving
+    // per-op p99, with the single completion thread otherwise the ceiling.
+    // The resolved mode + queue count is printed once at boot so a dropped env
     // cannot read as "no effect".
-    bool mq_complete = false;
+    bool mq_complete = true;
     {
         const char* e = getenv("OSV_BLK_MQ_COMPLETE");
-        mq_complete = (e && e[0] && e[0] != '0');
+        if (e && e[0])
+            mq_complete = (e[0] != '0');
     }
     printf("OSV_BLK_MQ_COMPLETE: virtio-blk completion mode=%s num_queues=%d\n",
            mq_complete ? "per-queue" : "single", _num_queues);
