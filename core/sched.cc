@@ -55,6 +55,11 @@ extern char _percpu_start[], _percpu_end[];
 using namespace osv;
 using namespace osv::clock::literals;
 
+// Global-scope boot hook for the OSV_LEAK_PROBE probe (defined in
+// core/leak_probe.cc); declared here so init_detached_threads_reaper can call
+// it without creating a namespace-scoped declaration that would shadow it.
+void maybe_start_leak_probe();
+
 namespace sched {
 
 TRACEPOINT(trace_sched_idle, "");
@@ -190,6 +195,15 @@ void *alloc_thread_storage(size_t align, size_t size)
     return aligned_alloc(align, size);
 #endif
 }
+
+// Leak-probe (OSV_LEAK_PROBE) reaper counters: zombie-queue depth (added, not
+// yet reaped) + cumulative reaps.  Defined here (before thread::reaper) so
+// reap()/add_zombie() below and the free-function accessor further down all
+// see them.  A queue that grows without bound = the single global reaper
+// cannot keep up with fork/exit churn (its cleanup closure destroys a whole
+// COW address space per zombie, serially).
+static std::atomic<long> g_reaper_pending{0};
+static std::atomic<long> g_reaper_reaped{0};
 
 class thread::reaper {
 public:
@@ -2356,6 +2370,8 @@ void thread::reaper::reap()
                 _zombies.pop_front();
                 z->join();
                 z->_cleanup();
+                g_reaper_pending.fetch_sub(1, std::memory_order_relaxed);
+                g_reaper_reaped.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -2370,11 +2386,18 @@ void thread::reaper::add_zombie(thread* z)
         // address spaces even when the terminating thread is a fork child
         // running in its COW address space (see _zombie_link in sched.hh).
         _zombies.push_back(*z);
+        g_reaper_pending.fetch_add(1, std::memory_order_relaxed);
         _thread->wake();
     }
 }
 
 thread::reaper *thread::_s_reaper;
+
+void leak_probe_reaper_stats(long *pending, long *reaped)
+{
+    if (pending) *pending = g_reaper_pending.load(std::memory_order_relaxed);
+    if (reaped)  *reaped  = g_reaper_reaped.load(std::memory_order_relaxed);
+}
 
 void init_detached_threads_reaper()
 {
@@ -2406,6 +2429,8 @@ void init_detached_threads_reaper()
         wake_local_enabled = (e && e[0] == '1');
         printf("WAKE_LOCAL %s\n", wake_local_enabled ? "ON" : "off");
     }
+    // Leak/wedge probe (OSV_LEAK_PROBE=<seconds>); no-op unless the env is set.
+    { ::maybe_start_leak_probe(); }
 }
 
 void start_early_threads()

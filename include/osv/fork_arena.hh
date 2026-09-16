@@ -98,6 +98,10 @@ void free(void *p);
 // the slot.  @as is the opaque mmu::address_space* being destroyed.
 void release_as(void *as);
 
+// Leak-probe (OSV_LEAK_PROBE): bytes carved off the monotonic global bump
+// pointer (never returned) and count of occupied per-AS free-list slots.
+void leak_probe_stats(unsigned long *bump_used, unsigned long *as_slots);
+
 // Usable size of an arena allocation (p must satisfy contains(p)).
 size_t usable_size(void *p);
 
