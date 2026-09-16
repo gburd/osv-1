@@ -1042,6 +1042,7 @@ objects += linux.o
 objects += core/commands.o
 objects += core/sched.o
 objects += core/numa.o
+objects += core/leak_probe.o
 objects += core/mmio.o
 objects += core/kprintf.o
 ifeq ($(conf_tracepoints),1)

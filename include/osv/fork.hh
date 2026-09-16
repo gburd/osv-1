@@ -75,6 +75,15 @@ pid_t wait_child(pid_t pid, int *status, int options);
 // Returns false for the top-level application (exit() shuts down as before).
 bool exit_current_child(int status);
 
+// Leak-probe: report the sizes of the fork bookkeeping maps (OSV_LEAK_PROBE).
+void leak_probe_map_sizes(unsigned long *children, unsigned long *as_pid,
+                          unsigned long *pid_as, unsigned long *fd_tables,
+                          unsigned long *sigtables);
+
+// Leak-probe: total live child-opened-fd tracking entries + owner-released slots.
+void leak_probe_fd_stats(unsigned long *child_opened_entries,
+                         unsigned long *owner_released);
+
 } // namespace fork
 } // namespace osv
 
