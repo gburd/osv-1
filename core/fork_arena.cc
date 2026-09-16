@@ -319,6 +319,22 @@ void release_as(void *as)
     }
 }
 
+void leak_probe_stats(unsigned long *bump_used, unsigned long *as_slots)
+{
+    if (bump_used) {
+        uintptr_t b = g_ready.load(std::memory_order_acquire)
+            ? g_bump.load(std::memory_order_relaxed) : arena_base;
+        *bump_used = (unsigned long)(b - arena_base);
+    }
+    if (as_slots) {
+        unsigned long n = 0;
+        for (unsigned i = 0; i < max_as_slots; i++) {
+            if (g_as_freelists[i].owner.load(std::memory_order_relaxed)) n++;
+        }
+        *as_slots = n;
+    }
+}
+
 } // namespace fork_arena
 
 // -----------------------------------------------------------------------------

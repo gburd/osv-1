@@ -1690,6 +1690,9 @@ inline void migrate_enable()
 // this function should be used sparingly, e.g., for debugging.
 void with_all_threads(std::function<void(sched::thread &)>);
 
+// Leak-probe (OSV_LEAK_PROBE): reaper zombie-queue depth + cumulative reaps.
+void leak_probe_reaper_stats(long *pending, long *reaped);
+
 // with_thread_by_id(id, f) finds the thread with the given id, and calls
 // the given function f() for it. A pointer to the thread is passed, or a
 // null pointer if a thread with that id does not exist.
