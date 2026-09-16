@@ -44,6 +44,30 @@ extern "C" bool fork_child_owns_fd(int fd);
 rcu_ptr<file> gfdt[FDMAX] = {};
 mutex_t gfdt_lock = MUTEX_INITIALIZER;
 
+#if CONF_fork
+// Close an fd that an exited fork child (backend) opened for ITSELF after fork
+// and never closed.  Called by the reaper (release_inherited_fds) so these
+// private fds do not leak in the shared gfdt across backend churn.  Plain
+// close semantics on the shared table: read the slot, null it, drop the
+// reference.  The fd was private to the exited backend, so nulling the slot
+// cannot disturb the parent or a sibling.
+extern "C" void fork_reap_close_child_opened_fd(int fd)
+{
+    if (fd < 0 || fd >= FDMAX) {
+        return;
+    }
+    struct file *fp = nullptr;
+    WITH_LOCK(gfdt_lock) {
+        fp = gfdt[fd].read_by_owner();
+        if (fp == nullptr) {
+            return;   // already closed (slot reused/freed): nothing to do
+        }
+        gfdt[fd].assign(nullptr);
+    }
+    fdrop(fp);
+}
+#endif
+
 /*
  * Allocate a file descriptor and assign fd to it atomically.
  *
