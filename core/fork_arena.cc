@@ -10,6 +10,7 @@
 #if CONF_fork
 
 #include <osv/fork_arena.hh>
+#include <cstdlib>
 #include <osv/mmu.hh>
 #include <osv/mmu-defs.hh>
 #include <osv/align.hh>
@@ -78,7 +79,6 @@ constexpr size_t header_size = 32;             // >= sizeof(chunk_header), keeps
 // held and preemption on (the original correctness property is preserved).
 std::atomic<bool> g_ready{false};
 std::atomic<uintptr_t> g_bump{0};   // next never-yet-carved VA (GLOBAL: unique VA)
-uintptr_t g_end = 0;                // arena_base + arena_size
 
 // Per-address-space free-list state.  Keyed by the opaque address_space* the
 // current thread runs in (mmu::current_address_space()).  A small fixed table
@@ -143,6 +143,10 @@ unsigned class_for(size_t total)
 
 } // anonymous namespace
 
+// arena_base + effective size (set in init()); external linkage so the header's
+// contains() inline can read it.  0 until init() runs -> contains() rejects.
+uintptr_t g_end = 0;
+
 void init()
 {
     if (g_ready.load(std::memory_order_acquire)) {
@@ -160,7 +164,24 @@ void init()
     // clone_address_space() still COW-clones the whole vma per child; the child
     // only faults on WRITE (COW break), which happens from app context with
     // irqs/preemption on, so that path keeps the original invariant.
-    void *v = mmu::map_anon(reinterpret_cast<void*>(arena_base), arena_size,
+    // Effective arena size: OSV_FORK_ARENA_SIZE_MB (MiB) overrides the default,
+    // clamped to [default .. 4096 MiB].  This is COMMITTED RAM at boot (eager
+    // populate below), so growing it trades boot RAM for more fork-churn
+    // headroom before the arena exhausts.  It delays, it does not remove, the
+    // VA-exhaustion -> identity-heap fallback leak (that needs an upstream
+    // fork-arena redesign).  Default keeps the historical 512 MiB.
+    size_t eff_size = arena_size;
+    if (const char *e = getenv("OSV_FORK_ARENA_SIZE_MB")) {
+        char *end = nullptr;
+        unsigned long mb = strtoul(e, &end, 10);
+        if (end && end != e && mb > 0) {
+            size_t want = (size_t)mb << 20;
+            if (want < arena_size) want = arena_size;          // never below default
+            if (want > (4096ull << 20)) want = 4096ull << 20;  // cap 4 GiB
+            eff_size = want;
+        }
+    }
+    void *v = mmu::map_anon(reinterpret_cast<void*>(arena_base), eff_size,
                             mmu::mmap_fixed | mmu::mmap_populate, mmu::perm_rw);
     if (reinterpret_cast<uintptr_t>(v) != arena_base) {
         // Could not pin the arena at its fixed VA: leave routing off (falls
@@ -170,7 +191,7 @@ void init()
         return;
     }
     g_bump.store(arena_base, std::memory_order_relaxed);
-    g_end = arena_base + arena_size;
+    g_end = arena_base + eff_size;
     g_ready.store(true, std::memory_order_release);
 }
 
@@ -316,6 +337,22 @@ void release_as(void *as)
             g_as_freelists[i].owner.store(nullptr, std::memory_order_release);
             return;
         }
+    }
+}
+
+void leak_probe_stats(unsigned long *bump_used, unsigned long *as_slots)
+{
+    if (bump_used) {
+        uintptr_t b = g_ready.load(std::memory_order_acquire)
+            ? g_bump.load(std::memory_order_relaxed) : arena_base;
+        *bump_used = (unsigned long)(b - arena_base);
+    }
+    if (as_slots) {
+        unsigned long n = 0;
+        for (unsigned i = 0; i < max_as_slots; i++) {
+            if (g_as_freelists[i].owner.load(std::memory_order_relaxed)) n++;
+        }
+        *as_slots = n;
     }
 }
 
