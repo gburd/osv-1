@@ -17,6 +17,9 @@
 #include <osv/spinlock.h>
 #include <atomic>
 #include <cstring>
+#include <cstdlib>
+#include <osv/sched.hh>
+#include <osv/mmu.hh>
 
 // -----------------------------------------------------------------------------
 // Fork heap arena implementation.  See include/osv/fork_arena.hh for the why.
@@ -80,6 +83,43 @@ std::atomic<bool> g_ready{false};
 std::atomic<uintptr_t> g_bump{0};   // next never-yet-carved VA (GLOBAL: unique VA)
 uintptr_t g_end = 0;                // arena_base + arena_size
 
+// LEAK #2 REAL FIX: per-AS overflow region. When the GLOBAL arena bump exhausts,
+// a child bumps from its own COW-private region in a dedicated app slot (97),
+// clear of the arena (96) and the mmap hole. Each child maps its own region in
+// its own page tables; destroy_address_space frees it wholesale on reap. free()
+// of a pointer in this slot is a NO-OP (range check below), so a cross-AS free
+// never reads the chunk header at a VA mapped only in the dead child.
+constexpr uintptr_t ovf_slot_base = 97ull << 39;      // 0x308000000000
+constexpr uintptr_t ovf_slot_end  = 98ull << 39;
+constexpr size_t    ovf_region_sz = 1ull << 20;       // 1 MiB per mapped region
+// NOTE: region size is a RAM/overhead knob. Eager mmap_populate commits the
+// WHOLE region up front, so a large region (e.g. 32 MiB) x many concurrent
+// backends overcommits RAM and OOMs even though it is freed on reap. 1 MiB
+// keeps the concurrent working set small (~1 MiB x live backends) while still
+// amortizing the map_anon cost over ~64 avg chunks. Measured: 32 MiB OOMs at
+// exhaustion; 256 KiB and 1 MiB keep mem_free FLAT (leak-free) with no OOM.
+
+// OSV_FORK_ARENA_RECLAIM: 1 (default) => per-AS overflow region (the fix);
+//                         0            => old identity-heap fallback (the leak) A/B.
+std::atomic<int> g_reclaim_on{-1};
+inline bool reclaim_on()
+{
+    int v = g_reclaim_on.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("OSV_FORK_ARENA_RECLAIM");
+        v = (e && e[0] == '0') ? 0 : 1;
+        g_reclaim_on.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
+}
+
+// BSS range check: is @p inside the per-AS overflow slot? Reads no arena page.
+inline bool in_overflow(const void *p)
+{
+    auto a = reinterpret_cast<uintptr_t>(p);
+    return a >= ovf_slot_base && a < ovf_slot_end;
+}
+
 // Per-address-space free-list state.  Keyed by the opaque address_space* the
 // current thread runs in (mmu::current_address_space()).  A small fixed table
 // with linear probing: the concurrent-process count is modest (postmaster +
@@ -91,6 +131,12 @@ uintptr_t g_end = 0;                // arena_base + arena_size
 struct as_freelist {
     std::atomic<void*>      owner{nullptr};   // address_space* key, null == free slot
     std::atomic<free_node*> heads[num_classes];
+    // LEAK #2 REAL FIX: per-AS overflow bump region (COW-private, slot 97).
+    // Freed wholesale by destroy_address_space page teardown on reap; reset in
+    // release_as so a recycled slot never inherits a dead child's overflow VA.
+    std::atomic<uintptr_t>  ovf_next{0};      // next byte to carve in current region
+    std::atomic<uintptr_t>  ovf_end{0};       // end of current region (0 = none yet)
+    spinlock                ovf_lock;         // guards mapping a fresh region (rare)
 };
 constexpr unsigned max_as_slots = 256;
 as_freelist g_as_freelists[max_as_slots];
@@ -124,6 +170,10 @@ as_freelist *slot_for(void *as)
             for (unsigned c = 0; c < num_classes; c++) {
                 g_as_freelists[i].heads[c].store(nullptr, std::memory_order_relaxed);
             }
+            // LEAK #2 REAL FIX: a freshly-claimed slot starts with no overflow
+            // region (never inherit a prior owner's VA).
+            g_as_freelists[i].ovf_next.store(0, std::memory_order_relaxed);
+            g_as_freelists[i].ovf_end.store(0, std::memory_order_relaxed);
             return &g_as_freelists[i];
         }
     }
@@ -179,6 +229,73 @@ bool ready()
     return g_ready.load(std::memory_order_acquire);
 }
 
+// LEAK #2 REAL FIX: carve a class_size chunk from address space @fl's private
+// overflow region. Lock-free bump within the current region; when it is full,
+// map a fresh COW-private ovf_region_sz region (slot 97) under the per-AS
+// ovf_lock. map_anon runs with no arena lock held and preemption on (app-thread
+// context), so no illegal fault; mmap_populate keeps it eager so a bump-carved
+// page is already backed (alloc never demand-faults from an IRQs-off context).
+static void *overflow_alloc(as_freelist *fl, size_t class_size)
+{
+    for (;;) {
+        uintptr_t end = fl->ovf_end.load(std::memory_order_acquire);
+        uintptr_t c = fl->ovf_next.load(std::memory_order_relaxed);
+        if (end && c + class_size <= end) {
+            if (fl->ovf_next.compare_exchange_weak(c, c + class_size,
+                    std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                return reinterpret_cast<void*>(c);
+            }
+            continue;   // lost the race, retry
+        }
+        // Current region full (or none). Map a fresh COW-private region. Do the
+        // map_anon OUTSIDE fl->ovf_lock (map_anon takes the vma-list rwlock and
+        // allocates a vma -> nested malloc; holding ovf_lock across that risks a
+        // lock-order inversion). Only the publish step is under the lock.
+        //
+        // EAGER-POPULATE INVARIANT (load-bearing): the arena's alloc() may be
+        // entered from an IRQs-off / preemption-off context, where a demand
+        // fault would abort. The already-mapped bump above is safe there (the
+        // region is mmap_populate eager, so a carved page is already backed).
+        // But MAPPING a fresh region calls map_anon -> takes a mutex / may sleep
+        // -> only legal when preemptable with IRQs on. In a non-preemptable
+        // context we therefore do NOT map; we return nullptr so the caller falls
+        // back to the identity heap for this ONE allocation (a bounded miss,
+        // not per-fork). This preserves the eager-populate correctness property.
+        if (!sched::preemptable() || !arch::irq_enabled()) {
+            return nullptr;
+        }
+        size_t rsz = ovf_region_sz;
+        if (class_size > rsz) {
+            rsz = align_up(class_size, ovf_region_sz);   // class_size <= max_alloc (2 MiB)
+        }
+        void *v = mmu::map_anon(reinterpret_cast<void*>(ovf_slot_base), rsz,
+                                mmu::mmap_populate, mmu::perm_rw);
+        uintptr_t base = reinterpret_cast<uintptr_t>(v);
+        if (!v || base < ovf_slot_base || base + rsz > ovf_slot_end) {
+            // map failed, or landed outside the overflow slot (in_overflow would
+            // misclassify it). Bail: caller falls back to the identity heap for
+            // this one allocation (bounded miss; still correct, just not reclaimed).
+            if (v) {
+                mmu::munmap(v, rsz);
+            }
+            return nullptr;
+        }
+        {
+            SCOPE_LOCK(fl->ovf_lock);
+            uintptr_t cend = fl->ovf_end.load(std::memory_order_acquire);
+            uintptr_t cnext = fl->ovf_next.load(std::memory_order_relaxed);
+            if (cend && cnext + class_size <= cend) {
+                // someone else's region has room; use it -- discard ours below
+            } else {
+                fl->ovf_next.store(base + class_size, std::memory_order_relaxed);
+                fl->ovf_end.store(base + rsz, std::memory_order_release);
+                return reinterpret_cast<void*>(base);
+            }
+        }
+        mmu::munmap(v, rsz);   // discard our redundant region, retry the bump
+    }
+}
+
 void *alloc(size_t size, size_t alignment)
 {
     if (!g_ready.load(std::memory_order_acquire)) {
@@ -223,12 +340,20 @@ void *alloc(size_t size, size_t alignment)
         }
     }
     if (!chunk) {
-        // Carve a fresh class_size chunk off the bump pointer (atomic).
+        // Carve a fresh class_size chunk off the GLOBAL bump pointer (atomic).
         uintptr_t c = g_bump.fetch_add(class_size, std::memory_order_relaxed);
-        if (c + class_size > g_end) {
-            return nullptr;   // arena exhausted
+        if (c + class_size <= g_end) {
+            chunk = reinterpret_cast<void*>(c);
+        } else if (reclaim_on() && fl) {
+            // LEAK #2 REAL FIX: global arena exhausted -> bump in THIS AS's
+            // private overflow region (slot 97), reclaimed wholesale on reap.
+            chunk = overflow_alloc(fl, class_size);
+            if (!chunk) {
+                return nullptr;   // could not map overflow: caller uses identity heap
+            }
+        } else {
+            return nullptr;   // arena exhausted (reclaim off): identity fallback (leak)
         }
-        chunk = reinterpret_cast<void*>(c);
     }
 
     // Now touch the chunk (a fresh bump chunk faults its page in here, with
@@ -262,6 +387,15 @@ inline void recover(void *p, uintptr_t &base, unsigned &s)
 
 void free(void *p)
 {
+    // LEAK #2 REAL FIX: an overflow-region chunk is reclaimed WHOLESALE by
+    // destroy_address_space page teardown on reap. free() here is a NO-OP,
+    // recognized by a BSS range check that reads NO arena page -- so a cross-AS
+    // free (AS0 reaper / RCU quiescent / sibling) at a VA mapped only in the
+    // dead/other child does not fault. (This is the C2-safe fix over the earlier
+    // per-AS-overflow attempt whose free() read the chunk header cross-AS.)
+    if (in_overflow(p)) {
+        return;
+    }
     uintptr_t base;
     unsigned s;
     recover(p, base, s);   // reads header (populated page), no lock, no fault
@@ -287,6 +421,11 @@ void free(void *p)
 
 size_t usable_size(void *p)
 {
+    // Overflow chunks: usable_size is reached only via same-AS realloc /
+    // malloc_usable_size, so the header (written by this same AS) is present and
+    // safe to read. recover() below reads it. No special case needed -- overflow
+    // chunks carry the identical header. (A cross-AS caller would be a bug
+    // elsewhere; free() -- the only real cross-AS path -- already no-ops above.)
     uintptr_t base;
     unsigned s;
     recover(p, base, s);
@@ -313,6 +452,11 @@ void release_as(void *as)
             for (unsigned c = 0; c < num_classes; c++) {
                 g_as_freelists[i].heads[c].store(nullptr, std::memory_order_relaxed);
             }
+            // LEAK #2 REAL FIX: reset the per-AS overflow bump. The dead child's
+            // overflow region (slot 97) was just unmapped by the page-table
+            // teardown; a slot recycled to a NEW AS must NOT inherit the dead VA.
+            g_as_freelists[i].ovf_next.store(0, std::memory_order_relaxed);
+            g_as_freelists[i].ovf_end.store(0, std::memory_order_relaxed);
             g_as_freelists[i].owner.store(nullptr, std::memory_order_release);
             return;
         }
