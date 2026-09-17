@@ -35,6 +35,15 @@
 #include <sys/cdefs.h>
 
 #include <bsd/porting/netport.h>
+/* LEAK #2 REAL FIX: this per-connection kernel object is dereferenced
+ * cross-AS by the AS0 virtio-net RX classifier / TCP timer / tx-complete
+ * thread, so it must live on the shared identity heap (coherent in every
+ * address space), never the COW fork arena or the per-AS fork overflow
+ * region.  It is allocated with C++ new (bypassing the wholesale UMA
+ * identity-heap scope in bsd/porting/uma_stub.cc), so scope it here. */
+extern "C" void fork_kernel_heap_push(void);
+extern "C" void fork_kernel_heap_pop(void);
+
 #include <bsd/uipc_syscalls.h>
 
 #include <fcntl.h>
@@ -1026,7 +1035,9 @@ zcopy_tx(int s, struct zmsghdr *zm)
 	ssize_t len;
 	ssize_t bytes = 0;
 	auto mp = &zm->zm_msg;
+	fork_kernel_heap_push();
 	struct ztx_handle *zh = new ztx_handle();
+	fork_kernel_heap_pop();
 
 	zm->zm_txhandle = zh;
 	efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);

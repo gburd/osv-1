@@ -34,6 +34,15 @@
 #include <sys/cdefs.h>
 
 #include <bsd/porting/netport.h>
+/* LEAK #2 REAL FIX: this per-connection kernel object is dereferenced
+ * cross-AS by the AS0 virtio-net RX classifier / TCP timer / tx-complete
+ * thread, so it must live on the shared identity heap (coherent in every
+ * address space), never the COW fork arena or the per-AS fork overflow
+ * region.  It is allocated with C++ new (bypassing the wholesale UMA
+ * identity-heap scope in bsd/porting/uma_stub.cc), so scope it here. */
+extern "C" void fork_kernel_heap_push(void);
+extern "C" void fork_kernel_heap_pop(void);
+
 #include <bsd/porting/sync_stub.h>
 
 #include <bsd/sys/sys/param.h>
@@ -630,6 +639,9 @@ void
 init_timers(struct tcp_timer* timers, struct tcpcb *tp, struct inpcb *inp)
 {
 	using namespace std::placeholders;
+	/* LEAK #2 REAL FIX: the 6 serial_timer_task nodes are fired by the AS0
+	 * timer thread; keep them on the identity heap (see the decl comment). */
+	fork_kernel_heap_push();
 
 	timers->timers[tcp_timer_type::TT_DELACK] =
 		new serial_timer_task(inp->inp_lock, std::bind(tcp_timer_delack, _1, tp));
@@ -648,6 +660,7 @@ init_timers(struct tcp_timer* timers, struct tcpcb *tp, struct inpcb *inp)
 
 	timers->timers[tcp_timer_type::TT_TSO_FLUSH] =
 		new serial_timer_task(inp->inp_lock, std::bind(tcp_timer_tso_flush, _1, tp));
+	fork_kernel_heap_pop();
 }
 
 serial_timer_task&

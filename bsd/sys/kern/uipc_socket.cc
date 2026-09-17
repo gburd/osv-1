@@ -109,6 +109,15 @@
 #include <cinttypes>
 
 #include <bsd/porting/netport.h>
+/* LEAK #2 REAL FIX: this per-connection kernel object is dereferenced
+ * cross-AS by the AS0 virtio-net RX classifier / TCP timer / tx-complete
+ * thread, so it must live on the shared identity heap (coherent in every
+ * address space), never the COW fork arena or the per-AS fork overflow
+ * region.  It is allocated with C++ new (bypassing the wholesale UMA
+ * identity-heap scope in bsd/porting/uma_stub.cc), so scope it here. */
+extern "C" void fork_kernel_heap_push(void);
+extern "C" void fork_kernel_heap_pop(void);
+
 #include <bsd/porting/uma_stub.h>
 #include <bsd/porting/sync_stub.h>
 #include <bsd/porting/synch.h>
@@ -241,7 +250,9 @@ soalloc(struct vnet *vnet)
 {
 	struct socket *so;
 
+	fork_kernel_heap_push();
 	so = new socket{};
+	fork_kernel_heap_pop();
 	if (so == NULL)
 		return (NULL);
 	uipc_d("soalloc() so=%" PRIx64, (uint64_t)so);

@@ -3254,10 +3254,22 @@ static ipv4_tcp_conn_id tcp_connection_id(tcpcb* tp)
 	};
 }
 
+/* LEAK #2 REAL FIX: the net_channel (and its embedded 256-slot RX ring) is
+ * written by the AS0 virtio-net RX classifier (post_packet -> _queue.push)
+ * in a non-preemptable IRQ context, so it must live on the shared identity
+ * heap -- coherent in every address space -- never the COW fork arena or the
+ * per-AS fork overflow region (which is mapped only in the allocating AS; a
+ * cross-AS RX write there faults). Bracket the allocation so it lands on the
+ * identity heap, like the other cross-AS net objects. */
+extern "C" void fork_kernel_heap_push(void);
+extern "C" void fork_kernel_heap_pop(void);
+
 void
 tcp_setup_net_channel(tcpcb* tp, struct ifnet* intf)
 {
+	fork_kernel_heap_push();
 	auto nc = aligned_new<net_channel>([=] (mbuf *m) { tcp_net_channel_packet(tp, m); });
+	fork_kernel_heap_pop();
 	tp->nc = nc;
 	tp->nc_intf = intf;
 	intf->add_net_channel(nc, tcp_connection_id(tp));
