@@ -83,7 +83,11 @@ struct kernel_heap_scope {
 static inline bool contains(const void *p)
 {
     auto a = reinterpret_cast<uintptr_t>(p);
-    return a >= arena_base && a < arena_base + arena_size;
+    // Arena chunks (slot 96) OR per-AS overflow chunks (slot 97, LEAK #2 REAL
+    // FIX). Both dispatch here; free() of an overflow chunk is a no-op (the
+    // region is reclaimed wholesale on reap).
+    return (a >= arena_base && a < arena_base + arena_size) ||
+           (a >= (97ull << 39) && a < (98ull << 39));
 }
 
 // Allocate `size` bytes with `alignment` from the arena; nullptr if it cannot
