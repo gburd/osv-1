@@ -39,6 +39,15 @@
 
 #include <osv/initialize.hh>
 #include <bsd/porting/netport.h>
+/* LEAK #2 REAL FIX: this per-connection kernel object is dereferenced
+ * cross-AS by the AS0 virtio-net RX classifier / TCP timer / tx-complete
+ * thread, so it must live on the shared identity heap (coherent in every
+ * address space), never the COW fork arena or the per-AS fork overflow
+ * region.  It is allocated with C++ new (bypassing the wholesale UMA
+ * identity-heap scope in bsd/porting/uma_stub.cc), so scope it here. */
+extern "C" void fork_kernel_heap_push(void);
+extern "C" void fork_kernel_heap_pop(void);
+
 #include <bsd/porting/sync_stub.h>
 
 #include <bsd/sys/sys/libkern.h>
@@ -1599,7 +1608,9 @@ tcp_attach(struct socket *so)
 	so->so_rcv.sb_flags |= SB_AUTOSIZE;
 	so->so_snd.sb_flags |= SB_AUTOSIZE;
 	INP_INFO_WLOCK(&V_tcbinfo);
+	fork_kernel_heap_push();
 	inp = new inpcb(so, &V_tcbinfo);
+	fork_kernel_heap_pop();
 #ifdef INET6
 	if (inp->inp_vflag & INP_IPV6PROTO) {
 		inp->inp_vflag |= INP_IPV6;
