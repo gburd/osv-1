@@ -6,6 +6,14 @@
 #include <string.h>
 #include "libc.h"
 
+/* LEAK #2 REAL FIX: keep the stdio FILE object on the shared identity heap.
+ * ofl_head (libc/stdio/ofl.c) is a process-global open-file list walked
+ * cross-AS by fflush(NULL)/exit; a FILE in the per-AS fork overflow region
+ * faults when touched from another address space. Bracket the FILE malloc
+ * so it lands on the identity heap (coherent in every AS). */
+extern void fork_kernel_heap_push(void);
+extern void fork_kernel_heap_pop(void);
+
 FILE *__fdopen(int fd, const char *mode)
 {
 	FILE *f;
@@ -18,7 +26,10 @@ FILE *__fdopen(int fd, const char *mode)
 	}
 
 	/* Allocate FILE+buffer or fail */
-	if (!(f=malloc(sizeof *f + UNGET + BUFSIZ))) return 0;
+	fork_kernel_heap_push();
+	f = malloc(sizeof *f + UNGET + BUFSIZ);
+	fork_kernel_heap_pop();
+	if (!f) return 0;
 
 	/* Zero-fill only the struct, not the buffer */
 	memset(f, 0, sizeof *f);
