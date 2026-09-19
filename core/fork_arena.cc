@@ -159,8 +159,9 @@ inline bool ovf_recycle_on()
         v = (e && e[0]) ? (e[0] != '0') : FORK_OVF_RECYCLE_DEFAULT;
         g_ovf_recycle.store(v, std::memory_order_relaxed);
         // PROOF OF BINDING: never trust an A/B without this line in the log.
-        debugf("FORKARENA ovf_recycle=%d (compiled default %d)\n",
-               v, FORK_OVF_RECYCLE_DEFAULT);
+        // debug_early_u64, not debugf: debugf only reaches the console when
+        // verbose is on, so a debugf proof-of-binding line proves nothing.
+        debug_early_u64("FORKARENA ovf_recycle=", (unsigned long long)v);
     }
     return v != 0;
 }
