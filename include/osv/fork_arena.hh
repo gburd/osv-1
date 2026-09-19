@@ -106,6 +106,11 @@ void release_as(void *as);
 // pointer (never returned) and count of occupied per-AS free-list slots.
 void leak_probe_stats(unsigned long *bump_used, unsigned long *as_slots);
 
+// FOOTPRINT PROBE: bytes of arena VA carved off the global bump (high-water),
+// and the count of live per-AS free-list slots.
+size_t bump_used();
+unsigned live_as_slots();
+
 // Usable size of an arena allocation (p must satisfy contains(p)).
 size_t usable_size(void *p);
 

@@ -426,6 +426,10 @@ void add_fork_shared_module_range(uintptr_t start, uintptr_t end);
 void destroy_address_space(address_space *as);
 #endif // CONF_fork
 
+// FOOTPRINT PROBE (OSV_FP_PROBE=1): start the per-address-space private-memory
+// attribution dumper thread.  No-op when the probe is off.
+void fp_probe_start();
+
 std::string procfs_maps();
 std::string sysfs_linear_maps();
 

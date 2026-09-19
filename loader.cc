@@ -794,6 +794,8 @@ void* do_main_thread(void *_main_args)
     // here (a kernel thread, irqs on, heap up) so the arena's own map_anon()
     // cannot recurse through an app malloc.
     fork_arena::init();
+    // FOOTPRINT PROBE (OSV_FP_PROBE=1): start the per-AS attribution dumper.
+    mmu::fp_probe_start();
 #endif
 
     // run each payload in order
