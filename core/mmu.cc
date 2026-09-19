@@ -241,8 +241,14 @@ bool on()
 {
     int v = g_on.load(std::memory_order_relaxed);
     if (v < 0) {
+        // DEFAULT ON, env only to DISABLE.  Measured: --env= values did not
+        // reach getenv() in this image (the boot line carried OSV_FP_PROBE=1,
+        // parse_options never printed "Setting in environment", and every
+        // FORKFLAG read "unset"), so an env-gated probe silently never ran.
+        // The probe is cheap and this is a measurement build, so default it on
+        // and make the arms compile-time instead of env-dependent.
         const char *e = getenv("OSV_FP_PROBE");
-        v = (e && e[0] && e[0] != '0') ? 1 : 0;
+        v = (e && e[0] == '0') ? 0 : 1;
         g_on.store(v, std::memory_order_relaxed);
     }
     return v != 0;
