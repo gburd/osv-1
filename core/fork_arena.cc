@@ -138,6 +138,33 @@ inline bool reclaim_on()
     return v != 0;
 }
 
+// OSV_FORK_OVF_RECYCLE: 1 (default) => the owning AS recycles its overflow
+// chunks (the churn fix); 0 => every overflow free no-ops (the old
+// churn-proportional behaviour).
+//
+// COMPILE-TIME DEFAULT, env only to override.  Measured on this image: --env=
+// values never reached getenv() (parse_options never printed "Setting in
+// environment" and every FORKFLAG read "unset"), so an env-only A/B would have
+// silently run the SAME arm twice and been read as "the fix does nothing".
+// -DFORK_OVF_RECYCLE_DEFAULT=0 builds the BEFORE arm.
+#ifndef FORK_OVF_RECYCLE_DEFAULT
+#define FORK_OVF_RECYCLE_DEFAULT 1
+#endif
+std::atomic<int> g_ovf_recycle{-1};
+inline bool ovf_recycle_on()
+{
+    int v = g_ovf_recycle.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("OSV_FORK_OVF_RECYCLE");
+        v = (e && e[0]) ? (e[0] != '0') : FORK_OVF_RECYCLE_DEFAULT;
+        g_ovf_recycle.store(v, std::memory_order_relaxed);
+        // PROOF OF BINDING: never trust an A/B without this line in the log.
+        debugf("FORKARENA ovf_recycle=%d (compiled default %d)\n",
+               v, FORK_OVF_RECYCLE_DEFAULT);
+    }
+    return v != 0;
+}
+
 // BSS range check: is @p inside the per-AS overflow slot? Reads no arena page.
 inline bool in_overflow(const void *p)
 {
@@ -152,21 +179,6 @@ inline unsigned ovf_owner_slot(const void *p)
 {
     auto a = reinterpret_cast<uintptr_t>(p);
     return (unsigned)((a - ovf_slot_base) / ovf_window_sz);
-}
-
-// OSV_FORK_OVF_RECYCLE: 1 (default) => the owning AS recycles its overflow
-// chunks (the churn fix); 0 => every overflow free no-ops (the old
-// churn-proportional behaviour), so both arms are A/B-able from ONE build.
-std::atomic<int> g_ovf_recycle{-1};
-inline bool ovf_recycle_on()
-{
-    int v = g_ovf_recycle.load(std::memory_order_relaxed);
-    if (v < 0) {
-        const char *e = getenv("OSV_FORK_OVF_RECYCLE");
-        v = (e && e[0] == '0') ? 0 : 1;
-        g_ovf_recycle.store(v, std::memory_order_relaxed);
-    }
-    return v != 0;
 }
 
 // FOOTPRINT PROBE: overflow bytes COMMITTED (mapped, and eagerly populated ->
