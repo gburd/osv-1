@@ -3877,13 +3877,25 @@ void fp_dump_once()
         t_pt += pt; t_priv += pv; t_ovf += ov;
         live++;
         // KB per term for this AS (4 KB pages).
-        debugf("FPROW as=%p cowarena_KB=%d cowovf_KB=%d cowelf_KB=%d cowmmap_KB=%d "
-               "cowoth_KB=%d pt_KB=%d priv_KB=%d ovf_KB=%d tot_KB=%d\n", o,
-               (int)(c[fp::B_ARENA] * 4), (int)(c[fp::B_OVF] * 4),
-               (int)(c[fp::B_ELF] * 4),   (int)(c[fp::B_MMAP] * 4),
-               (int)(c[fp::B_OTHER] * 4), (int)(pt * 4), (int)(pv * 4), (int)(ov * 4),
-               (int)((c[fp::B_ARENA] + c[fp::B_OVF] + c[fp::B_ELF] + c[fp::B_MMAP] +
-                      c[fp::B_OTHER] + pt + pv + ov) * 4));
+        // debug_early* (NOT debugf): debugf only reaches the console when
+        // verbose is on (core/debug.cc:167 gates console::write on `verbose`),
+        // which is why every debugf-based probe line here was invisible even
+        // though the probe ran.  debug_early writes unconditionally -- the same
+        // reason the FORKFLAG lines show up.
+        debug_early("FPROW as=");
+        debug_early_u64("", (unsigned long long)(uintptr_t)o);
+        debug_early_u64("  cowarena_KB=", (unsigned long long)(c[fp::B_ARENA] * 4));
+        debug_early_u64("  cowovf_KB=",   (unsigned long long)(c[fp::B_OVF] * 4));
+        debug_early_u64("  cowelf_KB=",   (unsigned long long)(c[fp::B_ELF] * 4));
+        debug_early_u64("  cowmmap_KB=",  (unsigned long long)(c[fp::B_MMAP] * 4));
+        debug_early_u64("  cowoth_KB=",   (unsigned long long)(c[fp::B_OTHER] * 4));
+        debug_early_u64("  pt_KB=",       (unsigned long long)(pt * 4));
+        debug_early_u64("  priv_KB=",     (unsigned long long)(pv * 4));
+        debug_early_u64("  ovf_KB=",      (unsigned long long)(ov * 4));
+        debug_early_u64("  tot_KB=", (unsigned long long)((c[fp::B_ARENA] +
+            c[fp::B_OVF] + c[fp::B_ELF] + c[fp::B_MMAP] + c[fp::B_OTHER] +
+            pt + pv + ov) * 4));
+        debug_early("FPROWEND\n");
     }
     u64 acc = 0;
     for (unsigned b = 0; b < fp::B_NBUCKET; b++) acc += t_cow[b];
@@ -3895,26 +3907,29 @@ void fp_dump_once()
     // Per-backend average over live CHILD address spaces (live-1 excludes AS0,
     // which holds no row unless it COW-faulted; guard anyway).
     unsigned kids = live ? live : 1;
-    debugf("FPTOT live_as=%d forks=%d reaps=%d "
-           "cowarena_MB=%d cowovf_MB=%d cowelf_MB=%d cowmmap_MB=%d cowoth_MB=%d "
-           "pt_MB=%d priv_MB=%d ovf_MB=%d acct_MB=%d per_as_KB=%d "
-           "retired_cowarena_MB=%d retired_pt_MB=%d "
-           "arena_bump_MB=%d arena_slots=%d "
-           "ovfcommit_MB=%d ovfrecycled_MB=%d ovflive_MB=%d ovfforeign=%d "
-           "memfree_MB=%d memtotal_MB=%d\n",
-           (int)live, (int)fp::g_forks.load(std::memory_order_relaxed),
-           (int)fp::g_reaps.load(std::memory_order_relaxed),
-           (int)((t_cow[fp::B_ARENA] * 4) >> 10), (int)((t_cow[fp::B_OVF] * 4) >> 10),
-           (int)((t_cow[fp::B_ELF] * 4) >> 10),   (int)((t_cow[fp::B_MMAP] * 4) >> 10),
-           (int)((t_cow[fp::B_OTHER] * 4) >> 10),
-           (int)((t_pt * 4) >> 10), (int)((t_priv * 4) >> 10), (int)((t_ovf * 4) >> 10),
-           (int)((acc * 4) >> 10), (int)((acc * 4) / kids),
-           (int)((fp::r_cow[fp::B_ARENA].load(std::memory_order_relaxed) * 4) >> 10),
-           (int)((fp::r_pt.load(std::memory_order_relaxed) * 4) >> 10),
-           (int)(fork_arena::bump_used() >> 20), (int)fork_arena::live_as_slots(),
-           (int)(_ovf_c >> 20), (int)(_ovf_r >> 20), (int)(_ovf_l >> 20),
-           (int)_ovf_f,
-           (int)(memory::stats::free() >> 20), (int)(memory::stats::total() >> 20));
+    debug_early("FPTOT");
+    debug_early_u64(" live_as=", (unsigned long long)live);
+    debug_early_u64(" forks=", fp::g_forks.load(std::memory_order_relaxed));
+    debug_early_u64(" reaps=", fp::g_reaps.load(std::memory_order_relaxed));
+    debug_early_u64(" cowarena_MB=", (unsigned long long)((t_cow[fp::B_ARENA] * 4) >> 10));
+    debug_early_u64(" cowovf_MB=",   (unsigned long long)((t_cow[fp::B_OVF] * 4) >> 10));
+    debug_early_u64(" cowelf_MB=",   (unsigned long long)((t_cow[fp::B_ELF] * 4) >> 10));
+    debug_early_u64(" cowmmap_MB=",  (unsigned long long)((t_cow[fp::B_MMAP] * 4) >> 10));
+    debug_early_u64(" cowoth_MB=",   (unsigned long long)((t_cow[fp::B_OTHER] * 4) >> 10));
+    debug_early_u64(" pt_MB=",   (unsigned long long)((t_pt * 4) >> 10));
+    debug_early_u64(" priv_MB=", (unsigned long long)((t_priv * 4) >> 10));
+    debug_early_u64(" ovf_MB=",  (unsigned long long)((t_ovf * 4) >> 10));
+    debug_early_u64(" acct_MB=", (unsigned long long)((acc * 4) >> 10));
+    debug_early_u64(" per_as_KB=", (unsigned long long)((acc * 4) / kids));
+    debug_early_u64(" arena_bump_MB=", (unsigned long long)(fork_arena::bump_used() >> 20));
+    debug_early_u64(" arena_slots=", (unsigned long long)fork_arena::live_as_slots());
+    debug_early_u64(" ovfcommit_MB=",   (unsigned long long)(_ovf_c >> 20));
+    debug_early_u64(" ovfrecycled_MB=", (unsigned long long)(_ovf_r >> 20));
+    debug_early_u64(" ovflive_MB=",     (unsigned long long)(_ovf_l >> 20));
+    debug_early_u64(" ovfforeign=",     (unsigned long long)_ovf_f);
+    debug_early_u64(" memfree_MB=",  (unsigned long long)(memory::stats::free() >> 20));
+    debug_early_u64(" memtotal_MB=", (unsigned long long)(memory::stats::total() >> 20));
+    debug_early("FPTOTEND\n");
 }
 
 void fp_probe_start()
@@ -3923,7 +3938,7 @@ void fp_probe_start()
     const char *e = getenv("OSV_FP_INTERVAL");
     int iv = (e && e[0]) ? atoi(e) : 5;
     if (iv < 1) iv = 1;
-    debugf("FPPROBE started interval=%ds\n", iv);
+    debug_early_u64("FPPROBE started interval_s=", (unsigned long long)iv);
     auto *t = sched::thread::make([iv] {
         for (;;) {
             sched::thread::sleep(std::chrono::seconds(iv));
