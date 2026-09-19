@@ -224,6 +224,26 @@ void init()
     g_ready.store(true, std::memory_order_release);
 }
 
+// FOOTPRINT PROBE: bytes of arena VA carved off the GLOBAL bump so far (the
+// high-water of never-yet-reused arena space).  Read-only; no locks.
+size_t bump_used()
+{
+    if (!g_ready.load(std::memory_order_acquire)) return 0;
+    uintptr_t b = g_bump.load(std::memory_order_relaxed);
+    return (b > arena_base) ? (size_t)(b - arena_base) : 0;
+}
+
+// FOOTPRINT PROBE: count of per-AS free-list slots in use (== live processes
+// that have allocated from the arena).
+unsigned live_as_slots()
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < max_as_slots; i++) {
+        if (g_as_freelists[i].owner.load(std::memory_order_relaxed)) n++;
+    }
+    return n;
+}
+
 bool ready()
 {
     return g_ready.load(std::memory_order_acquire);
