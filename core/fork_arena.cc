@@ -92,6 +92,31 @@ uintptr_t g_end = 0;                // arena_base + arena_size
 constexpr uintptr_t ovf_slot_base = 97ull << 39;      // 0x308000000000
 constexpr uintptr_t ovf_slot_end  = 98ull << 39;
 constexpr size_t    ovf_region_sz = 1ull << 20;       // 1 MiB per mapped region
+
+// CHURN FIX: per-AS DISJOINT overflow VA windows.
+//
+// WHY THE WINDOWS (this is the whole fix).  Post-exhaustion allocations used to
+// come from per-AS regions mapped at the SAME hint VA in every address space, so
+// an overflow VA did NOT identify its owning AS.  free() therefore could not tell
+// a same-AS free from a cross-AS one, and a cross-AS free must never read the
+// chunk header (the VA may be mapped only in the dead/other child -> fault).  The
+// only safe option left was to no-op EVERY overflow free -- which removed all
+// recycling, so a backend's committed RAM tracked its LIFETIME MALLOC CHURN
+// instead of its live heap.  For PostgreSQL (per-query MemoryContext churn, small
+// live heap) that is the pathological case and is the bulk of the measured
+// ~0.7 GB per-backend footprint.
+//
+// Carving slot 97 into one window per AS slot restores VA->owner arithmetic in
+// BSS alone: (va - ovf_slot_base) / ovf_window_sz IS the owning slot index.  So
+// free() can decide same-AS vs foreign WITHOUT READING THE ARENA PAGE, keeping
+// the C2-safety property exactly (a foreign free is still an unconditional
+// no-op), while the OWNING AS recycles through its normal per-class free-list.
+// That collapses churn-proportional commit back to live-heap-proportional.
+//
+// 512 GiB (slot 97) / 256 AS slots = 2 GiB of VA per AS.  VA only; RAM is still
+// just the pages actually mapped -- and now they get REUSED.
+constexpr size_t    ovf_window_sz = (ovf_slot_end - ovf_slot_base) / 256;
+static_assert(ovf_window_sz >= (1ull << 31), "overflow window too small");
 // NOTE: region size is a RAM/overhead knob. Eager mmap_populate commits the
 // WHOLE region up front, so a large region (e.g. 32 MiB) x many concurrent
 // backends overcommits RAM and OOMs even though it is freed on reap. 1 MiB
@@ -120,6 +145,38 @@ inline bool in_overflow(const void *p)
     return a >= ovf_slot_base && a < ovf_slot_end;
 }
 
+// CHURN FIX: which AS slot OWNS overflow pointer @p, by arithmetic alone.
+// Reads no arena page and takes no lock -- this is what makes the same-AS vs
+// foreign decision in free() safe (see the ovf_window_sz note above).
+inline unsigned ovf_owner_slot(const void *p)
+{
+    auto a = reinterpret_cast<uintptr_t>(p);
+    return (unsigned)((a - ovf_slot_base) / ovf_window_sz);
+}
+
+// OSV_FORK_OVF_RECYCLE: 1 (default) => the owning AS recycles its overflow
+// chunks (the churn fix); 0 => every overflow free no-ops (the old
+// churn-proportional behaviour), so both arms are A/B-able from ONE build.
+std::atomic<int> g_ovf_recycle{-1};
+inline bool ovf_recycle_on()
+{
+    int v = g_ovf_recycle.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("OSV_FORK_OVF_RECYCLE");
+        v = (e && e[0] == '0') ? 0 : 1;
+        g_ovf_recycle.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
+}
+
+// FOOTPRINT PROBE: overflow bytes COMMITTED (mapped, and eagerly populated ->
+// real RAM) and bytes RECYCLED through a same-AS free.  Overflow pages are
+// committed by mmap_populate, NOT by a COW fault, so a COW-fault-only probe
+// MISSES them entirely -- these two counters are the corrected accounting.
+std::atomic<unsigned long> g_ovf_committed{0};
+std::atomic<unsigned long> g_ovf_recycled{0};
+std::atomic<unsigned long> g_ovf_foreign_frees{0};
+
 // Per-address-space free-list state.  Keyed by the opaque address_space* the
 // current thread runs in (mmu::current_address_space()).  A small fixed table
 // with linear probing: the concurrent-process count is modest (postmaster +
@@ -137,6 +194,11 @@ struct as_freelist {
     std::atomic<uintptr_t>  ovf_next{0};      // next byte to carve in current region
     std::atomic<uintptr_t>  ovf_end{0};       // end of current region (0 = none yet)
     spinlock                ovf_lock;         // guards mapping a fresh region (rare)
+    // CHURN FIX: bytes of this AS's overflow WINDOW mapped so far.  Doubles as
+    // the map cursor (windows are filled monotonically) and as the high-water
+    // that free() range-checks a candidate pointer against -- both reads are
+    // BSS-only, so they never touch an arena page.
+    std::atomic<uintptr_t>  ovf_mapped{0};
 };
 constexpr unsigned max_as_slots = 256;
 as_freelist g_as_freelists[max_as_slots];
@@ -174,6 +236,9 @@ as_freelist *slot_for(void *as)
             // region (never inherit a prior owner's VA).
             g_as_freelists[i].ovf_next.store(0, std::memory_order_relaxed);
             g_as_freelists[i].ovf_end.store(0, std::memory_order_relaxed);
+            // CHURN FIX: and no mapped window (the previous owner's mappings
+            // died with its page tables; this AS must map its own).
+            g_as_freelists[i].ovf_mapped.store(0, std::memory_order_relaxed);
             return &g_as_freelists[i];
         }
     }
@@ -244,6 +309,45 @@ unsigned live_as_slots()
     return n;
 }
 
+// FOOTPRINT PROBE: the OVERFLOW accounting the COW-fault probe cannot see.
+// Overflow regions are committed by mmap_populate (eager, real RAM at map time),
+// NOT by a COW write fault, so a COW-fault-only probe misses them ENTIRELY --
+// which is exactly how the dominant term went unattributed before.
+//   committed     = bytes of overflow region ever mapped (real RAM)
+//   recycled      = bytes handed back through a same-AS free (the fix working)
+//   foreign_frees = frees skipped because another AS owns the VA (C2-safe no-op)
+// Also reports total committed overflow bytes for the LIVE address spaces, which
+// is the per-backend number the breakdown needs.
+void overflow_stats(unsigned long *committed, unsigned long *recycled,
+                    unsigned long *foreign_frees, unsigned long *live_mapped)
+{
+    if (committed) *committed = g_ovf_committed.load(std::memory_order_relaxed);
+    if (recycled) *recycled = g_ovf_recycled.load(std::memory_order_relaxed);
+    if (foreign_frees) {
+        *foreign_frees = g_ovf_foreign_frees.load(std::memory_order_relaxed);
+    }
+    if (live_mapped) {
+        unsigned long t = 0;
+        for (unsigned i = 0; i < max_as_slots; i++) {
+            if (g_as_freelists[i].owner.load(std::memory_order_relaxed)) {
+                t += g_as_freelists[i].ovf_mapped.load(std::memory_order_relaxed);
+            }
+        }
+        *live_mapped = t;
+    }
+}
+
+// FOOTPRINT PROBE: this AS's overflow bytes mapped (per-backend attribution).
+unsigned long overflow_mapped_for(void *as)
+{
+    for (unsigned i = 0; i < max_as_slots; i++) {
+        if (g_as_freelists[i].owner.load(std::memory_order_relaxed) == as) {
+            return g_as_freelists[i].ovf_mapped.load(std::memory_order_relaxed);
+        }
+    }
+    return 0;
+}
+
 bool ready()
 {
     return g_ready.load(std::memory_order_acquire);
@@ -257,6 +361,11 @@ bool ready()
 // page is already backed (alloc never demand-faults from an IRQs-off context).
 static void *overflow_alloc(as_freelist *fl, size_t class_size)
 {
+    // CHURN FIX: this AS's own disjoint VA window, so an overflow pointer's
+    // owner is recoverable by arithmetic in free() (see ovf_window_sz).
+    const unsigned slot = (unsigned)(fl - &g_as_freelists[0]);
+    const uintptr_t win_base = ovf_slot_base + (uintptr_t)slot * ovf_window_sz;
+    const uintptr_t win_end  = win_base + ovf_window_sz;
     for (;;) {
         uintptr_t end = fl->ovf_end.load(std::memory_order_acquire);
         uintptr_t c = fl->ovf_next.load(std::memory_order_relaxed);
@@ -288,13 +397,20 @@ static void *overflow_alloc(as_freelist *fl, size_t class_size)
         if (class_size > rsz) {
             rsz = align_up(class_size, ovf_region_sz);   // class_size <= max_alloc (2 MiB)
         }
-        void *v = mmu::map_anon(reinterpret_cast<void*>(ovf_slot_base), rsz,
-                                mmu::mmap_populate, mmu::perm_rw);
+        // CHURN FIX: map the next region INSIDE this AS's window, at a fixed VA
+        // (mmap_fixed), so ovf_owner_slot() of every chunk resolves to `slot`.
+        uintptr_t want = win_base + fl->ovf_mapped.load(std::memory_order_relaxed);
+        if (want + rsz > win_end) {
+            return nullptr;   // window exhausted: caller uses the identity heap
+        }
+        void *v = mmu::map_anon(reinterpret_cast<void*>(want), rsz,
+                                mmu::mmap_fixed | mmu::mmap_populate, mmu::perm_rw);
         uintptr_t base = reinterpret_cast<uintptr_t>(v);
-        if (!v || base < ovf_slot_base || base + rsz > ovf_slot_end) {
-            // map failed, or landed outside the overflow slot (in_overflow would
-            // misclassify it). Bail: caller falls back to the identity heap for
-            // this one allocation (bounded miss; still correct, just not reclaimed).
+        if (!v || base < win_base || base + rsz > win_end) {
+            // map failed, or landed outside OUR window (ovf_owner_slot would
+            // misattribute it, breaking the same-AS-only recycling invariant).
+            // Bail: caller falls back to the identity heap for this one
+            // allocation (bounded miss; still correct, just not reclaimed).
             if (v) {
                 mmu::munmap(v, rsz);
             }
@@ -309,6 +425,9 @@ static void *overflow_alloc(as_freelist *fl, size_t class_size)
             } else {
                 fl->ovf_next.store(base + class_size, std::memory_order_relaxed);
                 fl->ovf_end.store(base + rsz, std::memory_order_release);
+                fl->ovf_mapped.store(base + rsz - win_base, std::memory_order_release);
+                // FOOTPRINT PROBE: mmap_populate commits this eagerly -- real RAM.
+                g_ovf_committed.fetch_add(rsz, std::memory_order_relaxed);
                 return reinterpret_cast<void*>(base);
             }
         }
@@ -407,13 +526,53 @@ inline void recover(void *p, uintptr_t &base, unsigned &s)
 
 void free(void *p)
 {
-    // LEAK #2 REAL FIX: an overflow-region chunk is reclaimed WHOLESALE by
-    // destroy_address_space page teardown on reap. free() here is a NO-OP,
-    // recognized by a BSS range check that reads NO arena page -- so a cross-AS
-    // free (AS0 reaper / RCU quiescent / sibling) at a VA mapped only in the
-    // dead/other child does not fault. (This is the C2-safe fix over the earlier
-    // per-AS-overflow attempt whose free() read the chunk header cross-AS.)
+    // CHURN FIX (was: an unconditional no-op for every overflow chunk).
+    //
+    // The C2-safety constraint is unchanged and absolute: a FOREIGN-AS free must
+    // not read the chunk header, because that VA may be mapped only in the dead
+    // or other child (cross-AS reaper / RCU quiescent / sibling) -> fault.  But
+    // the OWNING AS can safely read its own header, and refusing to let it do so
+    // was what removed all recycling and made a backend's committed RAM track
+    // LIFETIME MALLOC CHURN instead of its live heap.
+    //
+    // Per-AS disjoint windows make the owner test pure BSS arithmetic:
+    // ovf_owner_slot(p) is the owning slot, and the current AS's slot is known
+    // from slot_for().  Same slot -> ours, recycle normally.  Different slot ->
+    // foreign, no-op exactly as before (the region is still reclaimed wholesale
+    // when the owning AS is reaped).  No arena page is touched on the foreign
+    // path, so the property that motivated the no-op is fully preserved.
     if (in_overflow(p)) {
+        if (!ovf_recycle_on()) {
+            return;             // A/B arm: old churn-proportional behaviour
+        }
+        as_freelist *fl = slot_for(mmu::current_address_space());
+        if (!fl) {
+            return;             // no slot for this AS: cannot own it
+        }
+        unsigned my_slot = (unsigned)(fl - &g_as_freelists[0]);
+        if (ovf_owner_slot(p) != my_slot) {
+            // FOREIGN AS: no-op, and critically NO header read (C2-safe).
+            g_ovf_foreign_frees.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        // Ours.  Guard against a pointer inside our window but past what we ever
+        // mapped (never produced by overflow_alloc; a BSS-only check, no read).
+        uintptr_t win_base = ovf_slot_base + (uintptr_t)my_slot * ovf_window_sz;
+        if (reinterpret_cast<uintptr_t>(p) - win_base >=
+                fl->ovf_mapped.load(std::memory_order_acquire)) {
+            return;
+        }
+        uintptr_t obase;
+        unsigned os;
+        recover(p, obase, os);  // our own AS's page: present, safe to read
+        unsigned oidx = os - min_class_shift;
+        auto *on = reinterpret_cast<free_node*>(obase);
+        free_node *ohead = fl->heads[oidx].load(std::memory_order_relaxed);
+        do {
+            on->next = ohead;
+        } while (!fl->heads[oidx].compare_exchange_weak(ohead, on,
+                     std::memory_order_release, std::memory_order_relaxed));
+        g_ovf_recycled.fetch_add(size_t(1) << os, std::memory_order_relaxed);
         return;
     }
     uintptr_t base;
@@ -477,6 +636,7 @@ void release_as(void *as)
             // teardown; a slot recycled to a NEW AS must NOT inherit the dead VA.
             g_as_freelists[i].ovf_next.store(0, std::memory_order_relaxed);
             g_as_freelists[i].ovf_end.store(0, std::memory_order_relaxed);
+            g_as_freelists[i].ovf_mapped.store(0, std::memory_order_relaxed);
             g_as_freelists[i].owner.store(nullptr, std::memory_order_release);
             return;
         }

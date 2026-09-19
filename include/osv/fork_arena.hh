@@ -111,6 +111,14 @@ void leak_probe_stats(unsigned long *bump_used, unsigned long *as_slots);
 size_t bump_used();
 unsigned live_as_slots();
 
+// FOOTPRINT PROBE: the OVERFLOW-region accounting.  Overflow pages are committed
+// eagerly by mmap_populate, NOT by a COW write fault, so they are invisible to a
+// COW-fault-only probe -- these counters are required for a correct per-backend
+// footprint breakdown.
+void overflow_stats(unsigned long *committed, unsigned long *recycled,
+                    unsigned long *foreign_frees, unsigned long *live_mapped);
+unsigned long overflow_mapped_for(void *as);
+
 // Usable size of an arena allocation (p must satisfy contains(p)).
 size_t usable_size(void *p);
 
