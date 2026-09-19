@@ -795,8 +795,6 @@ void* do_main_thread(void *_main_args)
     // here (a kernel thread, irqs on, heap up) so the arena's own map_anon()
     // cannot recurse through an app malloc.
     fork_arena::init();
-    // FOOTPRINT PROBE (OSV_FP_PROBE=1): start the per-AS attribution dumper.
-    mmu::fp_probe_start();
 #endif
 
     // run each payload in order
@@ -865,6 +863,16 @@ void main_cont(int loader_argc, char** loader_argv)
     smp_launch();
     setenv("OSV_CPUS", std::to_string(sched::cpus.size()).c_str(), 1);
     boot_time.event("SMP launched");
+
+#if CONF_fork
+    // FOOTPRINT PROBE (OSV_FP_PROBE=1): start the per-AS attribution dumper.
+    // MUST be after parse_options(), which is what installs --env= values into
+    // the environment -- fork_arena::init() runs long before that, so starting
+    // the probe there made getenv("OSV_FP_PROBE") always empty and the probe
+    // silently never ran.  Also after smp_launch(), so the dumper thread is
+    // created with the full CPU set up.
+    mmu::fp_probe_start();
+#endif
 
     auto end = osv::clock::uptime::now() + boot_delay;
     while (end > osv::clock::uptime::now()) {
