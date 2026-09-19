@@ -3862,7 +3862,12 @@ void fp_dump_once()
         }
         u64 pt = fp::rows[i].pt_pages.load(std::memory_order_relaxed);
         u64 pv = fp::rows[i].priv_pages.load(std::memory_order_relaxed);
-        u64 ov = fp::rows[i].ovf_pages.load(std::memory_order_relaxed);
+        // CORRECTED ACCOUNTING (the probe hole that hid the dominant term):
+        // overflow-region pages are committed by mmap_populate -- eager, real
+        // RAM at MAP time -- NOT by a COW write fault.  So they are invisible to
+        // the cow[] buckets, and ovf_pages was in fact never incremented
+        // anywhere.  Read the truth from the arena's own per-AS bookkeeping.
+        u64 ov = fork_arena::overflow_mapped_for(o) >> 12;   // bytes -> 4K pages
         t_pt += pt; t_priv += pv; t_ovf += ov;
         live++;
         // KB per term for this AS (4 KB pages).
@@ -3877,6 +3882,10 @@ void fp_dump_once()
     u64 acc = 0;
     for (unsigned b = 0; b < fp::B_NBUCKET; b++) acc += t_cow[b];
     acc += t_pt + t_priv + t_ovf;
+    // CORRECTED ACCOUNTING: global overflow commit/recycle totals (invisible to
+    // any COW-fault-based probe -- see the note above).
+    unsigned long _ovf_c = 0, _ovf_r = 0, _ovf_f = 0, _ovf_l = 0;
+    fork_arena::overflow_stats(&_ovf_c, &_ovf_r, &_ovf_f, &_ovf_l);
     // Per-backend average over live CHILD address spaces (live-1 excludes AS0,
     // which holds no row unless it COW-faulted; guard anyway).
     unsigned kids = live ? live : 1;
@@ -3884,7 +3893,9 @@ void fp_dump_once()
            "cowarena_MB=%d cowovf_MB=%d cowelf_MB=%d cowmmap_MB=%d cowoth_MB=%d "
            "pt_MB=%d priv_MB=%d ovf_MB=%d acct_MB=%d per_as_KB=%d "
            "retired_cowarena_MB=%d retired_pt_MB=%d "
-           "arena_bump_MB=%d arena_slots=%d memfree_MB=%d memtotal_MB=%d\n",
+           "arena_bump_MB=%d arena_slots=%d "
+           "ovfcommit_MB=%d ovfrecycled_MB=%d ovflive_MB=%d ovfforeign=%d "
+           "memfree_MB=%d memtotal_MB=%d\n",
            (int)live, (int)fp::g_forks.load(std::memory_order_relaxed),
            (int)fp::g_reaps.load(std::memory_order_relaxed),
            (int)((t_cow[fp::B_ARENA] * 4) >> 10), (int)((t_cow[fp::B_OVF] * 4) >> 10),
@@ -3895,6 +3906,8 @@ void fp_dump_once()
            (int)((fp::r_cow[fp::B_ARENA].load(std::memory_order_relaxed) * 4) >> 10),
            (int)((fp::r_pt.load(std::memory_order_relaxed) * 4) >> 10),
            (int)(fork_arena::bump_used() >> 20), (int)fork_arena::live_as_slots(),
+           (int)(_ovf_c >> 20), (int)(_ovf_r >> 20), (int)(_ovf_l >> 20),
+           (int)_ovf_f,
            (int)(memory::stats::free() >> 20), (int)(memory::stats::total() >> 20));
 }
 
@@ -3905,7 +3918,7 @@ void fp_probe_start()
     int iv = (e && e[0]) ? atoi(e) : 5;
     if (iv < 1) iv = 1;
     debugf("FPPROBE started interval=%ds\n", iv);
-    auto *t = new sched::thread([iv] {
+    auto *t = sched::thread::make([iv] {
         for (;;) {
             sched::thread::sleep(std::chrono::seconds(iv));
             fp_dump_once();
