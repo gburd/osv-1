@@ -1,0 +1,84 @@
+From: OSv iouring agent
+Subject: [PATCH] zfs: report solid-state vdevs as non-rotating on OSv
+
+OSv's vdev_disk_open() never sets vd->vdev_nonrot, so every vdev is left at
+the B_FALSE default and OpenZFS treats an NVMe as a spinning disk.  Linux's
+vdev_disk_open() derives it from the block queue:
+
+    v->vdev_nonrot = blk_queue_nonrot(bdev_get_queue(bdev));
+
+Two consequences in vdev_queue_aggregate(), both measured on m5d.metal with
+PostgreSQL 18 on a recordsize=8k ashift=12 pool over raw NVMe passthrough:
+
+  1. the aggregation cap becomes zfs_vdev_aggregation_limit (1 MiB) instead of
+     zfs_vdev_aggregation_limit_non_rotating (SPA_OLD_MAXBLOCKSIZE, 128 KiB),
+     so ZFS builds write spans up to 8x larger than it would on Linux, and
+
+  2. maxgap stays 0 for writes but the trailing-optional "stretch" path is
+     allowed to close holes up to zfs_vdev_write_gap_limit (4 KiB), pulling in
+     blocks the workload never dirtied.  On a rotating disk that is a win,
+     because one seek amortises the extra bytes.  On flash there is no seek to
+     amortise, so the extra bytes are pure write amplification.
+
+Measured, VU32 durable TPROC-C, in-kernel counters at the vdev and bio layers:
+  logical zios in   2101248 / 193652 MB   (avg  94 kB)
+  bio writes out    1329092 / 193646 MB   (avg 149 kB)
+  9.9% of requests / 54.6% of written BYTES land in spans > 128 KiB, i.e. in
+  requests that cannot exist once vdev_nonrot is correct.
+Device bytes per transaction vs Linux on identical geometry and GUCs:
+  Linux  23.5-31.6 kB/NOPM
+  OSv    92.9-271.2 kB/NOPM   (3.9x - 11.6x)
+which is why the NVMe sits at 95-97% util while the guest CPU idles at 54-59%.
+
+OSv has no API to query rotational geometry, and struct device carries no such
+bit, so this cannot be derived the way Linux does it.  Report non-rotating for
+the device classes OSv actually virtualises for storage: virtio-blk, NVMe and
+the ide/ahci-backed paths are all flash or hypervisor-backed on every target
+OSv runs on (AWS, GCP, Azure, qemu-on-SSD), where the rotational heuristics
+are wrong.  The value stays overridable, and vdev_file.c already hardcodes
+B_TRUE for the same reason.
+
+This is a scalability/correctness fix in the OSv ZFS platform layer, not a
+PostgreSQL-specific change; PostgreSQL was only the forcing function.
+
+diff --git a/module/os/osv/zfs/vdev_disk.c b/module/os/osv/zfs/vdev_disk.c
+--- a/module/os/osv/zfs/vdev_disk.c
++++ b/module/os/osv/zfs/vdev_disk.c
+@@ -103,6 +103,32 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
+ 	vd->vdev_has_trim = B_TRUE;
+ 	/* Secure/discard-zeroes semantics are not guaranteed on OSv. */
+ 	vd->vdev_has_securetrim = B_FALSE;
+ 
++	/*
++	 * Report the vdev as non-rotating (solid state).
++	 *
++	 * Linux sets this from the block queue's rotational flag:
++	 *   v->vdev_nonrot = blk_queue_nonrot(bdev_get_queue(bdev));
++	 * OSv has no equivalent query -- struct device carries no rotational
++	 * bit -- so leaving it at the B_FALSE default made OpenZFS treat every
++	 * device as a spinning disk.  That selects the 1 MiB
++	 * zfs_vdev_aggregation_limit instead of the 128 KiB non-rotating cap,
++	 * and lets vdev_queue_aggregate()'s trailing-optional "stretch" path
++	 * close write gaps up to zfs_vdev_write_gap_limit by pulling in blocks
++	 * the workload never dirtied.  Both trades assume a seek that flash
++	 * does not have, so they turn into pure write amplification: measured
++	 * 3.9x-11.6x more device bytes per transaction than Linux on the same
++	 * pool geometry, with 54.6% of written bytes in spans that the correct
++	 * cap forbids outright.
++	 *
++	 * Every storage backend OSv virtualises (virtio-blk, NVMe, and the
++	 * ide/ahci paths) is flash or hypervisor-backed on the platforms OSv
++	 * targets, so non-rotating is the right answer for all of them; a real
++	 * spinning disk behind virtio still only loses the seek-amortisation
++	 * heuristic, while a wrong "rotating" answer on flash costs multiples
++	 * of the device's write bandwidth.  vdev_file.c hardcodes B_TRUE for
++	 * the same reason.  Overridable at runtime via the usual
++	 * zfs_vdev_aggregation_limit* tunables if a target ever needs it.
++	 */
++#ifndef OSV_VDEV_NONROT_DEFAULT
++#define OSV_VDEV_NONROT_DEFAULT 1
++#endif
++	vd->vdev_nonrot = OSV_VDEV_NONROT_DEFAULT ? B_TRUE : B_FALSE;
++
+ 	return (0);
+ }
