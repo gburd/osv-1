@@ -376,7 +376,11 @@ at, so **report only**: confirm `5761ed02c` is banked somewhere and it can go.
 ## TASK 9 - Notes record refreshed
 =======================================================================
 
-### `notes/pg-campaign-record`: `5972d9241` -> see below. G-signed, fast-forward, BOTH mirrors.
+### DONE. `notes/pg-campaign-record`: `5972d9241` -> **`3a4f075cf`**. G-signed, fast-forward, BOTH mirrors.
+
+10 files, +1674/-106. Verified after push: `origin` and `gh-fork` both at `3a4f075cf`, `%G?`=**G**,
+`greg@burd.me`. All 8 gitlinks byte-identical to `upstream/master`'s before pushing. Main worktree confirmed
+untouched afterwards (still `wip/pg-rx-directwake`, 0 paths staged by me).
 
 Selection: from the 86 uncommitted `.local` paths, filtered to `*.md *.sh *.py *.txt *.json *.diff *.patch`,
 **excluding `.local/worktrees`, `.local/pg18`, `.local/iouring`** and binaries -> 28 candidates. Then
