@@ -1,0 +1,39 @@
+---NOPM/TPM---
+Vuser 1:TEST RESULT : System achieved 72277 NOPM from 166545 PostgreSQL TPM
+---VUCOMPLETE---
+VUCOMPLETE_AFTER 0 s
+---NEWORD p99 (median across vusers from hdbxtprofile)---
+NEWORD_p99_ms median=11.983 min=11.412 max=12.829 nvu=9
+---wait profile---
+{
+ "samples": 501,
+ "active_backend_observations": 3645,
+ "histogram": {
+  "LWLock/WALWrite": 1431,
+  "NONE/NULL": 1348,
+  "IO/WalSync": 398,
+  "Client/ClientRead": 230,
+  "IO/DataFileRead": 116,
+  "IO/WalWrite": 74,
+  "IO/DataFileWrite": 21,
+  "Timeout/VacuumDelay": 16,
+  "IO/DataFileExtend": 7,
+  "IO/AioIoUringExecution": 2,
+  "LWLock/XactSLRU": 1,
+  "IO/AioIoUringSubmit": 1
+ },
+ "pct": {
+  "LWLock/WALWrite": 39.3,
+  "NONE/NULL": 37.0,
+  "IO/WalSync": 10.9,
+  "Client/ClientRead": 6.3,
+  "IO/DataFileRead": 3.2,
+  "IO/WalWrite": 2.0,
+  "IO/DataFileWrite": 0.6,
+  "Timeout/VacuumDelay": 0.4,
+  "IO/DataFileExtend": 0.2,
+  "IO/AioIoUringExecution": 0.1,
+  "LWLock/XactSLRU": 0.0,
+  "IO/AioIoUringSubmit": 0.0
+ }
+}

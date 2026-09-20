@@ -1,0 +1,13 @@
+MAXBK step=32 max=576 hold=45s rows=50000 host=172.31.10.51
+t=1789847820 target=32 live_backends=33 SUSTAINED
+t=1789847868 target=64 live_backends=65 SUSTAINED
+t=1789847917 target=96 live_backends=97 SUSTAINED
+t=1789847966 target=128 live_backends=129 SUSTAINED
+t=1789848015 target=160 live_backends=161 SUSTAINED
+t=1789848066 target=192 live_backends=193 SUSTAINED
+t=1789848117 target=224 live_backends=225 SUSTAINED
+t=1789848175 target=256 live_backends=257 SUSTAINED
+t=1789848249 target=288 live_backends=289 SUSTAINED
+DIED_AT_TARGET=320 LAST_SUSTAINED=289
+MAXBK_RESULT last_sustained=289
+MAXBK_DONE

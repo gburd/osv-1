@@ -1,0 +1,5 @@
+1480fbee1 G mmu/fork_arena: emit probe output with debug_early, not debugf (debugf is verbose-gated)
+a3a305b11 G fork_arena/mmu: make the probe and the recycle A/B compile-time, not env-gated
+a7d691faf G loader: start the footprint probe AFTER parse_options (env was invisible)
+340ef4f92 G fork_arena: recycle overflow chunks in the owning AS (churn-proportional footprint fix)
+da8f1ef61 G mmu/fork_arena: OSV_FP_PROBE per-address-space private-footprint attribution

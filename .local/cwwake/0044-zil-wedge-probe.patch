@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agent-cwwake <agent@localhost>
+Date: Fri, 19 Sep 2026 12:00:00 +0000
+Subject: [PATCH] zfs: WEDGE smoking-gun probe for the ZIL completion->waiter
+ lost wakeup (OSV_ZIL_WEDGE_PROBE)
+
+The VU64 wedge is a permanent deadlock: ~66 backends blocked on
+LWLock:WALWrite, one WAL writer blocked in zil_commit_waiter on zcw_cv, and
+the lwb flush completion is supposed to cv_broadcast(zcw_cv) to wake it.
+This probe captures the SMOKING GUN: is the waiter still asleep AFTER its
+zcw_done was set (a lost OSv cross-vCPU wakeup), or did the completion never
+run (zcw_done still FALSE - a genuine upstream hang / no lost wake)?
+
+Mechanism (all env-gated OSV_ZIL_WEDGE_PROBE=1, default OFF, zero cost off):
+
+ (1) A per-slot "currently blocked in cv_wait" table.  Right before the
+     UNTIMED cv_wait(&zcw->zcw_cv) in zil_commit_waiter (the branch taken
+     once the lwb is ISSUED - the deadlock branch, no timeout to self-heal),
+     the waiter records (thread, zcw, enter-hrtime) into a free slot; it
+     clears the slot on return.  Also counts entered/woke and broadcasts.
+
+ (2) A WATCHDOG that runs on the still-live completion thread: every
+     zil_commit_waiter_done (which fires on a taskq/blk thread that is NOT
+     wedged) scans the blocked table; if any blocked waiter has zcw_done
+     already TRUE and has been blocked > ZWEDGE_MS (500ms), it printfs the
+     smoking gun once:
+        ZWEDGE LOST-WAKE zcw=%p thread=%p tcpu=%d blocked_ms=%.1f
+        zcw_done=1  (completion ran, waiter still asleep)
+     That single line, printed while the guest is wedged, IS the lost-wakeup
+     proof: done was set + broadcast fired, yet the OSv condvar/wake left the
+     backend asleep.
+
+ (3) zilwedge_dump() (default visibility) dumps the full table + counters on
+     demand from the bench .so, for the post-wedge snapshot.
+
+Pure probe, no behaviour change with the env off.
+---
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -163,6 +163,120 @@ static volatile uint64_t zw_last_wake_ns;   /* gethrtime at last waiter wake */
+ static volatile uint64_t zw_wake2ent_sum;   /* sum wake->next-committer-entry (ns) */
+ static volatile uint64_t zw_wake2ent_max;
+ static volatile uint64_t zw_wake2ent_n;
+ 
++/*
++ * OSv WEDGE smoking-gun probe (OSV_ZIL_WEDGE_PROBE=1, default OFF).  Catches
++ * the ZIL completion->waiter lost wakeup: a backend blocked in the untimed
++ * cv_wait(&zcw->zcw_cv) whose zcw_done is already TRUE = completion ran but
++ * the OSv cross-vCPU wake was lost.  See patch header.
++ */
++#define	ZWEDGE_SLOTS	128
++struct zwedge_slot {
++	volatile void *zcw;		/* the zil_commit_waiter_t being waited on */
++	volatile void *thr;		/* curthread of the blocked backend */
++	volatile uint64_t enter_ns;	/* gethrtime when it entered cv_wait */
++	volatile int   inuse;		/* 1 while blocked in cv_wait */
++};
++static struct zwedge_slot zwedge_tab[ZWEDGE_SLOTS];
++static volatile uint64_t zwedge_entered;   /* # untimed cv_wait entries */
++static volatile uint64_t zwedge_woke;      /* # untimed cv_wait returns */
++static volatile uint64_t zwedge_bcasts;    /* # zil_commit_waiter_done broadcasts */
++static volatile uint64_t zwedge_lostwake;  /* # LOST-WAKE detections */
++static int zwedge_on = -1;                  /* -1 unresolved, 0 off, 1 on */
++
++static int
++zwedge_enabled(void)
++{
++	if (zwedge_on < 0) {
++		extern char *getenv(const char *);
++		const char *e = getenv("OSV_ZIL_WEDGE_PROBE");
++		zwedge_on = (e && e[0] && e[0] != '0') ? 1 : 0;
++		printf("OSV_ZIL_WEDGE_PROBE: zil wedge smoking-gun probe=%s\n",
++		    zwedge_on ? "ON" : "off");
++	}
++	return (zwedge_on);
++}
++
++/* Record entry into the untimed cv_wait; returns the slot index or -1. */
++static int
++zwedge_block(void *zcw)
++{
++	int i;
++	atomic_inc_64(&zwedge_entered);
++	for (i = 0; i < ZWEDGE_SLOTS; i++) {
++		if (zwedge_tab[i].inuse)
++			continue;
++		if (__sync_bool_compare_and_swap(&zwedge_tab[i].inuse, 0, 1)) {
++			zwedge_tab[i].zcw = zcw;
++			zwedge_tab[i].thr = (void *)curthread;
++			zwedge_tab[i].enter_ns = (uint64_t)gethrtime();
++			return (i);
++		}
++	}
++	return (-1);
++}
++
++static void
++zwedge_unblock(int slot)
++{
++	atomic_inc_64(&zwedge_woke);
++	if (slot >= 0 && slot < ZWEDGE_SLOTS) {
++		zwedge_tab[slot].zcw = NULL;
++		zwedge_tab[slot].thr = NULL;
++		zwedge_tab[slot].enter_ns = 0;
++		__sync_synchronize();
++		zwedge_tab[slot].inuse = 0;
++	}
++}
++
++/*
++ * Watchdog: run on the (still-live) completion thread.  If any blocked
++ * waiter's zcw_done is already TRUE and it has been asleep > 500ms, that is
++ * the lost-wakeup smoking gun.  Prints at most a few times to avoid spam.
++ */
++static void
++zwedge_watchdog(void)
++{
++	static volatile uint64_t printed = 0;
++	hrtime_t now = gethrtime();
++	int i;
++	if (printed > 8)
++		return;
++	for (i = 0; i < ZWEDGE_SLOTS; i++) {
++		if (!zwedge_tab[i].inuse)
++			continue;
++		uint64_t e = zwedge_tab[i].enter_ns;
++		if (e == 0)
++			continue;
++		double ms = (double)(now - (hrtime_t)e) / 1000000.0;
++		if (ms < 500.0)
++			continue;
++		zil_commit_waiter_t *w = (zil_commit_waiter_t *)zwedge_tab[i].zcw;
++		int done = (w != NULL) ? (int)w->zcw_done : -1;
++		atomic_inc_64(&zwedge_lostwake);
++		printf("ZWEDGE %s zcw=%p thread=%p blocked_ms=%.1f "
++		    "zcw_done=%d  (%s)\n",
++		    done == 1 ? "LOST-WAKE" : "STILL-PENDING",
++		    (void *)w, (void *)zwedge_tab[i].thr, ms,
++		    done,
++		    done == 1 ? "completion RAN, waiter STILL ASLEEP = lost wake"
++		    : "completion has NOT run yet (zcw_done=0)");
++		printed++;
++		if (printed > 8)
++			break;
++	}
++}
++
++void zilwedge_dump(void);
++__attribute__((visibility("default"))) void
++zilwedge_dump(void)
++{
++	int i, live = 0, done_but_asleep = 0;
++	hrtime_t now = gethrtime();
++	for (i = 0; i < ZWEDGE_SLOTS; i++) {
++		if (!zwedge_tab[i].inuse)
++			continue;
++		live++;
++		zil_commit_waiter_t *w = (zil_commit_waiter_t *)zwedge_tab[i].zcw;
++		int done = (w != NULL) ? (int)w->zcw_done : -1;
++		double ms = (double)(now - (hrtime_t)zwedge_tab[i].enter_ns)
++		    / 1000000.0;
++		if (done == 1)
++			done_but_asleep++;
++		printf("RESULT ZWEDGE_SLOT i=%d zcw=%p thread=%p "
++		    "blocked_ms=%.1f zcw_done=%d\n", i, (void *)w,
++		    (void *)zwedge_tab[i].thr, ms, done);
++	}
++	printf("RESULT ZWEDGE entered=%llu woke=%llu bcasts=%llu lostwake=%llu "
++	    "live_blocked=%d done_but_asleep=%d\n",
++	    (unsigned long long)zwedge_entered, (unsigned long long)zwedge_woke,
++	    (unsigned long long)zwedge_bcasts,
++	    (unsigned long long)zwedge_lostwake, live, done_but_asleep);
++}
++
+ /*
+  * OSv M1 probe + Lever-1 A/B for the post-commit wakeup fan-out.
+  *
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -1573,6 +1687,10 @@ zil_commit_waiter_done(zil_commit_waiter_t *zcw, int err)
+ 	zcw->zcw_done = B_TRUE;
+ 	zw_last_wake_ns = (uint64_t)gethrtime();
+ 	cv_broadcast(&zcw->zcw_cv);
+ 	mutex_exit(&zcw->zcw_lock);
++	if (zwedge_enabled()) {
++		atomic_inc_64(&zwedge_bcasts);
++		zwedge_watchdog();
++	}
+ }
+ 
+ /*
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -4075,7 +4193,15 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 			    lwb->lwb_state == LWB_STATE_ISSUED ||
+ 			    lwb->lwb_state == LWB_STATE_WRITE_DONE ||
+ 			    lwb->lwb_state == LWB_STATE_FLUSH_DONE);
+-			cv_wait(&zcw->zcw_cv, &zcw->zcw_lock);
++			if (zwedge_enabled()) {
++				int zws = zwedge_block(zcw);
++				cv_wait(&zcw->zcw_cv, &zcw->zcw_lock);
++				zwedge_unblock(zws);
++			} else {
++				cv_wait(&zcw->zcw_cv, &zcw->zcw_lock);
++			}
+ 		}
+ 	}
+ 
+-- 
+2.54.0

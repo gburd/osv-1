@@ -1,0 +1,19 @@
+# AFTER arm (recycle=1), 64 continuously-reconnecting churn loops + 64 idle sessions
+# (accidental overlap; still the first valid churn-scale reading). Hex decoded:
+live_as            75        # 75 live address spaces
+forks              12474     # cumulative forks
+reaps              12399
+cowarena_MB        261       # (a) COW faults in the 512MB arena
+cowelf_MB          202
+pt_MB              83        # (b) page-table clone
+priv_MB            74        # (c) privatized stacks
+ovf_MB             280       # overflow LIVE (per-AS mapped, the corrected term)
+acct_MB            902
+per_as_KB          12323     # 12.0 MB per AS accounted
+arena_bump_MB      149275    # 145 GB of CUMULATIVE malloc churn through the bump
+arena_slots        76
+ovfcommit_MB       160840    # 157 GB overflow regions ever committed
+ovfrecycled_MB     149853    # 146 GB recycled by the FIX (93% of committed)
+ovflive_MB         286       # only 286 MB live at any instant
+memfree_MB         46375     # 45 GB free of 64 GB -- healthy under this load
+memtotal_MB        65528

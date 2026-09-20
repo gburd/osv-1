@@ -1,0 +1,34 @@
++ echo 'OSV_SHA=1480fbee17574fa8949895eddf0fb47b01b4f5a7  (want 1480fbee17574fa8949895eddf0fb47b01b4f5a7)'
+OSV_SHA=1480fbee17574fa8949895eddf0fb47b01b4f5a7  (want 1480fbee17574fa8949895eddf0fb47b01b4f5a7)
++ echo APPS_SHA=3f93f43f4f44f9e28dadceafe6aeffa9317a6fd3
+APPS_SHA=3f93f43f4f44f9e28dadceafe6aeffa9317a6fd3
++ echo 'SEEDCOPY_MKDIR_FIX=1  (expect 1)'
+SEEDCOPY_MKDIR_FIX=1  (expect 1)
+da8f1ef6 N mmu/fork_arena: OSV_FP_PROBE per-address-space private-footprint attribution
++ echo 'UNSIGNED_OF_5=5 (expect 0)'
+UNSIGNED_OF_5=5 (expect 0)
+  ok [#1504] stack_guard (3)
+  ok [#1505] openzfs_cv_timedwait_hires (1)
+  ok [#1472] try_pull_from_busiest (3)
+  ok [#1472] wake_pull_enabled = true (1)
+  ok [#1507] write_cache.empty (1)
+  ok [#1502] vfs_dentry_hash_lock_held (2)
+  ok [#1509] req_done_q (3)
+  ok [FORK] OSV_FORK_RANGE_BS (2)
+  ok [FORK] OSV_FORK_LARGE_SHARE (2)
++ echo 'FIX_WINDOW=9      (expect >=6)'
+FIX_WINDOW=9      (expect >=6)
++ echo 'FIX_OWNER=5      (expect >=3)'
+FIX_OWNER=5      (expect >=3)
++ echo 'FIX_RECYCLE_DEFAULT=4 (compile-time A/B)'
+FIX_RECYCLE_DEFAULT=4 (compile-time A/B)
++ echo 'FIX_PROOFLINE=1  (the resolved-value proof line)'
+FIX_PROOFLINE=1  (the resolved-value proof line)
++ echo 'FP_DUMP=2                 (expect 2)'
+FP_DUMP=2                 (expect 2)
++ echo 'FP_LOADER=1               (expect 1)'
+FP_LOADER=1               (expect 1)
++ echo 'FP_DEBUG_EARLY=1 (probe uses debug_early not debugf)'
+FP_DEBUG_EARLY=1 (probe uses debug_early not debugf)
++ echo ALL_MARKERS_OK
+ALL_MARKERS_OK

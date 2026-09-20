@@ -1,0 +1,274 @@
+diff --git a/arch/x64/fork.cc b/arch/x64/fork.cc
+index c606bc61..25b3c7ac 100644
+--- a/arch/x64/fork.cc
++++ b/arch/x64/fork.cc
+@@ -39,26 +39,15 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
+     if (sp < static_cast<char*>(si.begin) || sp > stack_base) {
+         return nullptr;   // caller SP not within the known user stack
+     }
+-    size_t stack_size = si.size;
+ 
+-    char *child_stack_mem = static_cast<char*>(malloc(stack_size));
+-    if (!child_stack_mem) {
+-        return nullptr;
+-    }
+-    // Copy ONLY the live top of the stack, [caller_sp .. stack_base), into the
+-    // TOP of the child buffer.  App (pthread) stacks are demand-paged: only the
+-    // used top is mapped, so copying from si.begin would fault on the first
+-    // unmapped page.  Keeping the copy at the top of the child buffer preserves
+-    // the base-relative bias so a biased SP resolves correctly.
+-    char *child_base = child_stack_mem + stack_size;
+-    ptrdiff_t bias = child_base - stack_base;
+-    size_t live = static_cast<size_t>(stack_base - sp);
+-    memcpy(child_base - live, sp, live);
+-    char *child_sp = sp + bias;
+-
+-    volatile u64 resume_sp = reinterpret_cast<u64>(child_sp);
++    // Same-VA COW stack: the child resumes on the parent's EXACT rsp -- no copy
++    // and no bias -- so saved rbp / return addresses / stack-internal pointers
++    // stay valid through a deep unwind.  The child's stack pages are private COW
++    // at that same VA in the child address space (clone_address_space privcopy
++    // range, eagerly materialized by privatize_child_range so no COW fault fires
++    // in the child's irqs-off context switch).
++    volatile u64 resume_sp = reinterpret_cast<u64>(caller_sp);
+     volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
+-    char *stack_to_free = child_stack_mem;
+ 
+     // TLS handling.  The child is a real OSv sched::thread, so its constructor
+     // already ran setup_tcb() and installed a FRESH, private OSv TLS block
+@@ -86,7 +75,7 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
+         // the malloc arena lock) before resuming user code.
+         __osv_run_atfork_child();
+         asm volatile
+-          ("movq %0, %%rsp \n\t"    // install the private copied stack
++          ("movq %0, %%rsp \n\t"    // resume on the parent's EXACT stack VA
+            "xorq %%rax, %%rax \n\t" // fork() returns 0 in the child
+            "jmpq *%1 \n\t"          // resume in fork()'s caller
+            : : "r"(resume_sp), "r"(resume_pc) : "memory");
+@@ -98,10 +87,10 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
+     if (parent_pinned_cpu) {
+         t->pin(parent_pinned_cpu);
+     }
+-    // The caller (fork.cc) owns the single cleanup; hand back the copied user
+-    // stack so it can be freed when the child is reaped.
++    // Same-VA stack: nothing to free.  The child's private stack pages live in
++    // its address space and are released by destroy_address_space() on reap.
+     if (out_stack_to_free) {
+-        *out_stack_to_free = stack_to_free;
++        *out_stack_to_free = nullptr;
+     }
+     return t;
+ }
+diff --git a/core/lfmutex.cc b/core/lfmutex.cc
+index fd128cf1..c492d19b 100644
+--- a/core/lfmutex.cc
++++ b/core/lfmutex.cc
+@@ -16,14 +16,20 @@
+ #endif
+ 
+ #if CONF_fork
+-// See wait_record.hh: true iff the current thread runs in a forked-child
+-// (non-AS0) address space, in which case a wait_record queued on a shared
+-// kernel object must be heap-allocated to stay coherent cross-address-space.
++// True while any fork-child address space is live (mmu.cc).
++namespace mmu { bool fork_children_exist(); }
++
++// See wait_record.hh: true iff a wait_record queued on a shared kernel object
++// must be heap-allocated for cross-address-space coherence.  Holds whenever any
++// fork child exists: a child resumes on the parent's stack VA and privatizes
++// it, so the SAME stack VA maps to different physical pages in the parent (AS0)
++// and child.  A wait_record one side queues on a shared mutex/condvar and the
++// other walks would otherwise resolve to the wrong physical page; the kernel
++// heap is AS-shared, so heap allocations stay coherent.  When no child exists
++// (default OSv, and after all children are reaped) the on-stack fast path runs.
+ bool fork_child_needs_heap_wait_record()
+ {
+-    auto t = sched::thread::current();
+-    return t && t->address_space() &&
+-           t->address_space() != mmu::kernel_address_space();
++    return mmu::fork_children_exist();
+ }
+ #endif
+ 
+diff --git a/core/mmu.cc b/core/mmu.cc
+index ba4238db..969473b7 100644
+--- a/core/mmu.cc
++++ b/core/mmu.cc
+@@ -191,6 +191,19 @@ address_space *kernel_address_space()
+     return &kernel_as;
+ }
+ 
++// Number of live fork-child address spaces (fork same-VA COW stack).  While
++// > 0, a fork child resumes on the parent's stack VA and privatizes it, so the
++// SAME stack VA maps to DIFFERENT physical pages in the parent (AS0) and the
++// child.  A wait_record queued on a SHARED kernel object must then be heap-
++// allocated (AS-coherent) even for AS0 (parent) threads, because a cross-AS
++// thread may walk it.  See wait_record.hh / lfmutex.cc.
++static std::atomic<int> live_child_as_count{0};
++
++bool fork_children_exist()
++{
++    return live_child_as_count.load(std::memory_order_acquire) > 0;
++}
++
+ // Arch hook: physical address of the kernel PML4 (CR3 value for AS0).
+ phys kernel_pt_root_phys();
+ // Arch hook: virtual pointer to the kernel PML4 (for cloning kernel slots).
+@@ -238,6 +251,14 @@ pt_element<4> *current_pt_root()
+ struct cow_range { uintptr_t start, end; };
+ static const std::vector<cow_range> *cow_share_ranges;
+ 
++// The forking thread's OWN live stack range (same-VA COW stack): the child
++// resumes on the parent's EXACT rsp/rbp, so its stack must exist at the SAME
++// virtual address in the child AS -- but PRIVATE.  We cannot lazily COW it
++// (OSv runs the irqs-off context switch on it; a COW fault there is fatal), so
++// clone_pt_level0 installs the child's copy COW (parent untouched) and
++// privatize_child_range() eagerly materializes it before the child runs.
++static const std::vector<cow_range> *cow_privcopy_ranges;
++
+ static bool addr_is_shared(uintptr_t va)
+ {
+     if (!cow_share_ranges) return false;
+@@ -247,6 +268,15 @@ static bool addr_is_shared(uintptr_t va)
+     return false;
+ }
+ 
++static bool addr_is_privcopy(uintptr_t va)
++{
++    if (!cow_privcopy_ranges) return false;
++    for (auto &r : *cow_privcopy_ranges) {
++        if (va >= r.start && va < r.end) return true;
++    }
++    return false;
++}
++
+ // The parent must hold vma_list_mutex for write while this runs.  base_virt is
+ // the virtual address that leaf entry 0 of this PT maps.
+ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
+@@ -259,7 +289,13 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
+             continue;
+         }
+         uintptr_t va = base_virt + (uintptr_t)i * page_size;
+-        if (addr_is_shared(va)) {
++        if (addr_is_privcopy(va)) {
++            // Forking thread's own stack (same-VA COW stack).  Leave the PARENT
++            // untouched (writable, unshared) -- never write-protect a live
++            // stack.  Install the child's copy COW; privatize_child_range()
++            // materializes it before the child runs.
++            child_pt[i] = pte_mark_cow(ppte, true);
++        } else if (addr_is_shared(va)) {
+             // Stack / MAP_SHARED page: must stay genuinely shared + writable in
+             // both parent and child (never COW).  Clear any COW bit and grant
+             // write so both sides see each other's writes to the same phys
+@@ -409,6 +445,7 @@ address_space *clone_address_space(address_space *parent)
+             }
+         }
+         cow_share_ranges = nullptr;
++        cow_privcopy_ranges = nullptr;
+ 
+         // Any write-protection we applied to the parent's page tables above
+         // must be made visible on all CPUs before the parent continues.
+@@ -429,10 +466,54 @@ address_space *clone_address_space(address_space *parent)
+             auto *nv = new anon_vma(addr_range(v.start(), v.end()), v.perm(), v.flags());
+             child->vmas->insert(*nv);
+         }
++        live_child_as_count.fetch_add(1, std::memory_order_release);
+         return child;
+     }
+ }
+ 
++// Eagerly materialize the private COW copies of a child address space's stack
++// range (the forking thread's stack), BEFORE the child thread runs, from the
++// PARENT's preemptable context.  A lazy COW fault on the child's stack is
++// unsafe: OSv runs the child's context switch (irqs off) on that stack, and a
++// fault there is fatal (assert(preemptable()) in page_fault).  We walk the
++// CHILD's page tables and copy each COW leaf into a fresh private page.
++void privatize_child_range(address_space *as, uintptr_t start, size_t size)
++{
++    if (!as || !as->top) {
++        return;
++    }
++    uintptr_t begin = align_down(start, page_size);
++    uintptr_t end = align_up(start + size, page_size);
++    phys pml4_phys = as->top->next_pt_addr();
++    auto pml4 = phys_cast<pt_element<3>>(pml4_phys);
++    for (uintptr_t va = begin; va < end; va += page_size) {
++        unsigned i3 = pt_index(reinterpret_cast<void*>(va), 3);
++        pt_element<3> e3 = pml4[i3];
++        if (e3.empty() || e3.large()) continue;
++        auto pdpt = phys_cast<pt_element<2>>(e3.next_pt_addr());
++        unsigned i2 = pt_index(reinterpret_cast<void*>(va), 2);
++        pt_element<2> e2 = pdpt[i2];
++        if (e2.empty() || e2.large()) continue;
++        auto pd = phys_cast<pt_element<1>>(e2.next_pt_addr());
++        unsigned i1 = pt_index(reinterpret_cast<void*>(va), 1);
++        pt_element<1> e1 = pd[i1];
++        if (e1.empty() || e1.large()) continue;
++        auto pt = phys_cast<pt_element<0>>(e1.next_pt_addr());
++        unsigned i0 = pt_index(reinterpret_cast<void*>(va), 0);
++        pt_element<0> e0 = pt[i0];
++        if (e0.empty() || !pte_is_cow(e0)) continue;
++        void *shared = phys_to_virt(e0.addr());
++        void *priv = memory::alloc_page();
++        memcpy(priv, shared, page_size);
++        pt_element<0> npte = make_leaf_pte(hw_ptep<0>::force(&pt[i0]),
++                                           virt_to_phys(priv), perm_rwx);
++        npte = pte_mark_cow(npte, false);
++        npte.set_writable(true);
++        pt[i0] = npte;
++    }
++    mmu::flush_tlb_all();
++}
++
+ // --- fork COW page-table teardown ------------------------------------------
+ //
+ // Recursively free a child's private app-range subtree.  Intermediate tables
+@@ -498,6 +579,7 @@ void destroy_address_space(address_space *as)
+         }
+         memory::free_page(phys_to_virt(pml4_phys));
+     }
++    live_child_as_count.fetch_sub(1, std::memory_order_release);
+     delete as;
+ }
+ #endif // CONF_fork
+diff --git a/include/osv/mmu.hh b/include/osv/mmu.hh
+index 8eb803e2..b39fb26e 100644
+--- a/include/osv/mmu.hh
++++ b/include/osv/mmu.hh
+@@ -402,6 +402,13 @@ phys pt_root_phys(address_space *as);
+ // The kernel half of the page table is shared with the parent.
+ address_space *clone_address_space(address_space *parent);
+ 
++// Eagerly materialize the private COW copies of a child address space's stack
++// range (the forking thread's stack, for the same-VA COW stack), so no lazy COW
++// fault fires on that stack in the child's irqs-off context switch.  Call from
++// fork() (preemptable) after clone_address_space() and before starting the
++// child.
++void privatize_child_range(address_space *as, uintptr_t start, size_t size);
++
+ // Tear down a child address_space (frees its private page tables + VMAs).
+ // Never call on the kernel address space.
+ void destroy_address_space(address_space *as);
+diff --git a/libc/process/fork.cc b/libc/process/fork.cc
+index 4bc3f0e7..d03e4ddb 100644
+--- a/libc/process/fork.cc
++++ b/libc/process/fork.cc
+@@ -190,6 +190,18 @@ pid_t fork(void)
+         mmu::clone_address_space(sched::thread::current()->address_space());
+     child->set_address_space(child_as);
+ 
++    // Same-VA COW stack: the child resumes on the parent's EXACT rsp/rbp, so its
++    // stack lives at the SAME virtual address, private (COW) in the child AS.
++    // Eagerly materialize those child stack pages now (preemptable context) so
++    // no lazy COW fault fires on the child's stack during its irqs-off context
++    // switch (fatal -- OSv has no separate kernel stack).
++    {
++        auto si = sched::thread::current()->get_stack_info();
++        mmu::privatize_child_range(child_as,
++                                   reinterpret_cast<uintptr_t>(si.begin),
++                                   si.size);
++    }
++
+     // Register the child BEFORE starting it so a fast child->exit cannot race
+     // ahead of the parent's bookkeeping.
+     fork::register_child(cpid, parent);

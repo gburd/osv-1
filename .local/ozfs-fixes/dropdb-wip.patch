@@ -1,0 +1,67 @@
+diff --git a/apps b/apps
+index 57c607984..2347c09a7 160000
+--- a/apps
++++ b/apps
+@@ -1 +1 @@
+-Subproject commit 57c607984393901ce556a75f81ea40f7c469d1f3
++Subproject commit 2347c09a7fb55e6e13474a83339d6f4e26e43c85
+diff --git a/libc/signal.cc b/libc/signal.cc
+index d1dc03e07..8c8898cc4 100644
+--- a/libc/signal.cc
++++ b/libc/signal.cc
+@@ -549,6 +549,30 @@ int kill(pid_t pid, int sig)
+             errno = ESRCH;
+             return -1;
+         }
++    } else if (pid == getpid()) {
++        // SELF-signal from a fork child: kill(getpid(), sig).  PostgreSQL's
++        // EmitProcSignalBarrier() sends SIGUSR1 to EVERY backend slot INCLUDING
++        // its own, then WaitForProcSignalBarrier() blocks until every slot
++        // (its own included) advances pss_barrierGeneration.  A backend bumps
++        // its OWN generation only from ProcessProcSignalBarrier(), which runs
++        // from CHECK_FOR_INTERRUPTS() when ProcSignalBarrierPending is set --
++        // and that flag is set by the SIGUSR1 handler
++        // (HandleProcSignalBarrierInterrupt).  ProcSignalBarrierPending /
++        // InterruptPending are process-global `volatile sig_atomic_t`, i.e. the
++        // backend's COW-private copy in ITS OWN address space.  If we run the
++        // handler in AS0 (the fall-through below), it sets those flags in AS0's
++        // copy, the emitting backend never sees ProcSignalBarrierPending, never
++        // absorbs its own barrier, and WaitForProcSignalBarrier waits for its
++        // own PID forever ("still waiting for backend with PID N ...", N=self)
++        // -- exactly the DROP DATABASE / DROP TABLESPACE wedge.  So a
++        // self-signal must run the handler in the CALLER's OWN address space.
++        // current_address_space() is AS0 for the top-level app/kernel
++        // (getpid()==OSV_PID) -- unchanged there and for the non-fork path.
++        target_as = mmu::current_address_space();
++        if (target_as == mmu::kernel_address_space()) {
++            target_as = nullptr;  // top-level app / kernel: AS0, as before
++        }
++        debugf("[SELFSIG] pid=%d sig=%d as0=%d\n", (int)pid, sig, target_as==nullptr);
+     }
+ #else
+     // OSv only implements one process, whose pid is getpid().
+@@ -642,8 +666,10 @@ int kill(pid_t pid, int sig)
+         // Where does the handler thread run?
+         //  * Targeted at a live fork child (target_as != nullptr): run it in
+         //    THAT child's address space, so its handler (PostgreSQL's
+-        //    latch_sigurg_handler) touches the TARGET backend's globals/fds
+-        //    (its self-pipe) -- the cross-backend latch wakeup.
++        //    latch_sigurg_handler, or a self-signal's
++        //    HandleProcSignalBarrierInterrupt) touches the TARGET/CALLER
++        //    backend's globals/fds -- the cross-backend latch wakeup, or the
++        //    self-signal's ProcSignalBarrierPending in the caller's own AS.
+         //  * Otherwise (process-level notify, e.g. the fork-synthesized SIGCHLD
+         //    a child raises to the postmaster on exit): run it in AS0.  A newly
+         //    created thread inherits the CREATING thread's address space; under
+diff --git a/modules/httpserver-html5-gui/osv-gui b/modules/httpserver-html5-gui/osv-gui
+--- a/modules/httpserver-html5-gui/osv-gui
++++ b/modules/httpserver-html5-gui/osv-gui
+@@ -1 +1 @@
+-Subproject commit c93b2f5cf80ac2a84b312aa97eb70a311989cf12
++Subproject commit c93b2f5cf80ac2a84b312aa97eb70a311989cf12-dirty
+diff --git a/modules/httpserver-html5-gui/swagger-ui b/modules/httpserver-html5-gui/swagger-ui
+--- a/modules/httpserver-html5-gui/swagger-ui
++++ b/modules/httpserver-html5-gui/swagger-ui
+@@ -1 +1 @@
+-Subproject commit 5d7010b96bf64a5820f397140d270454fc6eac86
++Subproject commit 5d7010b96bf64a5820f397140d270454fc6eac86-dirty

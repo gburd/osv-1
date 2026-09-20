@@ -1,0 +1,38 @@
+== hdb-PERQ-vu16-r0.log ==
+Vuser 1:TEST RESULT : System achieved 224507 NOPM from 517376 PostgreSQL TPM
+== hdb-PERQ-vu16-r1.log ==
+Vuser 1:TEST RESULT : System achieved 69443 NOPM from 160066 PostgreSQL TPM
+== hdb-PERQ-vu16-r2.log ==
+Vuser 1:TEST RESULT : System achieved 70861 NOPM from 163160 PostgreSQL TPM
+== hdb-PERQ-vu16-r3.log ==
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 322 PostgreSQL TPM
+== hdb-PERQ-vu16-r3b.log ==
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 322 PostgreSQL TPM
+== hdb-PERQ-vu16-r5.log ==
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 318 PostgreSQL TPM
+== hdb-PERQ-vu32-r0.log ==
+Vuser 1:TEST RESULT : System achieved 321412 NOPM from 740438 PostgreSQL TPM
+== hdb-PERQ-vu32-r1.log ==
+Vuser 1:TEST RESULT : System achieved 61965 NOPM from 142747 PostgreSQL TPM
+== hdb-PERQ-vu32-r2.log ==
+Vuser 1:TEST RESULT : System achieved 60757 NOPM from 139645 PostgreSQL TPM
+== hdb-PERQ-vu32-r3.log ==
+Vuser 1:TEST RESULT : System achieved 15966 NOPM from 37178 PostgreSQL TPM
+== hdb-SINGLE-vu16-r1.log ==
+Vuser 1:TEST RESULT : System achieved 70569 NOPM from 162776 PostgreSQL TPM
+== hdb-SINGLE-vu16-r2.log ==
+Vuser 1:TEST RESULT : System achieved 63983 NOPM from 147443 PostgreSQL TPM
+== hdb-SINGLE-vu16-r3.log ==
+Vuser 1:TEST RESULT : System achieved 67055 NOPM from 154334 PostgreSQL TPM
+== hdb-SINGLE-vu32-r1.log ==
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 0 PostgreSQL TPM
+== hdb-SINGLE-vu32-r2.log ==
+== hdb-SINGLE-vu32-r3.log ==
+== hdb-SINGLE-vu8-r0.log ==
+Vuser 1:TEST RESULT : System achieved 155832 NOPM from 358964 PostgreSQL TPM
+== hdb-SINGLE-vu8-r1.log ==
+Vuser 1:TEST RESULT : System achieved 102748 NOPM from 236705 PostgreSQL TPM
+== hdb-SINGLE-vu8-r2.log ==
+Vuser 1:TEST RESULT : System achieved 103984 NOPM from 239944 PostgreSQL TPM
+== hdb-SINGLE-vu8-r3.log ==
+Vuser 1:TEST RESULT : System achieved 111237 NOPM from 256561 PostgreSQL TPM

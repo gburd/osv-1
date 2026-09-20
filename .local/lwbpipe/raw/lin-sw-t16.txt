@@ -1,0 +1,1 @@
+SWSTORM threads=16 secs=30 bs=4096 ops=1326177 op_per_s=44133.1

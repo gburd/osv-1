@@ -1,0 +1,122 @@
+diff --git a/Makefile b/Makefile
+index f986f1f64..c4c10e342 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1019,6 +1019,13 @@ endif
+ objects += core/math.o
+ objects += core/spinlock.o
+ objects += core/lfmutex.o
++objects += core/lockprof.o
++ifeq ($(lockprof),1)
++$(out)/core/lockprof.o: CXXFLAGS += -DLOCKPROF
++$(out)/core/mmu.o: CXXFLAGS += -DLOCKPROF
++$(out)/core/mempool.o: CXXFLAGS += -DLOCKPROF
++$(out)/loader.o: CXXFLAGS += -DLOCKPROF
++endif
+ objects += core/rwlock.o
+ objects += core/semaphore.o
+ objects += core/condvar.o
+diff --git a/core/mempool.cc b/core/mempool.cc
+index 4f8a33135..8ea3a8426 100644
+--- a/core/mempool.cc
++++ b/core/mempool.cc
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <osv/mempool.hh>
++#include <osv/lockprof.hh>
+ #include <osv/ilog2.hh>
+ #include "arch-setup.hh"
+ #include <cassert>
+@@ -1720,7 +1721,9 @@ void l2::refill()
+     page_batch batch;
+     page_batch* pb;
+     while (get_nr() < _max / 2) {
++        LOCKPROF_SITE(lockprof::SITE_PAGE_RANGES);
+         WITH_LOCK(free_page_ranges_lock) {
++            LOCKPROF_ACQUIRED();
+             reclaimer_thread.wait_for_minimum_memory();
+             if (free_page_ranges.empty()) {
+                 // That is almost a guaranteed oom, but we can still have some hope
+diff --git a/core/mmu.cc b/core/mmu.cc
+index 3748a0b4e..d40e078a8 100644
+--- a/core/mmu.cc
++++ b/core/mmu.cc
+@@ -7,6 +7,7 @@
+ 
+ #include <osv/mmu.hh>
+ #include <osv/mempool.hh>
++#include <osv/lockprof.hh>
+ #include <osv/sched.hh>
+ #include "processor.hh"
+ #include <osv/debug.hh>
+@@ -1926,10 +1927,14 @@ public:
+         auto *reg = get_shared_anon_registry();
+         auto &sh = reg->shard_for(va);
+         // Fast path: already recorded.
+-        WITH_LOCK(sh.lock) {
+-            auto it = sh.pages.find(va);
+-            if (it != sh.pages.end()) {
+-                return it->second;
++        {
++            LOCKPROF_SITE(lockprof::SITE_REGISTRY_SHARD);
++            WITH_LOCK(sh.lock) {
++                LOCKPROF_ACQUIRED();
++                auto it = sh.pages.find(va);
++                if (it != sh.pages.end()) {
++                    return it->second;
++                }
+             }
+         }
+         // Allocate the backing page OUTSIDE the registry lock (alloc_page may
+@@ -2452,7 +2457,9 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
+     // page is present but write-protected with the cow bit -- copy it.
+     if (mmu::is_page_fault_write(ef->get_error())) {
+         PREVENT_STACK_PAGE_FAULT
++        LOCKPROF_SITE(lockprof::SITE_VMAS_WRITE);
+         WITH_LOCK(as->vmas_mutex->for_write()) {
++            LOCKPROF_ACQUIRED();
+             if (handle_cow_write_fault(addr)) {
+                 trace_mmu_vm_fault_ret(addr, ef->get_error());
+                 return;
+@@ -2460,7 +2467,10 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
+         }
+     }
+ 
++    {
++    LOCKPROF_SITE(lockprof::SITE_VMAS_READ);
+     WITH_LOCK(as->vmas_mutex->for_read()) {
++        LOCKPROF_ACQUIRED();
+         auto vma = find_intersecting_vma_in(*as->vmas, addr);
+         if (vma == as->vmas->end() || access_fault(*vma, ef->get_error())) {
+             vm_sigsegv(addr, ef);
+@@ -2469,6 +2479,7 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
+         }
+         vma->fault(addr, ef);
+     }
++    }
+     trace_mmu_vm_fault_ret(addr, ef->get_error());
+ #else // !CONF_fork -- original single-address-space fault path
+     WITH_LOCK(vma_list_mutex.for_read()) {
+diff --git a/loader.cc b/loader.cc
+index d33e2163d..94ac75482 100644
+--- a/loader.cc
++++ b/loader.cc
+@@ -66,6 +66,7 @@
+ #include <processor.hh>
+ #include <dlfcn.h>
+ #include <osv/string_utils.hh>
++#include <osv/lockprof.hh>
+ 
+ using namespace osv;
+ using namespace osv::clock::literals;
+@@ -548,6 +549,9 @@ void* do_main_thread(void *_main_args)
+     }
+     arch_init_drivers();
+     console::console_init();
++#ifdef LOCKPROF
++    lockprof::start_dumper();
++#endif
+     nulldev::nulldev_init();
+     if (opt_random) {
+         randomdev::randomdev_init();

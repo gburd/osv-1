@@ -1,0 +1,31 @@
+=== WEDGE-WATCH label=ziltimeout-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (36)
+io_method_in_effect=worker
+  checkpoint 2: 45 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=2.00 441
+t=30s WALWrite=21 active=29 xact_commit_delta=36620 nvme=57.60 1464
+t=45s WALWrite=52 active=65 xact_commit_delta=110211 nvme=58.00 1736
+t=60s WALWrite=39 active=65 xact_commit_delta=170510 nvme=80.80 1960
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 52
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+--- VERDICT (overturns the ZIL-condvar-only model) ---
+OSV_ZIL_WAIT_TIMEOUT=1 (untimed cv_wait -> bounded cv_timedwait_hires, 1ms recheck of zcw_done)
+STILL WEDGES. A 1ms-rechecking waiter with zcw_done==1 MUST proceed - unless the TIMER wake is ALSO
+lost. Combined with qemu~50% (ONE vCPU busy, the rest halted and never rescheduled), this indicates a
+SCHEDULER-WIDE cross-vCPU wake collapse: wakes to halted vCPUs (cv AND timer driven) are lost wholesale
+under VU64 load. The ZIL commit-waiter (WALWrite, the global serialization point) is just where it first
+manifests; zcw_done=1+asleep is the symptom, the disease is the OSv cross-vCPU wake-to-halted-vCPU path.
+Refutations so far (ALL still wedge): FLUSH_INLINE, NO_MORPH, WAKE_IPI_ALWAYS (v1 and v2+mask-bypass),
+ZIL_WAIT_TIMEOUT. => not the taskq hop, not morph/RHO, not the IPI-send guards, not the ZIL wait itself.

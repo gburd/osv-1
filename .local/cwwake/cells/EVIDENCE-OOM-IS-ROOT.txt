@@ -1,0 +1,31 @@
+=== DECISIVE CORRECTION: the VU64 wedge is an OUT-OF-MEMORY PANIC, not a lost-wakeup deadlock ===
+
+CLEAN baseline run (NO gdb stub), VU64 worker, monitored console + qemu-cpu + OOM:
+  t=15s WALWrite=21 OOM_lines=0 qemu_pct=1889   healthy
+  t=30s WALWrite=40 OOM_lines=0 qemu_pct=2058   healthy
+  t=45s WALWrite=<conn timeout> OOM_lines=1 qemu_pct=0   <- OOM PANIC, guest halted
+  t=60s+ "No route to host"  <- guest network DOWN (kernel panicked, tap dead), never recovers
+
+Console (clean, no gdb):
+  OOM total_free_Kb=0xb34 (2868 KB)
+  OOM largest_free_range_Kb=0xd4 (212 KB)
+  Out of memory: could not reclaim any further. Current memory: 2868 Kb
+  [backtrace] ... memory::reclaimer::do_reclaim ... page fault on all CPUs
+
+The OSv guest (-m 64G) exhausts ALL 64GB down to ~2.8MB free under VU64 load in ~40s, then the
+memory reclaimer cannot free further and OOM-PANICS. The guest DIES (network "No route to host").
+
+=> This OVERTURNS the lost-wakeup thesis. The earlier "ZWEDGE LOST-WAKE zcw_done=1 + waiter asleep"
+   smoking gun was a SYMPTOM of the memory-reclaim stall (a waiter blocked while the reclaimer spins
+   unable to free memory), NOT a lost condvar wake. This is why EVERY wake-path A/B failed to fix it
+   (FLUSH_INLINE, NO_MORPH, WAKE_IPI_ALWAYS v1+v2, ZIL_WAIT_TIMEOUT, no-halt) - none address OOM.
+
+=> ROOT CAUSE CLASS: unbounded memory growth / reclaim failure under VU64 concurrency. Candidates:
+   (1) ZFS ARC exceeding OSV_ZFS_ARC_MAX=32G under write pressure (ARC not shrinking),
+   (2) fork COW page explosion across 64 backend child address spaces (fork-arena reclaim not keeping up),
+   (3) a concurrency-proportional leak in the WAL/ZIL/dirty-buffer path.
+   Linux scales at VU64 on the same host because Linux page reclaim + real fork handle this; OSv's
+   ARC/fork-arena/reclaimer do not. OSv-specific, but a MEMORY bug, not a scheduler wake bug.
+
+NEXT: measure OSv memory trajectory during the healthy phase (what grows: ARC? fork COW? anon?),
+identify which pool exhausts, and whether raising -m or capping ARC harder / bounding fork COW prevents it.

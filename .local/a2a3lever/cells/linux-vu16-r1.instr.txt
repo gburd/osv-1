@@ -1,0 +1,14 @@
+=== iostat %util (col by header) ===
+%util: median=39.06 min=30.10 max=58.20 n=29
+w_await: median=0.08 min=0.04 max=0.11 n=29
+qemu_cpu_pct_of_one_core=1449  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1443  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1395  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1462  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1499  (ceiling 3200 for 32 vCPU)
+%util: median=39.06 max=58.20
+w_await: median=0.08 max=0.11
+aqu-sz: median=1.14 max=1.85
+qemu_cpu_pct_of_one_core=1395  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1462  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1499  (ceiling 3200 for 32 vCPU)

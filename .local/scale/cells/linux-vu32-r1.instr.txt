@@ -1,0 +1,121 @@
+nvme1n1 %util: median=28.36 max=93.20 n=41
+nvme1n1 w_await: median=0.04 max=0.08 n=41
+nvme1n1 aqu-sz: median=0.61 max=4.34 n=41
+nvme1n1 wkB/s: median=113696.00 max=225415.20 n=41
+nvme1n1 r/s: median=1683.70 max=24066.20 n=41
+nvme1n1 w/s: median=8999.50 max=19676.90 n=41
+tap0 rx_Mbps: median=14 max=17 n=42
+tap0 tx_Mbps: median=12 max=15 n=42
+tap0 rx_pps: median=10676 max=12723 n=42
+tap0 tx_pps: median=10732 max=12813 n=42
+---qemu cpu ALL---
+qemu_cpu_pct_of_one_core=633  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2033  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1522  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1479  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1491  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1638  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1402  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1390  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1585  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1668  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1346  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1373  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1359  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1351  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1369  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1342  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1395  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1434  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1454  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1423  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1604  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1438  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1434  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1435  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1460  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1445  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1437  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1454  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1447  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1453  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1474  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1444  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1443  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1430  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1451  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1582  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1466  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1493  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1479  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1479  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1499  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1702  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=968  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2146  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2091  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2222  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2040  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1990  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1958  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1941  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1890  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1860  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1824  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2053  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2116  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2188  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2082  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2175  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2169  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2049  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1838  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1817  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1726  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1746  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1868  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1918  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1941  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1988  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1997  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1807  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1757  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1836  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1821  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1751  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1809  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1759  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1890  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1879  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2014  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1977  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1911  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1874  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1850  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1916  (ceiling 3200 for 32 vCPU)
+---qemu cpu DISCRIMINATOR---
+during_run_median_pct_of_one_core=1714 n_hi=84 min_hi=633 max_hi=2222 (ceiling 3200 = 32 vCPU)
+---tap0 net---
+tap0 rx_Mbps=15 tx_Mbps=14 rx_pps=11876 tx_pps=11956
+tap0 rx_Mbps=16 tx_Mbps=14 rx_pps=12132 tx_pps=12207
+tap0 rx_Mbps=15 tx_Mbps=13 rx_pps=11467 tx_pps=11556
+tap0 rx_Mbps=17 tx_Mbps=15 rx_pps=12704 tx_pps=12798
+tap0 rx_Mbps=16 tx_Mbps=14 rx_pps=12296 tx_pps=12388
+tap0 rx_Mbps=15 tx_Mbps=13 rx_pps=11326 tx_pps=11404
+tap0 rx_Mbps=14 tx_Mbps=13 rx_pps=10878 tx_pps=10945
+tap0 rx_Mbps=15 tx_Mbps=13 rx_pps=11520 tx_pps=11598
+tap0 rx_Mbps=14 tx_Mbps=12 rx_pps=10569 tx_pps=10614
+tap0 rx_Mbps=14 tx_Mbps=12 rx_pps=10454 tx_pps=10516
+tap0 rx_Mbps=13 tx_Mbps=12 rx_pps=10173 tx_pps=10226
+tap0 rx_Mbps=14 tx_Mbps=12 rx_pps=10783 tx_pps=10849
+tap0 rx_Mbps=16 tx_Mbps=14 rx_pps=12145 tx_pps=12229
+tap0 rx_Mbps=15 tx_Mbps=13 rx_pps=11478 tx_pps=11570
+tap0 rx_Mbps=17 tx_Mbps=15 rx_pps=12723 tx_pps=12813
+tap0 rx_Mbps=13 tx_Mbps=11 rx_pps=9949 tx_pps=10005
+tap0 rx_Mbps=15 tx_Mbps=14 rx_pps=11686 tx_pps=11766
+tap0 rx_Mbps=15 tx_Mbps=13 rx_pps=11197 tx_pps=11278
+tap0 rx_Mbps=14 tx_Mbps=13 rx_pps=10992 tx_pps=11073
+tap0 rx_Mbps=15 tx_Mbps=13 rx_pps=11215 tx_pps=11296
+---PER-BACKEND MEM (Linux)---
+Warning: Permanently added '192.168.100.2' (ED25519) to the list of known hosts.
+bash: /tmp/pbmem.sh: No such file or directory

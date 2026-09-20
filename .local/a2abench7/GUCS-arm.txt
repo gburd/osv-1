@@ -1,0 +1,17 @@
+             name             | setting  | unit |    source    
+------------------------------+----------+------+--------------
+ autovacuum                   | on       |      | command line
+ checkpoint_completion_target | 0.9      |      | command line
+ checkpoint_timeout           | 900      | s    | command line
+ data_directory               | /data/pg |      | override
+ effective_cache_size         | 4194304  | 8kB  | command line
+ fsync                        | on       |      | command line
+ io_method                    | sync     |      | command line
+ log_checkpoints              | on       |      | command line
+ max_connections              | 400      |      | command line
+ max_wal_size                 | 65536    | MB   | command line
+ min_wal_size                 | 2048     | MB   | command line
+ shared_buffers               | 2097152  | 8kB  | command line
+ synchronous_commit           | on       |      | command line
+(13 rows)
+

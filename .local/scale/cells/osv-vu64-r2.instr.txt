@@ -1,0 +1,90 @@
+nvme1n1 %util: median=92.60 max=99.36 n=41
+nvme1n1 w_await: median=1.17 max=2.04 n=41
+nvme1n1 aqu-sz: median=9.83 max=16.21 n=41
+nvme1n1 wkB/s: median=698823.20 max=820980.40 n=41
+nvme1n1 r/s: median=1967.40 max=9107.90 n=41
+nvme1n1 w/s: median=7184.80 max=8656.70 n=41
+tap0 rx_Mbps: median=9 max=23 n=42
+tap0 tx_Mbps: median=8 max=20 n=42
+tap0 rx_pps: median=6788 max=16706 n=42
+tap0 tx_pps: median=6870 max=16889 n=42
+---qemu cpu ALL---
+qemu_cpu_pct_of_one_core=480  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1007  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1133  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1150  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1447  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1744  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1947  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2101  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2169  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2151  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2222  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1985  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1924  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1825  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1828  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1867  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1789  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1526  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1025  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1620  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1651  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1678  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1690  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1665  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1667  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1706  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1703  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1778  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1693  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1775  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1769  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1866  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1777  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1733  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1772  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1754  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1761  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1795  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1800  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1758  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1764  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1398  (ceiling 3200 for 32 vCPU)
+---qemu cpu DISCRIMINATOR---
+during_run_median_pct_of_one_core=1759 n_hi=42 min_hi=480 max_hi=2222 (ceiling 3200 = 32 vCPU)
+---tap0 net---
+tap0 rx_Mbps=8 tx_Mbps=6 rx_pps=5727 tx_pps=5801
+tap0 rx_Mbps=7 tx_Mbps=6 rx_pps=5196 tx_pps=5261
+tap0 rx_Mbps=7 tx_Mbps=6 rx_pps=5054 tx_pps=5117
+tap0 rx_Mbps=7 tx_Mbps=5 rx_pps=4995 tx_pps=5043
+tap0 rx_Mbps=7 tx_Mbps=6 rx_pps=5187 tx_pps=5251
+tap0 rx_Mbps=8 tx_Mbps=6 rx_pps=5794 tx_pps=5864
+tap0 rx_Mbps=9 tx_Mbps=7 rx_pps=6381 tx_pps=6461
+tap0 rx_Mbps=9 tx_Mbps=8 rx_pps=7060 tx_pps=7143
+tap0 rx_Mbps=10 tx_Mbps=9 rx_pps=7637 tx_pps=7729
+tap0 rx_Mbps=11 tx_Mbps=9 rx_pps=8300 tx_pps=8406
+tap0 rx_Mbps=9 tx_Mbps=8 rx_pps=7054 tx_pps=7135
+tap0 rx_Mbps=9 tx_Mbps=7 rx_pps=6592 tx_pps=6669
+tap0 rx_Mbps=10 tx_Mbps=8 rx_pps=7102 tx_pps=7189
+tap0 rx_Mbps=8 tx_Mbps=7 rx_pps=6333 tx_pps=6405
+tap0 rx_Mbps=9 tx_Mbps=8 rx_pps=7060 tx_pps=7143
+tap0 rx_Mbps=10 tx_Mbps=9 rx_pps=7493 tx_pps=7588
+tap0 rx_Mbps=10 tx_Mbps=9 rx_pps=7589 tx_pps=7681
+tap0 rx_Mbps=9 tx_Mbps=8 rx_pps=6984 tx_pps=7071
+tap0 rx_Mbps=9 tx_Mbps=8 rx_pps=7078 tx_pps=7166
+tap0 rx_Mbps=5 tx_Mbps=4 rx_pps=3899 tx_pps=3864
+---FOOTPRINT (FPTOT during run: per_as_KB is the per-backend number)---
+FPTOT live_as=0000000000000047
+FPTOTEND
+FPTOT live_as=0000000000000047
+FPTOTEND
+FPTOT live_as=0000000000000047
+FPTOTEND
+---FPTOT final---
+FPTOT live_as=000000000000001b
+FPTOTEND
+---REGRESSION WATCH (EMFILE / OOM / dentry / panic)---
+EMFILE_COUNT=0
+OOM_COUNT=0
+ABORT_COUNT=0

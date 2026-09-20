@@ -1,0 +1,13 @@
+=== PERQ-vu32-r2 ===
+Vuser 1:TEST RESULT : System achieved 60757 NOPM from 139645 PostgreSQL TPM
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.0643608570098877,
+ "p95": 0.07706403732299805,
+ "p99": 0.09530305862426758,
+ "max": 0.11059260368347168,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}

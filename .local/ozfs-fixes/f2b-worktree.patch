@@ -1,0 +1,133 @@
+diff --git a/apps b/apps
+index 57c60798..0b98404f 160000
+--- a/apps
++++ b/apps
+@@ -1 +1 @@
+-Subproject commit 57c607984393901ce556a75f81ea40f7c469d1f3
++Subproject commit 0b98404febe72adb05c5f16ad8498376f40cbd16
+diff --git a/arch/x64/mmu.cc b/arch/x64/mmu.cc
+index b6dc71f7..d0a4c8c1 100644
+--- a/arch/x64/mmu.cc
++++ b/arch/x64/mmu.cc
+@@ -7,6 +7,7 @@
+ 
+ #include "arch-cpu.hh"
+ #include <osv/debug.hh>
++#include <osv/debug.h>
+ #include <osv/sched.hh>
+ #include <osv/mmu.hh>
+ #include <osv/irqlock.hh>
+@@ -33,6 +34,30 @@ void page_fault(exception_frame *ef)
+     if (reinterpret_cast<void*>(addr & ~(mmu::page_size - 1)) == elf::missing_symbols_page_addr) {
+         abort("trying to execute or access missing symbol");
+     }
++    // F2B_INSTR: dump fault context before the assert kills us.
++    if (!sched::preemptable() || !(ef->rflags & processor::rflags_if)) {
++        auto* cur = sched::thread::current();
++        debug_early("F2B page_fault in non-preemptable/irq-off window:\n");
++        debug_early_u64("  cr2=", (unsigned long long)addr);
++        debug_early_u64("  rip=", (unsigned long long)ef->rip);
++        debug_early_u64("  err=", (unsigned long long)ef->error_code);
++        debug_early_u64("  preempt_counter=", (unsigned long long)sched::get_preempt_counter());
++        debug_early_u64("  irq_if=", (unsigned long long)(ef->rflags & processor::rflags_if));
++        debug_early_u64("  cur=", (unsigned long long)cur);
++        debug_early_u64("  rdi_st=", (unsigned long long)ef->rdi);
++        debug_early_u64("  rbp=", (unsigned long long)ef->rbp);
++        debug_early_u64("  rsp=", (unsigned long long)ef->rsp);
++        // walk the rbp frame chain for the real caller path
++        unsigned long long f2b_fp = ef->rbp;
++        for (int i = 0; i < 12 && f2b_fp > 0x40000000ULL && f2b_fp < 0x800000000000ULL; i++) {
++            unsigned long long ret = *((volatile unsigned long long*)(f2b_fp + 8));
++            if (ret >= 0x40200000ULL && ret < 0x40800000ULL)
++                debug_early_u64("  fp_ret=", ret);
++            unsigned long long nfp = *((volatile unsigned long long*)f2b_fp);
++            if (nfp <= f2b_fp) break;
++            f2b_fp = nfp;
++        }
++    }
+     // The following code may sleep. So let's verify the fault did not happen
+     // when preemption was disabled, or interrupts were disabled.
+     assert(sched::preemptable());
+diff --git a/core/sched.cc b/core/sched.cc
+index 8bfc8821..188e28e6 100644
+--- a/core/sched.cc
++++ b/core/sched.cc
+@@ -12,6 +12,7 @@
+ #include <osv/rwlock.h>
+ #include <mutex>
+ #include <osv/debug.hh>
++#include <osv/debug.h>
+ #include <osv/irqlock.hh>
+ #include <osv/align.hh>
+ #include <osv/interrupt.hh>
+@@ -619,6 +620,14 @@ void cpu::handle_incoming_wakeups()
+ void cpu::enqueue(thread& t)
+ {
+     trace_sched_queue(&t);
++    if (t._runqueue_link.is_linked()) { // F2B_INSTR
++        debug_early("F2B DOUBLE-INSERT enqueue:\n");
++        debug_early_u64("  tid=", (unsigned long long)t.id());
++        debug_early_u64("  st=", (unsigned long long)(int)t._detached_state->st.load());
++        debug_early_u64("  tcpu=", (unsigned long long)(t._detached_state->_cpu?t._detached_state->_cpu->id:999u));
++        debug_early_u64("  thiscpu=", (unsigned long long)id);
++        abort("F2B double-insert");
++    }
+     runqueue.insert_equal(t);
+ }
+ 
+@@ -629,6 +638,14 @@ void cpu::enqueue(thread& t)
+ void cpu::enqueue_first_equal(thread& t)
+ {
+     trace_sched_queue(&t);
++    if (t._runqueue_link.is_linked()) { // F2B_INSTR
++        debug_early("F2B DOUBLE-INSERT enqueue_first_equal:\n");
++        debug_early_u64("  tid=", (unsigned long long)t.id());
++        debug_early_u64("  st=", (unsigned long long)(int)t._detached_state->st.load());
++        debug_early_u64("  tcpu=", (unsigned long long)(t._detached_state->_cpu?t._detached_state->_cpu->id:999u));
++        debug_early_u64("  thiscpu=", (unsigned long long)id);
++        abort("F2B double-insert");
++    }
+     runqueue.insert_before(runqueue.lower_bound(t), t);
+ }
+ 
+@@ -1544,15 +1561,31 @@ void thread::complete()
+     // freed thread.  Erase from the OWNING cpu's list (t._parked_cpu), which
+     // migration keeps in sync; it is this cpu in the common case.  Its timers
+     // are all being torn down anyway, so no wakeup is lost.
+-    if (_parked_link.is_linked()) {
+-        auto *c = _parked_cpu;
+-        assert(c);
+-        c->parked_threads.erase(c->parked_threads.iterator_to(*this));
+-        _parked_cpu = nullptr;
+-        _timers_parked = false;
+-        c->rearm_park_timer();
+-    } else {
+-        _timers_parked = false;
++    // The parked list + park_wakeup_timer of the owning cpu are mutated from
++    // that cpu's timer IRQ (park_timer_fired/rearm_park_timer) and from its
++    // switch path (park_timers/unpark_timers), all with IRQs disabled.  This
++    // erase runs here at complete() entry with IRQs ENABLED, so without the
++    // guard below the timer IRQ can preempt us mid-mutation of the intrusive
++    // list -> list corruption -> a later park_timer_fired() walks a freed node
++    // and wakes garbage (wake_impl deref of a bad detached_state->_cpu) or
++    // double-inserts a thread into the runqueue.  A parked thread's _parked_cpu
++    // equals its current cpu (migration unlinks it on the source cpu before it
++    // can run elsewhere), so a local irq_lock serialises against that cpu's
++    // timer IRQ.  rearm_park_timer()'s set_with_irq_disabled() also requires
++    // IRQs off, which the guard provides.
++    irq_save_lock_type irq_lock;
++    WITH_LOCK(irq_lock) {
++        if (_parked_link.is_linked()) {
++            auto *c = _parked_cpu;
++            assert(c);
++            assert(c == cpu::current());
++            c->parked_threads.erase(c->parked_threads.iterator_to(*this));
++            _parked_cpu = nullptr;
++            _timers_parked = false;
++            c->rearm_park_timer();
++        } else {
++            _timers_parked = false;
++        }
+     }
+ #endif
+ 

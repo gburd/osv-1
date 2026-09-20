@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 18:00:00 -0400
+Subject: [PATCH] zfs: STEP-1 write-service-vs-depth discriminator probe
+
+The M1 residual is a ~2x per-lwb WRITE latency (ISSUED->WRITE_DONE) AND a
+~14x lower in-flight lwb depth on OSv vs Linux.  Existing probes already
+measure whole-write-zio latency (zc_wrlat, ISSUED->WRITE_DONE, which
+INCLUDES vdev-queue wait) and the lwb pipeline depth.  This patch adds the
+two missing measurements to DISCRIMINATE write-slower vs fewer-in-flight:
+
+ (a) per-write-zio DEVICE SERVICE time.  zio->io_delay is set in
+     zio_vdev_io_start (queue-exit / device submit) and finalized in
+     zio_vdev_io_done (device completion) by upstream code, identically on
+     OSv and Linux.  We accumulate it for ZIO_PRIORITY_SYNC_WRITE only
+     (the ZIL lwb write priority), in vdev_queue_io_done where io_delay is
+     already computed.  This is the pure device round-trip, SEPARATE from
+     the queue-wait that inflates zc_wrlat when depth is low.
+
+ (b)/(c) concurrent in-flight SYNC_WRITE zios at the vdev queue
+     (vq_cactive[ZIO_PRIORITY_SYNC_WRITE]) sampled at pending_add/remove
+     under vq_lock: max and a time-weighted integral for the MEAN.  This is
+     the vdev-queue write depth, and it also tells us whether we ever hit
+     the zfs_vdev_sync_write_max_active=10 cap (OSv at depth ~2 should not).
+
+All under vq_lock (already held) so no atomics/new locks.  Non-static
+globals so zilwake_dump() in zil.c can extern+print them (RESULT ZILSVC).
+The (d) zl_parallel branch counts (zp_open/zp_prevnf/zp_decay) and the
+issuer cadence already exist (RESULT ZILISSUER); this completes STEP-1.
+
+Pure probe, no behaviour change, no default change.
+---
+ module/zfs/vdev_queue.c | 45 +++++++++++++++++++++++++++++++++++++++++++
+ module/zfs/zil.c        | 22 +++++++++++++++++++++
+ 2 files changed, 67 insertions(+)
+
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index 1111111..2222222 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -38,6 +38,39 @@
+ #include <sys/spa.h>
+ #include <sys/abd.h>
+ 
++/*
++ * OSv STEP-1 discriminator: per-write-zio DEVICE SERVICE time (io_delay,
++ * device submit->completion) and concurrent in-flight SYNC_WRITE depth at
++ * the vdev queue (vq_cactive[SYNC_WRITE]).  Non-static so zilwake_dump() in
++ * zil.c can extern+print them.  Updated under vq_lock (no atomics needed).
++ */
++volatile uint64_t osv_svc_sum;     /* sum SYNC_WRITE io_delay (ns) */
++volatile uint64_t osv_svc_max;     /* max SYNC_WRITE io_delay (ns) */
++volatile uint64_t osv_svc_n;       /* # SYNC_WRITE completions timed */
++volatile uint64_t osv_swd_max;     /* max in-flight SYNC_WRITE zios */
++volatile int64_t  osv_swd_integral;/* sum of (in-flight SYNC_WRITE)*dt (ns) */
++static hrtime_t   osv_swd_last_ns; /* last transition time */
++volatile uint64_t osv_swd_run_ns;  /* wall time the integral spans (ns) */
++
++static void
++osv_swd_accum(vdev_queue_t *vq)
++{
++	/* MUST be called under vq_lock, AFTER vq_cactive was updated. */
++	hrtime_t now = gethrtime();
++	uint64_t cur = vq->vq_cactive[ZIO_PRIORITY_SYNC_WRITE];
++	if (osv_swd_last_ns != 0) {
++		hrtime_t dt = now - osv_swd_last_ns;
++		/* integrate the depth we HAD over dt (pre-update caller reads
++		 * cur AFTER the ++/--, so we integrate the just-changed value
++		 * going forward, which is the standard step-integral). */
++		osv_swd_integral += (int64_t)cur * dt;
++		osv_swd_run_ns += (uint64_t)dt;
++	}
++	osv_swd_last_ns = now;
++	if (cur > osv_swd_max)
++		osv_swd_max = cur;
++}
++
+ /*
+  * ZFS I/O Scheduler
+  * ---------------
+@@ -538,6 +561,7 @@ vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio)
+ 	ASSERT(MUTEX_HELD(&vq->vq_lock));
+ 	ASSERT3U(zio->io_priority, <, ZIO_PRIORITY_NUM_QUEUEABLE);
+ 	vq->vq_cactive[zio->io_priority]++;
++	osv_swd_accum(vq);
+ 	vq->vq_active++;
+ 	if (vdev_queue_is_interactive(zio->io_priority)) {
+ 		if (++vq->vq_ia_active == 1)
+@@ -555,6 +579,7 @@ vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio)
+ 	ASSERT(MUTEX_HELD(&vq->vq_lock));
+ 	ASSERT3U(zio->io_priority, <, ZIO_PRIORITY_NUM_QUEUEABLE);
+ 	vq->vq_cactive[zio->io_priority]--;
++	osv_swd_accum(vq);
+ 	vq->vq_active--;
+ 	if (vdev_queue_is_interactive(zio->io_priority)) {
+ 		if (--vq->vq_ia_active == 0)
+@@ -952,7 +985,24 @@ vdev_queue_io_done(zio_t *zio)
+ 	hrtime_t now = gethrtime();
+ 	vq->vq_io_complete_ts = now;
+ 	vq->vq_io_delta_ts = zio->io_delta = now - zio->io_timestamp;
+ 
++	/*
++	 * STEP-1(a): accumulate the DEVICE SERVICE time for SYNC_WRITE zios
++	 * (ZIL lwb writes).  zio->io_delay was set by zio_vdev_io_start at
++	 * queue-exit and finalized to (completion - submit) in zio_vdev_io_done
++	 * just BEFORE this function is called, so it is the pure device
++	 * round-trip, excluding vdev-queue wait.  Guard against io_delay==0
++	 * (some paths skip it).
++	 */
++	if (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE &&
++	    zio->io_type == ZIO_TYPE_WRITE && zio->io_delay > 0) {
++		uint64_t d = (uint64_t)zio->io_delay;
++		atomic_add_64(&osv_svc_sum, d);
++		if (d > osv_svc_max)
++			osv_svc_max = d;
++		atomic_inc_64(&osv_svc_n);
++	}
++
+ 	mutex_enter(&vq->vq_lock);
+ 	vdev_queue_pending_remove(vq, zio);
+ 
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index 3333333..4444444 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -335,6 +341,18 @@ zilwake_dump(void)
+ 	    (zi_lwblat_n && zc_wrlat_n) ?
+ 	    ((zi_lwblat_sum / 1000.0) / zi_lwblat_n) -
+ 	    ((zc_wrlat_sum / 1000.0) / zc_wrlat_n) : 0.0);
++
++	/* STEP-1 discriminator: device SERVICE time + vdev-queue write depth. */
++	extern volatile uint64_t osv_svc_sum, osv_svc_max, osv_svc_n;
++	extern volatile uint64_t osv_swd_max, osv_swd_run_ns;
++	extern volatile int64_t  osv_swd_integral;
++	printf("RESULT ZILSVC svc_us_mean=%.3f svc_us_max=%.3f svc_n=%llu "
++	    "vqwrite_depth_mean=%.3f vqwrite_depth_max=%llu\n",
++	    osv_svc_n ? (osv_svc_sum / 1000.0) / osv_svc_n : 0.0,
++	    osv_svc_max / 1000.0, (unsigned long long)osv_svc_n,
++	    osv_swd_run_ns ? (double)osv_swd_integral / (double)osv_swd_run_ns
++	    : 0.0,
++	    (unsigned long long)osv_swd_max);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+-- 
+2.54.0

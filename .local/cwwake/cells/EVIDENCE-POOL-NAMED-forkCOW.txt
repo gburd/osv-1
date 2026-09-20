@@ -1,0 +1,26 @@
+=== POOL NAMED: fork-COW anonymous memory across backend child address spaces ===
+
+MEMPROBE per-pool trajectory (VU64 worker, -m 64G), chronological:
+  boot:     free_MB=65404  arc_size_MB=0     arc_c_MB=0     dirty_max_MB=0
+  PG start: free_MB=64102  arc_size_MB=176   arc_c_MB=2047  dirty_max_MB=3276
+  ...       free_MB monotonically DECLINES 64102 -> 60421 -> ... -> 531
+  wedge:    free_MB=531 (stuck 51 samples) arc_size_MB=2047 arc_c_MB=2047 dirty_max_MB=3276
+
+KEY: as free_MB collapses 64GB -> 0.5GB, ARC stays <=2047MB (2GB, WAY under its 32G cap - ARC is NOT
+the consumer) and dirty_data_max is fixed 3.2GB (throttle IS set correctly). ARC+dirty ~= 5GB.
+shared_buffers = 16GB. Accounted: ~21GB. Guest consumed ~63GB.
+=> ~42GB UNACCOUNTED = anonymous / fork-COW memory across the 74 backend fork-child address spaces.
+   qemu RSS trajectory corroborates: RSS climbed with backend count (37->74) AND kept climbing after
+   backends maxed (write-driven COW faults on shared_buffers pages).
+   ~42GB / 74 backends ~= 570 MB/backend of COW-duplicated pages.
+
+ROOT CAUSE (named, measured): under CONF_fork=1, each PostgreSQL backend is a fork-child with its own
+COW address space. Touching the 16GB shared_buffers (and other shared pages) triggers copy-on-write
+page duplication per backend. At VU64 (74 backends) the COW footprint explodes to ~42GB, driving the
+64GB guest OOM (-> memory::reclaimer::do_reclaim can't free COW/anon pages -> oom() abort -> panic).
+NOT ARC (2GB), NOT dirty-data (3.2GB cap OK), NOT a lost wakeup (that was a reclaim-stall symptom).
+
+WHY VU64 not VU32: COW footprint is ~linear in backend count. VU32 (~40 backends) ~= 23GB COW + 21GB
+base = ~44GB < 64GB (survives). VU64 (~74 backends) ~= 42GB COW + 21GB = ~63GB > usable -> OOM.
+Concurrency-proportional, threshold between VU32 and VU64. Linux scales because real fork + shared
+page tables (MAP_SHARED shared_buffers stays shared, not COW-duplicated per child).

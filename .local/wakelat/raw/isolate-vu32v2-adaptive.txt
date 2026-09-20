@@ -1,0 +1,21 @@
+=== ISOLATE vu32v2 ARM=adaptive threads=32 secs=30 reps=3 Fri Sep 18 11:22:53 UTC 2026 ===
+ENVS:  --env=OSV_WAKE_PULL=1 --env=OSV_ZFS_ARC_MAX=34359738368 --env=OSV_BLK_MQ_COMPLETE=1
+--- halt-counters BEFORE ---
+halt_exits=0
+halt_successful_poll=0
+halt_attempted_poll=0
+halt_poll_invalid=0
+halt_wakeup=0
+--- halt-counters PEAK-WHILE-ALIVE ---
+halt_exits_peak=1081857
+halt_successful_poll_peak=114512
+WALL_DUR_S=98
+halt_exits_per_s=11039.4
+--- bench output ---
+RESULT syncwrite_mt_persec median=44841.1 stdev=848.3 op/s reps=[44602.3,44841.1,46176.4]
+RESULT syncwrite_mt_p50 median=646.1 stdev=26.7 us reps=[600.0,646.1,646.6]
+RESULT syncwrite_mt_p99 median=2117.8 stdev=13.6 us reps=[2102.9,2117.8,2130.1]
+RESULT ZILWAIT wait_us_mean=43.532 wait_us_max=309213.769 waits=3407440 wait_timedout_us_mean=43.366 timedout_waits=3406674
+RESULT ZILWAKE2 wake2ent_us_mean=77.654 wake2ent_us_max=1549465.167 n=1037374
+DONERC=0
+=== ISOLATE vu32v2 ARM=adaptive DONE Fri Sep 18 11:24:32 UTC 2026 ===

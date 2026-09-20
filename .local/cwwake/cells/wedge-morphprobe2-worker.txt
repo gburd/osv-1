@@ -1,0 +1,33 @@
+=== WEDGE-WATCH label=morphprobe2-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (29)
+io_method_in_effect=worker
+  checkpoint 2: 79 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=12.00 461
+t=30s WALWrite=17 active=25 xact_commit_delta=37964 nvme=56.80 1537
+t=45s WALWrite=34 active=53 xact_commit_delta=110862 nvme=48.00 1666
+t=60s WALWrite=47 active=65 xact_commit_delta=174970 nvme=82.00 1741
+t=75s WALWrite=65 active=66 xact_commit_delta=52113 nvme=0.00 50
+t=90s WALWrite=65 active=66 xact_commit_delta=2 nvme=0.00 52
+t=105s WALWrite=65 active=66 xact_commit_delta=2 nvme=0.00 51
+t=120s WALWrite=66 active=67 xact_commit_delta=2 nvme=0.00 52
+t=135s WALWrite=66 active=67 xact_commit_delta=6 nvme=0.00 52
+t=150s WALWrite=66 active=67 xact_commit_delta=2 nvme=0.00 54
+t=165s WALWrite=66 active=67 xact_commit_delta=2 nvme=0.00 52
+t=180s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=195s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=210s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 51
+t=225s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=240s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=255s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 59
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=285s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=300s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=315s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=330s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=345s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=360s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+=== WEDGE-WATCH morphprobe2-worker DONE ===

@@ -1,0 +1,7 @@
+ARC capped at 8G (OSV_ZFS_ARC_MAX=8589934592, same -m 64G), VU64 worker:
+  t=15s WALWrite=13 OOM=0
+  t=30s WALWrite=25 OOM=0
+  t=45s WALWrite=34 OOM=0
+  t=60s WALWrite=<conn timeout> OOM=1  <- OOM'd anyway
+=> The exhausting memory is NOT the ARC. Rules out ARC-over-limit. The 64G is consumed by
+   fork-COW/anon/dirty-data, not the ZFS cache. Same ~40-50s time-to-OOM as ARC=32G.

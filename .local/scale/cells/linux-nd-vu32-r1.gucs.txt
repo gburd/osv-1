@@ -1,0 +1,8 @@
+effective_cache_size=4194304
+fsync=off
+io_method=io_uring
+max_connections=400
+max_wal_size=65536
+shared_buffers=2097152
+synchronous_commit=off
+wal_sync_method=fdatasync

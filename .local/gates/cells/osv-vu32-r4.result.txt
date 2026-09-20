@@ -1,0 +1,18 @@
+---NOPM/TPM---
+---VUCOMPLETE---
+VUCOMPLETE_AFTER 360 s
+---NEWORD p99 (median across vusers from hdbxtprofile)---
+NEWORD_p99_ms NONE
+---wait profile---
+{
+ "samples": 505,
+ "active_backend_observations": 16665,
+ "histogram": {
+  "LWLock/AioUringCompletion": 16160,
+  "IO/AioIoUringExecution": 505
+ },
+ "pct": {
+  "LWLock/AioUringCompletion": 97.0,
+  "IO/AioIoUringExecution": 3.0
+ }
+}

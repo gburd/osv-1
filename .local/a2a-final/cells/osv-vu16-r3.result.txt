@@ -1,0 +1,49 @@
+---NOPM/TPM---
+Vuser 1:TEST RESULT : System achieved 165372 NOPM from 379947 PostgreSQL TPM
+---VUCOMPLETE---
+VUCOMPLETE_AFTER 0 s
+---NEWORD p99 (median across vusers from hdbxtprofile)---
+NEWORD_p99_ms median=21.388 min=20.327 max=22.005 nvu=17
+---wait profile---
+{
+ "samples": 504,
+ "active_backend_observations": 7158,
+ "histogram": {
+  "LWLock/WALWrite": 3185,
+  "NONE/NULL": 2605,
+  "Client/ClientRead": 637,
+  "IO/WalSync": 434,
+  "IO/DataFileRead": 139,
+  "IO/DataFileWrite": 51,
+  "IO/WalWrite": 28,
+  "Timeout/VacuumDelay": 22,
+  "IO/WalInitSync": 18,
+  "IO/WalInitWrite": 13,
+  "IO/DataFileExtend": 10,
+  "LWLock/WALInsert": 7,
+  "Lock/transactionid": 3,
+  "IO/AioIoUringExecution": 3,
+  "IO/AioIoUringSubmit": 1,
+  "IPC/XactGroupUpdate": 1,
+  "LWLock/ProcArray": 1
+ },
+ "pct": {
+  "LWLock/WALWrite": 44.5,
+  "NONE/NULL": 36.4,
+  "Client/ClientRead": 8.9,
+  "IO/WalSync": 6.1,
+  "IO/DataFileRead": 1.9,
+  "IO/DataFileWrite": 0.7,
+  "IO/WalWrite": 0.4,
+  "Timeout/VacuumDelay": 0.3,
+  "IO/WalInitSync": 0.3,
+  "IO/WalInitWrite": 0.2,
+  "IO/DataFileExtend": 0.1,
+  "LWLock/WALInsert": 0.1,
+  "Lock/transactionid": 0.0,
+  "IO/AioIoUringExecution": 0.0,
+  "IO/AioIoUringSubmit": 0.0,
+  "IPC/XactGroupUpdate": 0.0,
+  "LWLock/ProcArray": 0.0
+ }
+}

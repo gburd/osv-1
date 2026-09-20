@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: agent-walwake <agent@localhost>
+Date: Mon, 14 Sep 2026 13:00:00 +0000
+Subject: [PATCH] zfs: env-gated NULL/FLUSH INTERRUPT taskq width
+ (OSV_ZIO_INTR_THREADS)
+
+A/B knob for the WAL-commit-completion serialization investigation
+(candidate B). The ZIL commit completion (zil_lwb_flush_vdevs_done, the
+cv_broadcast that wakes waiting backends) runs as the done callback of a
+ZIO_TYPE_NULL root zio on the NULL-INTERRUPT taskq; the device flush
+completions run on FLUSH-INTERRUPT. Both are ZTI_ONE (one thread).
+
+OSV_ZIO_INTR_THREADS=N (default unset = stock, count=1) raises the taskq
+count for those two INTERRUPT queues so spa_taskq_dispatch spreads
+completions across N taskq threads. Off by default; resolved value printed
+once per boot.
+
+MEASURED REFUTED as the fix: widening this taskq does not lift the
+syncwrite plateau (it hurts: t8 -26% at N=8). The serialization is
+UPSTREAM, in the single virtio-blk completion thread (see the
+OSV_BLK_MQ_COMPLETE per-queue completion change in drivers/virtio-blk.cc,
+which is the actual fix). Kept as an env-gated, zero-cost-when-off
+instrument documenting the refutation.
+---
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 1ad94fd1b..172cba2c9 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -1259,6 +1259,38 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
+ 		break;
+ 	}
+ 
++	/*
++	 * OSv A/B knob (candidate B for the WAL-commit-completion serialization):
++	 * the ZIL commit completion (zil_lwb_flush_vdevs_done, which cv_broadcasts
++	 * the waiting backends) runs as the done callback of a ZIO_TYPE_NULL root
++	 * zio, dispatched to the NULL-INTERRUPT taskq.  The FLUSH-INTERRUPT taskq
++	 * runs the device cache-flush completions on the same commit path.  Both
++	 * are ZTI_ONE (count=1, one thread), so under N concurrent fdatasync/ZIL
++	 * commits every completion+wakeup funnels through a SINGLE thread and
++	 * serializes.  Measured: syncwrite throughput plateaus past ~8 concurrent
++	 * committers while device ~40%% util and 12/32 vCPU busy.
++	 *
++	 * OSV_ZIO_INTR_THREADS=N (default unset = stock, count=1) raises the taskq
++	 * COUNT for the NULL and FLUSH INTERRUPT queues to N, so spa_taskq_dispatch
++	 * spreads concurrent completions across N threads (it picks a taskq by
++	 * gethrtime()%%count when count>1).  Off by default so a stock boot is
++	 * unchanged.  The resolved value is printed once at boot below.
++	 */
++	if (mode == ZTI_MODE_FIXED && q == ZIO_TASKQ_INTERRUPT &&
++	    (t == ZIO_TYPE_NULL || t == ZIO_TYPE_FLUSH)) {
++		extern char *getenv(const char *);
++		extern int atoi(const char *);
++		const char *e = getenv("OSV_ZIO_INTR_THREADS");
++		if (e != NULL && e[0] != '\0') {
++			int n = atoi(e);
++			if (n < 1)
++				n = 1;
++			if (n > 256)
++				n = 256;
++			count = (uint_t)n;
++		}
++	}
++
+ 	ASSERT3U(count, >, 0);
+ 	tqs->stqs_count = count;
+ 	tqs->stqs_taskq = kmem_alloc(count * sizeof (taskq_t *), KM_SLEEP);
+@@ -1297,6 +1329,22 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
+ 
+ 		tqs->stqs_taskq[i] = tq;
+ 	}
++
++	/*
++	 * OSv A/B: print the resolved INTERRUPT taskq width once per boot for the
++	 * NULL and FLUSH types so a dropped OSV_ZIO_INTR_THREADS env cannot read as
++	 * "no effect".  Only the first pool's spa_taskqs_init prints (guarded).
++	 */
++	if (mode == ZTI_MODE_FIXED && q == ZIO_TASKQ_INTERRUPT &&
++	    (t == ZIO_TYPE_NULL || t == ZIO_TYPE_FLUSH)) {
++		static int printed_null = 0, printed_flush = 0;
++		int *pf = (t == ZIO_TYPE_NULL) ? &printed_null : &printed_flush;
++		if (!*pf) {
++			*pf = 1;
++			printf("OSV_ZIO_INTR_THREADS: %s-INTERRUPT taskq count=%u\n",
++			    zio_type_name[t], count);
++		}
++	}
+ }
+ 
+ static void

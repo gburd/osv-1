@@ -1,0 +1,23 @@
+=== IDLE-REGRESSION idle ARM=adaptive (1 writer, 31 idle vCPUs) secs=40 Fri Sep 18 11:26:28 UTC 2026 ===
+ENVS:  --env=OSV_WAKE_PULL=1 --env=OSV_ZFS_ARC_MAX=34359738368 --env=OSV_BLK_MQ_COMPLETE=1
+--- idle-cpu samples (host qemu %CPU, sum over vCPU threads) ---
+t=1 qemu_pct_cpu=0.0
+t=2 qemu_pct_cpu=0.0
+t=3 qemu_pct_cpu=0.0
+t=4 qemu_pct_cpu=0.0
+t=5 qemu_pct_cpu=0.0
+t=6 qemu_pct_cpu=0.0
+t=7 qemu_pct_cpu=0.0
+t=8 qemu_pct_cpu=0.0
+t=9 qemu_pct_cpu=0.0
+t=10 qemu_pct_cpu=0.0
+t=11 qemu_pct_cpu=0.0
+t=12 qemu_pct_cpu=0.0
+t=13 qemu_pct_cpu=0.0
+t=14 qemu_pct_cpu=0.0
+t=15 no-qemu
+IDLE_QEMU_PCT_CPU_MEDIAN=0
+--- bench (1 thread) ---
+RESULT ZILWAKE2 wake2ent_us_mean=10.913 wake2ent_us_max=4444.829 n=215194
+DONERC=0
+=== IDLE-REGRESSION idle ARM=adaptive DONE Fri Sep 18 11:27:12 UTC 2026 ===

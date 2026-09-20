@@ -1,0 +1,3 @@
+QPID=62725
+CLK_TCK=100
+GATE1_RESULT arm=fixed10000 window_s=90.01 delta_jiffies=5618 cpu_core_seconds=56.180 pct_of_one_core=62.42

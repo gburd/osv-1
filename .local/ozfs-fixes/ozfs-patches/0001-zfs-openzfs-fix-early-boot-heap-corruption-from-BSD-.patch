@@ -1,0 +1,107 @@
+From bffd9926b61e1fc6783fd1f032f93fc75fc470b8 Mon Sep 17 00:00:00 2001
+From: osv-agent <osv@example.com>
+Date: Mon, 20 Jul 2026 14:33:42 +0000
+Subject: [PATCH 1/3] zfs(openzfs): fix early-boot heap corruption from BSD
+ kstat ABI mismatch
+
+The conf_zfs=openzfs build linked the legacy BSD-ZFS kstat stub
+(bsd/.../opensolaris_kstat.o) to satisfy kstat_create/install/delete,
+but every OpenZFS module was compiled against the OSv SPL kstat_t in
+external/openzfs/include/os/osv/spl/sys/kstat.h (~64 bytes: ks_data,
+ks_ndata, ks_data_size, ks_flags, ks_update, ks_private, ks_private1,
+ks_lock).  The BSD stub allocated only a 16-byte kstat_t, so OpenZFS
+callers such as arc_init()/dnode_init() wrote ks_update/ks_private past
+the end of the allocation, corrupting the malloc free list.  The next
+kstat_create() then returned a garbage pointer and faulted at
+ks_ndata = ndata (SIGSEGV -> abort with empty backtrace right after the
+version banner, before mkfs ran).
+
+Fix: implement OSv-native kstat_create/install/delete in
+openzfs_osv_compat.c using the correct OpenZFS kstat_t layout (virtual
+kstats; OSv has no /proc or sysctl consumer), and filter the BSD
+opensolaris_kstat.o out of the openzfs solaris object list in the
+Makefile so only the correct implementation is linked.
+
+The zfs_builder guest now boots, runs mkfs (creates + mounts pool osv),
+populates it via cpiod, and exports cleanly.
+---
+ Makefile                                      |  5 ++
+ .../compat/opensolaris/openzfs_osv_compat.c   | 49 +++++++++++++++++++
+ 2 files changed, 54 insertions(+)
+
+diff --git a/Makefile b/Makefile
+index efc9fe8f..2cae40a5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -884,6 +884,11 @@ zfs += bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/lz4.o
+ # Old BSD-ZFS objects replaced by OpenZFS 2.4.x via openzfs_sources.mk
+ ifeq ($(conf_zfs),openzfs)
+ solaris += $(openzfs-all)
++# OpenZFS provides its own kstat_t layout (external/openzfs/include/os/osv/
++# spl/sys/kstat.h, ~64 bytes) and OSv-native kstat_create/install/delete in
++# openzfs_osv_compat.c.  Drop the legacy BSD-ZFS kstat stub whose 16-byte
++# kstat_t is ABI-incompatible with the OpenZFS callers (heap overflow at boot).
++solaris := $(filter-out bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kstat.o,$(solaris))
+ 
+ # OpenZFS-specific CFLAGS (for openzfs-all objects)
+ $(openzfs-all:%=$(out)/%): CFLAGS+= \
+diff --git a/bsd/sys/cddl/compat/opensolaris/openzfs_osv_compat.c b/bsd/sys/cddl/compat/opensolaris/openzfs_osv_compat.c
+index 8a793d8e..a8d45869 100644
+--- a/bsd/sys/cddl/compat/opensolaris/openzfs_osv_compat.c
++++ b/bsd/sys/cddl/compat/opensolaris/openzfs_osv_compat.c
+@@ -296,3 +296,52 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
+ 	e->tqent_id   = taskq_dispatch_safe(tq, func, arg, flags,
+ 	    &e->tqent_ostask);
+ }
++
++/*
++ * kstat_create / kstat_install / kstat_delete
++ *
++ * OpenZFS modules are compiled against the OSv SPL kstat_t layout in
++ * external/openzfs/include/os/osv/spl/sys/kstat.h (ks_data, ks_ndata,
++ * ks_data_size, ks_flags, ks_update, ks_private, ks_private1, ks_lock).
++ * The legacy BSD-ZFS compat stub (opensolaris_kstat.c) defines an
++ * incompatible 16-byte kstat_t, so linking that stub into the OpenZFS
++ * libsolaris.so caused every OpenZFS kstat caller (arc_init, dnode_init,
++ * ...) to write ks_update/ks_private past the end of a 16-byte allocation,
++ * corrupting the heap and crashing at early boot.  These implementations
++ * use the correct OpenZFS layout.  OSv exposes no /proc or sysctl kstat
++ * consumer, so a virtual kstat only needs to allocate the struct with the
++ * right size and record the caller's fields; install/delete are no-ops
++ * beyond freeing.  Mirrors upstream behavior when no backing store exists.
++ */
++kstat_t *
++kstat_create(const char *module, int instance, const char *name,
++    const char *cls, uchar_t type, ulong_t ndata, uchar_t flags)
++{
++	kstat_t *ksp;
++
++	(void) module; (void) instance; (void) name; (void) cls;
++
++	ksp = kmem_zalloc(sizeof (*ksp), KM_SLEEP);
++	if (ksp == NULL)
++		return (NULL);
++
++	ksp->ks_ndata = (u_int)ndata;
++	ksp->ks_flags = flags;
++	if (type == KSTAT_TYPE_NAMED)
++		ksp->ks_data_size = ndata * sizeof (kstat_named_t);
++
++	return (ksp);
++}
++
++void
++kstat_install(kstat_t *ksp)
++{
++	(void) ksp;
++}
++
++void
++kstat_delete(kstat_t *ksp)
++{
++	if (ksp != NULL)
++		kmem_free(ksp, sizeof (*ksp));
++}
+-- 
+2.47.0
+

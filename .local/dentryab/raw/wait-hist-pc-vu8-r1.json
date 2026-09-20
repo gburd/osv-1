@@ -1,0 +1,106 @@
+{
+ "n_samples": 150,
+ "dur_requested_s": 300,
+ "client_backend": {
+  "coarse_buckets": {
+   "NULL(no-wait-event)": 685,
+   "LWLock:*": 322,
+   "Client:*": 237,
+   "IO:*": 105
+  },
+  "by_wait_event_type": {
+   "NULL": 685,
+   "LWLock": 322,
+   "Client": 237,
+   "IO": 105
+  },
+  "top_wait_events": [
+   [
+    "NULL(no-wait-event)",
+    685
+   ],
+   [
+    "LWLock:WALWrite",
+    322
+   ],
+   [
+    "Client:ClientRead",
+    237
+   ],
+   [
+    "IO:WalSync",
+    93
+   ],
+   [
+    "IO:DataFileRead",
+    6
+   ],
+   [
+    "IO:WalWrite",
+    6
+   ]
+  ],
+  "active_total_obs": 1093,
+  "active_with_NULL_wait_event_obs": 641,
+  "idle_total_obs": 255,
+  "note": "active+NULL means not-on-a-registered-wait-event, NOT proof of on-CPU"
+ },
+ "all_backends_top": [
+  [
+   "NULL(no-wait-event)",
+   686
+  ],
+  [
+   "LWLock:WALWrite",
+   322
+  ],
+  [
+   "Client:ClientRead",
+   237
+  ],
+  [
+   "Activity:AutovacuumMain",
+   150
+  ],
+  [
+   "Activity:LogicalLauncherMain",
+   150
+  ],
+  [
+   "Activity:CheckpointerMain",
+   150
+  ],
+  [
+   "Activity:WalWriterMain",
+   150
+  ],
+  [
+   "Activity:BgwriterMain",
+   133
+  ],
+  [
+   "IO:WalSync",
+   93
+  ],
+  [
+   "IO:DataFileFlush",
+   16
+  ],
+  [
+   "IO:DataFileRead",
+   9
+  ],
+  [
+   "IO:WalWrite",
+   6
+  ],
+  [
+   "Timeout:VacuumDelay",
+   2
+  ],
+  [
+   "Activity:BgwriterHibernate",
+   1
+  ]
+ ]
+}

@@ -1,0 +1,20 @@
+ warehouses 
+------------
+        200
+(1 row)
+
+ dbsize 
+--------
+ 19 GB
+(1 row)
+
+ pg_relation_filepath 
+----------------------
+ base/16401/16402
+(1 row)
+
+ data_directory 
+----------------
+ /data/pg
+(1 row)
+

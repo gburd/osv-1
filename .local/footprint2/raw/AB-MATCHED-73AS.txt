@@ -1,0 +1,16 @@
+# MATCHED A/B, identical workload (churn-ll.sh 64 300 50000), 73 live ASes both arms,
+# 64 GiB guest / 32 vCPU / sb=16GB / io_method=worker. Hex from FPTOT, decoded.
+metric            BEFORE(recycle=0)  AFTER(recycle=1)   ratio
+live_as                          73                73   same (matched)
+cowarena_MB   (a)               289               284   unchanged (not the term)
+pt_MB         (b)                81                81   unchanged (not the term)
+priv_MB       (c)                72                72   unchanged (not the term)
+ovflive_MB    (NEW)           17886               283   63.2x lower   <-- THE TERM
+ovfcommit_MB                  17898               447   40.0x lower
+ovfrecycled_MB                    0           1549208   fix working
+per_as_KB                    253016             10257   24.7x lower
+per-backend private            247 MB           10.0 MB  24.7x REDUCTION
+memfree_MB                    29311             46821   +17.5 GB free
+BEFORE outcome: crashed (page fault outside application / Aborted) with 29 GB still free
+AFTER  outcome: stable across the whole 300s window, 1512.9 GB of cumulative churn
+                served out of 283 MB of live overflow

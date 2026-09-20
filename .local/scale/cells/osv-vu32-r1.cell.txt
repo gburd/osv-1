@@ -1,0 +1,40 @@
+Vuser 33:Assigned 7 WIDs = 32 64 96 128 160 192 24 based on VU count 32, Warehouses = 7 out of 200
+Vuser 33:Processing 100000000 transactions with output suppressed...
+Vuser 1:Rampup 1 minutes complete ...
+Vuser 1:Rampup 2 minutes complete ...
+Vuser 1:Rampup complete, Taking start Transaction Count.
+Vuser 1:Timing test period of 5 in minutes
+Vuser 1:1 ...,
+Vuser 1:2 ...,
+Vuser 1:3 ...,
+Vuser 1:4 ...,
+Vuser 1:5 ...,
+Vuser 1:Test complete, Taking end Transaction Count.
+Vuser 1:32 Active Virtual Users configured
+Vuser 1:TEST RESULT : System achieved 142163 NOPM from 328188 PostgreSQL TPM
+Vuser 1:Gathering timing data from Active Virtual Users...
+Vuser 19:FINISHED SUCCESS
+Vuser 14:FINISHED SUCCESS
+Vuser 21:FINISHED SUCCESS
+Vuser 7:FINISHED SUCCESS
+Vuser 9:FINISHED SUCCESS
+Vuser 2:FINISHED SUCCESS
+Vuser 25:FINISHED SUCCESS
+Vuser 8:FINISHED SUCCESS
+Vuser 26:FINISHED SUCCESS
+Vuser 10:FINISHED SUCCESS
+Vuser 6:FINISHED SUCCESS
+Vuser 12:FINISHED SUCCESS
+Vuser 20:FINISHED SUCCESS
+Vuser 31:FINISHED SUCCESS
+Vuser 4:FINISHED SUCCESS
+Vuser 16:FINISHED SUCCESS
+Vuser 29:FINISHED SUCCESS
+Vuser 24:FINISHED SUCCESS
+Vuser 27:FINISHED SUCCESS
+Vuser 22:FINISHED SUCCESS
+Vuser 23:FINISHED SUCCESS
+Vuser 32:FINISHED SUCCESS
+Vuser 30:FINISHED SUCCESS
+Vuser 3:FINISHED SUCCESS
+Vuser 33:FINISHED SUCCESS

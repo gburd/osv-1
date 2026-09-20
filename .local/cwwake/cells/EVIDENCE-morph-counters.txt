@@ -1,0 +1,37 @@
+=== WEDGE-WATCH label=morphprobe2-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (29)
+io_method_in_effect=worker
+  checkpoint 2: 79 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=12.00 461
+t=30s WALWrite=17 active=25 xact_commit_delta=37964 nvme=56.80 1537
+t=45s WALWrite=34 active=53 xact_commit_delta=110862 nvme=48.00 1666
+t=60s WALWrite=47 active=65 xact_commit_delta=174970 nvme=82.00 1741
+t=75s WALWrite=65 active=66 xact_commit_delta=52113 nvme=0.00 50
+t=90s WALWrite=65 active=66 xact_commit_delta=2 nvme=0.00 52
+t=105s WALWrite=65 active=66 xact_commit_delta=2 nvme=0.00 51
+t=120s WALWrite=66 active=67 xact_commit_delta=2 nvme=0.00 52
+t=135s WALWrite=66 active=67 xact_commit_delta=6 nvme=0.00 52
+t=150s WALWrite=66 active=67 xact_commit_delta=2 nvme=0.00 54
+t=165s WALWrite=66 active=67 xact_commit_delta=2 nvme=0.00 52
+t=180s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=195s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=210s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 51
+t=225s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+t=240s WALWrite=67 active=68 xact_commit_delta=2 nvme=0.00 52
+RESULT MORPH wake_calls=8395179 null_st=0 cas_lost=1520297 same_cpu=1755387 xcpu=5119495 mask_already=117706 ipi_path=5001789
+ZWEDGE LOST-WAKE slot=0 zcw=0x6001f06dae00 blocked_ms=219.0 zcw_done=1 (completion RAN, waiter STILL ASLEEP = lost wake)
+--- READING ---
+RESULT MORPH wake_calls=8395179 null_st=0 cas_lost=1520297 same_cpu=1755387 xcpu=5119495 mask_already=117706 ipi_path=5001789
+ZWEDGE LOST-WAKE slot=0 zcw=0x6001f06dae00 blocked_ms=219.0 zcw_done=1
+- cas_lost=1.52M (18% of wakes): thread::wake_impl's waiting->waking CAS found the thread NOT in
+  status::waiting and RETURNED WITHOUT WAKING. For a condvar wake the wr was already popped from the
+  fifo before wake, so a CAS-lost wake is CONSUMED-BUT-DROPPED = lost wakeup.
+- mask_already=117k: cross-cpu wakes with mask bit already set (deferred drain).
+- null_st=0: not the null-detached_state path.
+=> The lost wake is thread::wake_impl's waiting->waking CAS racing the waiter's transition INTO
+   status::waiting (wake-before-wait window). Need to inspect the wait-side transition (do_wait_until /
+   prepare_wait -> status::waiting) to find the missing re-check/ordering.

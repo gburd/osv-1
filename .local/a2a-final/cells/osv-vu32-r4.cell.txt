@@ -1,0 +1,272 @@
+HammerDB CLI v6.0
+Copyright © HammerDB Ltd hosted by tpc.org 2019-2026
+Type "help" for a list of commands
+Initialized Jobs on-disk database /tmp/hammer.DB using existing tables (1,818,624 bytes)
+Database set to PostgreSQL
+Benchmark set to TPC-C for PostgreSQL
+Value 172.31.8.77 for connection:pg_host is the same as existing value 172.31.8.77, no change made
+Value 5432 for connection:pg_port is the same as existing value 5432, no change made
+Value postgres for tpcc:pg_superuser is the same as existing value postgres, no change made
+Value postgres for tpcc:pg_superuserpass is the same as existing value postgres, no change made
+Value postgres for tpcc:pg_defaultdbase is the same as existing value postgres, no change made
+Value tpcc for tpcc:pg_user is the same as existing value tpcc, no change made
+Value tpcc for tpcc:pg_pass is the same as existing value tpcc, no change made
+Value tpcc for tpcc:pg_dbase is the same as existing value tpcc, no change made
+Value timed for tpcc:pg_driver is the same as existing value timed, no change made
+Value 2 for tpcc:pg_rampup is the same as existing value 2, no change made
+Value 5 for tpcc:pg_duration is the same as existing value 5, no change made
+Value true for tpcc:pg_allwarehouse is the same as existing value true, no change made
+Value true for tpcc:pg_timeprofile is the same as existing value true, no change made
+Value 100000000 for tpcc:pg_total_iterations is the same as existing value 100000000, no change made
+Script loaded, Type "print script" to view
+Vuser 1 created MONITOR - WAIT IDLE
+Vuser 2 created - WAIT IDLE
+Vuser 3 created - WAIT IDLE
+Vuser 4 created - WAIT IDLE
+Vuser 5 created - WAIT IDLE
+Vuser 6 created - WAIT IDLE
+Vuser 7 created - WAIT IDLE
+Vuser 8 created - WAIT IDLE
+Vuser 9 created - WAIT IDLE
+Vuser 10 created - WAIT IDLE
+Vuser 11 created - WAIT IDLE
+Vuser 12 created - WAIT IDLE
+Vuser 13 created - WAIT IDLE
+Vuser 14 created - WAIT IDLE
+Vuser 15 created - WAIT IDLE
+Vuser 16 created - WAIT IDLE
+Vuser 17 created - WAIT IDLE
+Vuser 18 created - WAIT IDLE
+Vuser 19 created - WAIT IDLE
+Vuser 20 created - WAIT IDLE
+Vuser 21 created - WAIT IDLE
+Vuser 22 created - WAIT IDLE
+Vuser 23 created - WAIT IDLE
+Vuser 24 created - WAIT IDLE
+Vuser 25 created - WAIT IDLE
+Vuser 26 created - WAIT IDLE
+Vuser 27 created - WAIT IDLE
+Vuser 28 created - WAIT IDLE
+Vuser 29 created - WAIT IDLE
+Vuser 30 created - WAIT IDLE
+Vuser 31 created - WAIT IDLE
+Vuser 32 created - WAIT IDLE
+Vuser 33 created - WAIT IDLE
+Logging activated to /tmp/hammerdb.log
+33 Virtual Users Created with Monitor VU
+Vuser 1:RUNNING
+Vuser 1:Initializing xtprof time profiler
+Vuser 1:DBVersion:18.6
+Vuser 1:Beginning rampup time of 2 minutes
+Vuser 2:RUNNING
+Vuser 2:Initializing xtprof time profiler
+Vuser 2:Assigned 7 WIDs = 1 33 65 97 129 161 193 based on VU count 32, Warehouses = 7 out of 200
+Vuser 2:Processing 100000000 transactions with output suppressed...
+Vuser 3:RUNNING
+Vuser 3:Initializing xtprof time profiler
+Vuser 3:Assigned 7 WIDs = 2 34 66 98 130 162 194 based on VU count 32, Warehouses = 7 out of 200
+Vuser 3:Processing 100000000 transactions with output suppressed...
+Vuser 4:RUNNING
+Vuser 4:Initializing xtprof time profiler
+Vuser 4:Assigned 7 WIDs = 3 35 67 99 131 163 195 based on VU count 32, Warehouses = 7 out of 200
+Vuser 4:Processing 100000000 transactions with output suppressed...
+Vuser 5:RUNNING
+Vuser 5:Initializing xtprof time profiler
+Vuser 5:Assigned 7 WIDs = 4 36 68 100 132 164 196 based on VU count 32, Warehouses = 7 out of 200
+Vuser 5:Processing 100000000 transactions with output suppressed...
+Vuser 6:RUNNING
+Vuser 6:Initializing xtprof time profiler
+Vuser 6:Assigned 7 WIDs = 5 37 69 101 133 165 197 based on VU count 32, Warehouses = 7 out of 200
+Vuser 6:Processing 100000000 transactions with output suppressed...
+Vuser 7:RUNNING
+Vuser 7:Initializing xtprof time profiler
+Vuser 7:Assigned 7 WIDs = 6 38 70 102 134 166 198 based on VU count 32, Warehouses = 7 out of 200
+Vuser 7:Processing 100000000 transactions with output suppressed...
+Vuser 8:RUNNING
+Vuser 8:Initializing xtprof time profiler
+Vuser 8:Assigned 7 WIDs = 7 39 71 103 135 167 199 based on VU count 32, Warehouses = 7 out of 200
+Vuser 8:Processing 100000000 transactions with output suppressed...
+Vuser 9:RUNNING
+Vuser 9:Initializing xtprof time profiler
+Vuser 9:Assigned 7 WIDs = 8 40 72 104 136 168 200 based on VU count 32, Warehouses = 7 out of 200
+Vuser 9:Processing 100000000 transactions with output suppressed...
+Vuser 10:RUNNING
+Vuser 10:Initializing xtprof time profiler
+Vuser 10:Assigned 7 WIDs = 9 41 73 105 137 169 1 based on VU count 32, Warehouses = 7 out of 200
+Vuser 10:Processing 100000000 transactions with output suppressed...
+Vuser 11:RUNNING
+Vuser 11:Initializing xtprof time profiler
+Vuser 11:Assigned 7 WIDs = 10 42 74 106 138 170 2 based on VU count 32, Warehouses = 7 out of 200
+Vuser 11:Processing 100000000 transactions with output suppressed...
+Vuser 12:RUNNING
+Vuser 12:Initializing xtprof time profiler
+Vuser 12:Assigned 7 WIDs = 11 43 75 107 139 171 3 based on VU count 32, Warehouses = 7 out of 200
+Vuser 12:Processing 100000000 transactions with output suppressed...
+Vuser 13:RUNNING
+Vuser 13:Initializing xtprof time profiler
+Vuser 13:Assigned 7 WIDs = 12 44 76 108 140 172 4 based on VU count 32, Warehouses = 7 out of 200
+Vuser 13:Processing 100000000 transactions with output suppressed...
+Vuser 14:RUNNING
+Vuser 14:Initializing xtprof time profiler
+Vuser 14:Assigned 7 WIDs = 13 45 77 109 141 173 5 based on VU count 32, Warehouses = 7 out of 200
+Vuser 14:Processing 100000000 transactions with output suppressed...
+Vuser 15:RUNNING
+Vuser 15:Initializing xtprof time profiler
+Vuser 15:Assigned 7 WIDs = 14 46 78 110 142 174 6 based on VU count 32, Warehouses = 7 out of 200
+Vuser 15:Processing 100000000 transactions with output suppressed...
+Vuser 16:RUNNING
+Vuser 16:Initializing xtprof time profiler
+Vuser 16:Assigned 7 WIDs = 15 47 79 111 143 175 7 based on VU count 32, Warehouses = 7 out of 200
+Vuser 16:Processing 100000000 transactions with output suppressed...
+Vuser 17:RUNNING
+Vuser 17:Initializing xtprof time profiler
+Vuser 17:Assigned 7 WIDs = 16 48 80 112 144 176 8 based on VU count 32, Warehouses = 7 out of 200
+Vuser 17:Processing 100000000 transactions with output suppressed...
+Vuser 18:RUNNING
+Vuser 18:Initializing xtprof time profiler
+Vuser 18:Assigned 7 WIDs = 17 49 81 113 145 177 9 based on VU count 32, Warehouses = 7 out of 200
+Vuser 18:Processing 100000000 transactions with output suppressed...
+Vuser 19:RUNNING
+Vuser 19:Initializing xtprof time profiler
+Vuser 19:Assigned 7 WIDs = 18 50 82 114 146 178 10 based on VU count 32, Warehouses = 7 out of 200
+Vuser 19:Processing 100000000 transactions with output suppressed...
+Vuser 20:RUNNING
+Vuser 20:Initializing xtprof time profiler
+Vuser 20:Assigned 7 WIDs = 19 51 83 115 147 179 11 based on VU count 32, Warehouses = 7 out of 200
+Vuser 20:Processing 100000000 transactions with output suppressed...
+Vuser 21:RUNNING
+Vuser 21:Initializing xtprof time profiler
+Vuser 21:Assigned 7 WIDs = 20 52 84 116 148 180 12 based on VU count 32, Warehouses = 7 out of 200
+Vuser 21:Processing 100000000 transactions with output suppressed...
+Vuser 22:RUNNING
+Vuser 22:Initializing xtprof time profiler
+Vuser 22:Assigned 7 WIDs = 21 53 85 117 149 181 13 based on VU count 32, Warehouses = 7 out of 200
+Vuser 22:Processing 100000000 transactions with output suppressed...
+Vuser 23:RUNNING
+Vuser 23:Initializing xtprof time profiler
+Vuser 23:Assigned 7 WIDs = 22 54 86 118 150 182 14 based on VU count 32, Warehouses = 7 out of 200
+Vuser 23:Processing 100000000 transactions with output suppressed...
+Vuser 24:RUNNING
+Vuser 24:Initializing xtprof time profiler
+Vuser 24:Assigned 7 WIDs = 23 55 87 119 151 183 15 based on VU count 32, Warehouses = 7 out of 200
+Vuser 24:Processing 100000000 transactions with output suppressed...
+Vuser 25:RUNNING
+Vuser 25:Initializing xtprof time profiler
+Vuser 25:Assigned 7 WIDs = 24 56 88 120 152 184 16 based on VU count 32, Warehouses = 7 out of 200
+Vuser 25:Processing 100000000 transactions with output suppressed...
+Vuser 26:RUNNING
+Vuser 26:Initializing xtprof time profiler
+Vuser 26:Assigned 7 WIDs = 25 57 89 121 153 185 17 based on VU count 32, Warehouses = 7 out of 200
+Vuser 26:Processing 100000000 transactions with output suppressed...
+Vuser 27:RUNNING
+Vuser 27:Initializing xtprof time profiler
+Vuser 27:Assigned 7 WIDs = 26 58 90 122 154 186 18 based on VU count 32, Warehouses = 7 out of 200
+Vuser 27:Processing 100000000 transactions with output suppressed...
+Vuser 28:RUNNING
+Vuser 28:Initializing xtprof time profiler
+Vuser 28:Assigned 7 WIDs = 27 59 91 123 155 187 19 based on VU count 32, Warehouses = 7 out of 200
+Vuser 28:Processing 100000000 transactions with output suppressed...
+Vuser 29:RUNNING
+Vuser 29:Initializing xtprof time profiler
+Vuser 29:Assigned 7 WIDs = 28 60 92 124 156 188 20 based on VU count 32, Warehouses = 7 out of 200
+Vuser 29:Processing 100000000 transactions with output suppressed...
+Vuser 30:RUNNING
+Vuser 30:Initializing xtprof time profiler
+Vuser 30:Assigned 7 WIDs = 29 61 93 125 157 189 21 based on VU count 32, Warehouses = 7 out of 200
+Vuser 30:Processing 100000000 transactions with output suppressed...
+Vuser 31:RUNNING
+Vuser 31:Initializing xtprof time profiler
+Vuser 31:Assigned 7 WIDs = 30 62 94 126 158 190 22 based on VU count 32, Warehouses = 7 out of 200
+Vuser 31:Processing 100000000 transactions with output suppressed...
+Vuser 32:RUNNING
+Vuser 32:Initializing xtprof time profiler
+Vuser 32:Assigned 7 WIDs = 31 63 95 127 159 191 23 based on VU count 32, Warehouses = 7 out of 200
+Vuser 32:Processing 100000000 transactions with output suppressed...
+Vuser 33:RUNNING
+Vuser 33:Initializing xtprof time profiler
+Vuser 33:Assigned 7 WIDs = 32 64 96 128 160 192 24 based on VU count 32, Warehouses = 7 out of 200
+Vuser 33:Processing 100000000 transactions with output suppressed...
+Vuser 1:Rampup 1 minutes complete ...
+Vuser 1:Rampup 2 minutes complete ...
+Vuser 1:Rampup complete, Taking start Transaction Count.
+Vuser 1:Timing test period of 5 in minutes
+Vuser 1:1 ...,
+Vuser 1:2 ...,
+Vuser 1:3 ...,
+Vuser 1:4 ...,
+Vuser 1:5 ...,
+Vuser 1:Test complete, Taking end Transaction Count.
+Vuser 1:32 Active Virtual Users configured
+Vuser 1:TEST RESULT : System achieved 205234 NOPM from 471333 PostgreSQL TPM
+Vuser 1:Gathering timing data from Active Virtual Users...
+Vuser 21:FINISHED SUCCESS
+Vuser 25:FINISHED SUCCESS
+Vuser 8:FINISHED SUCCESS
+Vuser 11:FINISHED SUCCESS
+Vuser 18:FINISHED SUCCESS
+Vuser 17:FINISHED SUCCESS
+Vuser 27:FINISHED SUCCESS
+Vuser 4:FINISHED SUCCESS
+Vuser 32:FINISHED SUCCESS
+Vuser 14:FINISHED SUCCESS
+Vuser 22:FINISHED SUCCESS
+Vuser 7:FINISHED SUCCESS
+Vuser 3:FINISHED SUCCESS
+Vuser 12:FINISHED SUCCESS
+Vuser 23:FINISHED SUCCESS
+Vuser 31:FINISHED SUCCESS
+Vuser 6:FINISHED SUCCESS
+Vuser 33:FINISHED SUCCESS
+Vuser 20:FINISHED SUCCESS
+Vuser 9:FINISHED SUCCESS
+Vuser 26:FINISHED SUCCESS
+Vuser 19:FINISHED SUCCESS
+Vuser 5:FINISHED SUCCESS
+Vuser 13:FINISHED SUCCESS
+Vuser 10:FINISHED SUCCESS
+Vuser 30:FINISHED SUCCESS
+Vuser 16:FINISHED SUCCESS
+Vuser 28:FINISHED SUCCESS
+Vuser 24:FINISHED SUCCESS
+Vuser 15:FINISHED SUCCESS
+Vuser 2:FINISHED SUCCESS
+Vuser 29:FINISHED SUCCESS
+Vuser 1:Calculating timings...
+Vuser 1:Writing timing data to /tmp/hdbxtprofile.log
+Vuser 1:FINISHED SUCCESS
+ALL VIRTUAL USERS COMPLETE
+VUCOMPLETE_AFTER 0 s
+vudestroy success
+Shutting down HammerDB CLI
+can't rename "::_unknown": command doesn't exist
+    while executing
+"rename ::_unknown ::unknown"
+    (procedure "restore" line 4)
+    invoked from within
+"restore "
+    (procedure "TclReadLine::doExit" line 12)
+    invoked from within
+"TclReadLine::doExit"
+    invoked from within
+"if [expr {[llength [info procs TclReadLine::doExit]] > 0}] {
+    #in Tcl TclReadLine is loaded call exit
+    TclReadLine::doExit
+    } else {
+    #in ..."
+    (procedure "quit" line 3)
+    invoked from within
+"quit"
+    (file "/tmp/run-osv-vu32-r4.tcl" line 33)
+    invoked from within
+"source $autostart::autoloadscript"
+    ("eval" body line 2)
+    invoked from within
+"eval $cli_common_init"
+    invoked from within
+"if { $lang == "tcl" } {
+  append cli_common_init $cli_tcl_append
+  eval $cli_common_init
+  #Initialise CLI in Python
+} elseif { $lang eq "python" } {
+..."
+    (file "//zipfs:/app/main.tcl" line 146)

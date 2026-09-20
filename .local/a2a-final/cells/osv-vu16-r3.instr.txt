@@ -1,0 +1,14 @@
+nvme1n1 %util: median=28.52 max=62.04 n=41
+nvme1n1 w_await: median=0.43 max=0.81 n=41
+nvme1n1 aqu-sz: median=1.44 max=2.94 n=41
+nvme1n1 wkB/s: median=237551.20 max=356125.60 n=41
+nvme1n1 r/s: median=182.10 max=4423.00 n=41
+nvme1n1 w/s: median=2965.10 max=3660.60 n=41
+---qemu cpu---
+qemu_cpu_pct_of_one_core=1249  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1260  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1272  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1271  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1245  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1297  (ceiling 3200 for 32 vCPU)
+---mem/leak check: OOM or monotonic drop?---

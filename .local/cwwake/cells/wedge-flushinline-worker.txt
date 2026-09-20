@@ -1,0 +1,12 @@
+=== WEDGE-WATCH label=flushinline-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (32)
+io_method_in_effect=worker
+  checkpoint 2: 66 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=7.60 461
+t=30s WALWrite=22 active=26 xact_commit_delta=49410 nvme=59.20 1509
+t=45s WALWrite=58 active=65 xact_commit_delta=112783 nvme=43.20 1370
+t=60s WALWrite=31 active=65 xact_commit_delta=132118 nvme=68.00 1943

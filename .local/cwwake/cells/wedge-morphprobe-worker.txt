@@ -1,0 +1,33 @@
+=== WEDGE-WATCH label=morphprobe-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (25)
+io_method_in_effect=worker
+  checkpoint 2: 71 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=40.80 569
+t=30s WALWrite=12 active=35 xact_commit_delta=32174 nvme=64.40 1440
+t=45s WALWrite=56 active=65 xact_commit_delta=70205 nvme=26.40 1132
+t=60s WALWrite=53 active=65 xact_commit_delta=62345 nvme=6.80 886
+t=75s WALWrite=22 active=62 xact_commit_delta=73890 nvme=72.80 1620
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 52
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=225s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=240s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=255s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=285s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=300s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=13.20 224
+t=315s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=21.60 228
+t=330s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=25.60 214
+t=345s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=15.60 237
+t=360s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=41.20 320
+=== WEDGE-WATCH morphprobe-worker DONE ===

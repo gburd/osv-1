@@ -1,0 +1,110 @@
+############ STEP2 SUMMARY (depth mean + issue-gap + op/s per pct) ############
+--- t=8 pct=0 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=0 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=6 issues=306755 depth_integral_ns=125606454003 issue_gap_us_total=91320770.4 issue_gap_us_max=860251.6 mean_issue_gap_us=297.699
+RESULT ZILISSUER zp_open=489021 zp_prevnf=237777 zp_decay=57124 lwblat_us_mean=407.282 lwblat_us_max=40909.865 lwblat_us_last=394.681 sleep_us_mean=41.785 sleep_us_max=4090.986 waiter_timedout=1042659 sleeps=1112225
+RESULT ZILSVC svc_us_mean=184.720 svc_us_max=125570.268 svc_n=306982 vqwrite_depth_mean=0.878 vqwrite_depth_max=6
+RESULT syncwrite_mt_persec median=12335.0 stdev=82.1 op/s reps=[12288.9,12335.0,12448.5]
+--- t=8 pct=1 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=1 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=8 issues=587162 depth_integral_ns=251239303125 issue_gap_us_total=91135736.2 issue_gap_us_max=665213.5 mean_issue_gap_us=155.214
+RESULT ZILISSUER zp_open=372943 zp_prevnf=514215 zp_decay=24394 lwblat_us_mean=424.834 lwblat_us_max=76492.932 lwblat_us_last=492.511 sleep_us_mean=4.267 sleep_us_max=670.408 waiter_timedout=1098037 sleeps=1209045
+RESULT ZILSVC svc_us_mean=180.435 svc_us_max=183626.343 svc_n=587389 vqwrite_depth_mean=1.297 vqwrite_depth_max=8
+RESULT syncwrite_mt_persec median=13473.5 stdev=1154.5 op/s reps=[12259.3,13473.5,14567.3]
+--- t=8 pct=2 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=2 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=8 issues=512192 depth_integral_ns=210108416588 issue_gap_us_total=91740114.1 issue_gap_us_max=991244.1 mean_issue_gap_us=179.113
+RESULT ZILISSUER zp_open=428195 zp_prevnf=443681 zp_decay=31855 lwblat_us_mean=407.572 lwblat_us_max=82303.193 lwblat_us_last=412.949 sleep_us_mean=8.248 sleep_us_max=1646.063 waiter_timedout=1115951 sleeps=1217235
+RESULT ZILSVC svc_us_mean=177.580 svc_us_max=192972.951 svc_n=512423 vqwrite_depth_mean=1.152 vqwrite_depth_max=8
+RESULT syncwrite_mt_persec median=13001.9 stdev=1382.7 op/s reps=[12479.0,13001.9,15092.1]
+--- t=8 pct=5 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=5 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=7 issues=391216 depth_integral_ns=164625393112 issue_gap_us_total=90996426.2 issue_gap_us_max=505906.7 mean_issue_gap_us=232.599
+RESULT ZILISSUER zp_open=450485 zp_prevnf=325200 zp_decay=43975 lwblat_us_mean=418.293 lwblat_us_max=48998.859 lwblat_us_last=328.178 sleep_us_mean=21.268 sleep_us_max=2449.942 waiter_timedout=1053533 sleeps=1136055
+RESULT ZILSVC svc_us_mean=185.860 svc_us_max=207344.029 svc_n=391443 vqwrite_depth_mean=1.009 vqwrite_depth_max=7
+RESULT syncwrite_mt_persec median=12466.9 stdev=341.4 op/s reps=[12386.4,12466.9,13013.8]
+--- t=8 pct=30 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=30 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=3 issues=143953 depth_integral_ns=59644016779 issue_gap_us_total=91175132.1 issue_gap_us_max=839921.1 mean_issue_gap_us=633.367
+RESULT ZILISSUER zp_open=485470 zp_prevnf=33230 zp_decay=111517 lwblat_us_mean=412.815 lwblat_us_max=35251.928 lwblat_us_last=505.502 sleep_us_mean=125.812 sleep_us_max=10575.578 waiter_timedout=992257 sleeps=1003810
+RESULT ZILSVC svc_us_mean=197.773 svc_us_max=70613.859 svc_n=144184 vqwrite_depth_mean=0.709 vqwrite_depth_max=5
+RESULT syncwrite_mt_persec median=11337.3 stdev=518.8 op/s reps=[10567.2,11337.3,11554.5]
+--- t=8 pct=60 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=60 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=3 issues=100436 depth_integral_ns=46074259353 issue_gap_us_total=91025992.2 issue_gap_us_max=657372.1 mean_issue_gap_us=906.308
+RESULT ZILISSUER zp_open=399113 zp_prevnf=2397 zp_decay=98069 lwblat_us_mean=457.243 lwblat_us_max=8004.241 lwblat_us_last=636.641 sleep_us_mean=274.286 sleep_us_max=4802.544 waiter_timedout=794964 sleeps=795224
+RESULT ZILSVC svc_us_mean=230.200 svc_us_max=4506.315 svc_n=100663 vqwrite_depth_mean=0.733 vqwrite_depth_max=5
+RESULT syncwrite_mt_persec median=9084.0 stdev=1001.9 op/s reps=[7732.6,9084.0,9689.5]
+--- t=16 pct=0 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=0 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=9 issues=352467 depth_integral_ns=154094236165 issue_gap_us_total=91317062.7 issue_gap_us_max=756160.6 mean_issue_gap_us=259.080
+RESULT ZILISSUER zp_open=541587 zp_prevnf=323272 zp_decay=9250 lwblat_us_mean=433.860 lwblat_us_max=26086.121 lwblat_us_last=404.354 sleep_us_mean=44.511 sleep_us_max=2302.169 waiter_timedout=1618604 sleeps=1803341
+RESULT ZILSVC svc_us_mean=190.709 svc_us_max=108933.787 svc_n=352694 vqwrite_depth_mean=0.950 vqwrite_depth_max=7
+RESULT syncwrite_mt_persec median=19909.8 stdev=287.2 op/s reps=[19834.1,19909.8,20365.0]
+--- t=16 pct=1 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=1 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=16 issues=502295 depth_integral_ns=252225255698 issue_gap_us_total=93080034.4 issue_gap_us_max=1659008.5 mean_issue_gap_us=185.309
+RESULT ZILISSUER zp_open=376380 zp_prevnf=446440 zp_decay=5328 lwblat_us_mean=497.443 lwblat_us_max=150054.313 lwblat_us_last=383.622 sleep_us_mean=4.850 sleep_us_max=1500.543 waiter_timedout=1439656 sleeps=1710076
+RESULT ZILSVC svc_us_mean=198.082 svc_us_max=270458.922 svc_n=502522 vqwrite_depth_mean=1.231 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=18385.6 stdev=1230.2 op/s reps=[18197.9,18385.6,20416.4]
+--- t=16 pct=2 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=2 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=13 issues=469525 depth_integral_ns=227736305991 issue_gap_us_total=91956023.0 issue_gap_us_max=1295578.2 mean_issue_gap_us=195.849
+RESULT ZILISSUER zp_open=427865 zp_prevnf=420760 zp_decay=5890 lwblat_us_mean=480.701 lwblat_us_max=81790.440 lwblat_us_last=496.697 sleep_us_mean=9.494 sleep_us_max=1635.808 waiter_timedout=1490507 sleeps=1743843
+RESULT ZILSVC svc_us_mean=195.367 svc_us_max=251285.926 svc_n=469756 vqwrite_depth_mean=1.170 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=19130.5 stdev=564.1 op/s reps=[18974.5,19130.5,20020.1]
+--- t=16 pct=5 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=5 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=10 issues=387141 depth_integral_ns=191499898626 issue_gap_us_total=91561644.2 issue_gap_us_max=924049.4 mean_issue_gap_us=236.507
+RESULT ZILISSUER zp_open=447291 zp_prevnf=351208 zp_decay=7307 lwblat_us_mean=490.394 lwblat_us_max=129630.846 lwblat_us_last=481.226 sleep_us_mean=25.146 sleep_us_max=5680.729 waiter_timedout=1455198 sleeps=1664403
+RESULT ZILSVC svc_us_mean=207.547 svc_us_max=312421.890 svc_n=387372 vqwrite_depth_mean=1.055 vqwrite_depth_max=8
+RESULT syncwrite_mt_persec median=18608.0 stdev=211.3 op/s reps=[18248.5,18608.0,18620.8]
+--- t=16 pct=30 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=30 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=6 issues=174643 depth_integral_ns=82757360556 issue_gap_us_total=91173289.4 issue_gap_us_max=606044.0 mean_issue_gap_us=522.055
+RESULT ZILISSUER zp_open=491284 zp_prevnf=143811 zp_decay=28667 lwblat_us_mean=471.190 lwblat_us_max=23194.360 lwblat_us_last=745.784 sleep_us_mean=146.080 sleep_us_max=6958.308 waiter_timedout=1395609 sleeps=1502717
+RESULT ZILSVC svc_us_mean=217.013 svc_us_max=182219.537 svc_n=174870 vqwrite_depth_mean=0.782 vqwrite_depth_max=5
+RESULT syncwrite_mt_persec median=16631.8 stdev=985.8 op/s reps=[15743.9,16631.8,17712.3]
+--- t=16 pct=60 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=60 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=4 issues=75004 depth_integral_ns=43036065642 issue_gap_us_total=90900015.2 issue_gap_us_max=452054.0 mean_issue_gap_us=1211.936
+RESULT ZILISSUER zp_open=342642 zp_prevnf=7619 zp_decay=68125 lwblat_us_mean=571.960 lwblat_us_max=6616.974 lwblat_us_last=720.320 sleep_us_mean=344.235 sleep_us_max=3970.184 waiter_timedout=1133391 sleeps=1141755
+RESULT ZILSVC svc_us_mean=292.403 svc_us_max=4682.091 svc_n=75231 vqwrite_depth_mean=0.742 vqwrite_depth_max=5
+RESULT syncwrite_mt_persec median=12664.1 stdev=433.1 op/s reps=[12263.3,12664.1,13128.7]
+--- t=32 pct=0 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=0 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=14 issues=323471 depth_integral_ns=131188009737 issue_gap_us_total=93607193.1 issue_gap_us_max=2568602.8 mean_issue_gap_us=289.384
+RESULT ZILISSUER zp_open=440782 zp_prevnf=270917 zp_decay=6344 lwblat_us_mean=402.799 lwblat_us_max=81539.029 lwblat_us_last=255.177 sleep_us_mean=40.665 sleep_us_max=8153.902 waiter_timedout=2349377 sleeps=2896494
+RESULT ZILSVC svc_us_mean=196.989 svc_us_max=246031.440 svc_n=323702 vqwrite_depth_mean=0.942 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=32755.1 stdev=1112.0 op/s reps=[30900.0,32755.1,32889.8]
+--- t=32 pct=1 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=1 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=22 issues=378029 depth_integral_ns=172017579476 issue_gap_us_total=93717107.2 issue_gap_us_max=2720658.8 mean_issue_gap_us=247.910
+RESULT ZILISSUER zp_open=309201 zp_prevnf=319663 zp_decay=5189 lwblat_us_mean=451.209 lwblat_us_max=167355.004 lwblat_us_last=1177.170 sleep_us_mean=4.015 sleep_us_max=1673.550 waiter_timedout=2128000 sleeps=2773426
+RESULT ZILSVC svc_us_mean=198.541 svc_us_max=274684.801 svc_n=378193 vqwrite_depth_mean=1.024 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=30226.9 stdev=1299.7 op/s reps=[29911.9,30226.9,32303.9]
+--- t=32 pct=2 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=2 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=23 issues=371039 depth_integral_ns=169416758956 issue_gap_us_total=92325335.6 issue_gap_us_max=1287004.3 mean_issue_gap_us=248.829
+RESULT ZILISSUER zp_open=340893 zp_prevnf=313769 zp_decay=5064 lwblat_us_mean=453.450 lwblat_us_max=111501.248 lwblat_us_last=293.602 sleep_us_mean=8.169 sleep_us_max=2230.024 waiter_timedout=2158706 sleeps=2792271
+RESULT ZILSVC svc_us_mean=201.638 svc_us_max=152086.830 svc_n=371242 vqwrite_depth_mean=1.034 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=30801.2 stdev=1324.6 op/s reps=[29824.6,30801.2,32445.6]
+--- t=32 pct=5 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=5 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=15 issues=355595 depth_integral_ns=152118763293 issue_gap_us_total=94022781.2 issue_gap_us_max=2571786.1 mean_issue_gap_us=264.410
+RESULT ZILISSUER zp_open=395780 zp_prevnf=298522 zp_decay=5638 lwblat_us_mean=424.712 lwblat_us_max=67101.323 lwblat_us_last=1273.149 sleep_us_mean=20.520 sleep_us_max=3355.066 waiter_timedout=2281234 sleeps=2892457
+RESULT ZILSVC svc_us_mean=201.768 svc_us_max=210606.863 svc_n=355824 vqwrite_depth_mean=1.015 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=32727.9 stdev=1483.0 op/s reps=[30447.4,32727.9,33230.0]
+--- t=32 pct=30 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=30 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=12 issues=234706 depth_integral_ns=95135963098 issue_gap_us_total=92618195.0 issue_gap_us_max=1547609.6 mean_issue_gap_us=394.614
+RESULT ZILISSUER zp_open=559441 zp_prevnf=203700 zp_decay=5568 lwblat_us_mean=403.175 lwblat_us_max=13384.350 lwblat_us_last=355.712 sleep_us_mean=122.697 sleep_us_max=4015.305 waiter_timedout=2533665 sleeps=2876373
+RESULT ZILSVC svc_us_mean=204.789 svc_us_max=39068.550 svc_n=234941 vqwrite_depth_mean=0.805 vqwrite_depth_max=10
+RESULT syncwrite_mt_persec median=33063.4 stdev=1937.8 op/s reps=[29720.3,33063.4,33089.7]
+--- t=32 pct=60 ---
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=60 (0=default 10)
+RESULT ZILDEPTH inflight_now=0 inflight_max=8 issues=174197 depth_integral_ns=76206416564 issue_gap_us_total=93435366.0 issue_gap_us_max=2494349.2 mean_issue_gap_us=536.378
+RESULT ZILISSUER zp_open=579867 zp_prevnf=124721 zp_decay=3445 lwblat_us_mean=435.469 lwblat_us_max=26605.242 lwblat_us_last=838.528 sleep_us_mean=261.920 sleep_us_max=15963.145 waiter_timedout=2391775 sleeps=2561672
+RESULT ZILSVC svc_us_mean=223.103 svc_us_max=196893.239 svc_n=174432 vqwrite_depth_mean=0.737 vqwrite_depth_max=6
+RESULT syncwrite_mt_persec median=28707.4 stdev=1660.8 op/s reps=[26690.9,28707.4,29984.9]
+STEP2_DONE

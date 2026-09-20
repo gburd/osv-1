@@ -1,0 +1,13 @@
+=== linux-vu8-r2 ===
+Vuser 1:TEST RESULT : System achieved 159792 NOPM from 368078 PostgreSQL TPM
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.03170037269592285,
+ "p95": 0.03294539451599121,
+ "p99": 0.03606438636779785,
+ "max": 0.038992881774902344,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}

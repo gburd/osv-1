@@ -1,0 +1,7 @@
+---NOPM/TPM---
+Vuser 1:TEST RESULT : System achieved 280077 NOPM from 645090 PostgreSQL TPM
+---VUCOMPLETE---
+---NEWORD p99---
+NEWORD_p99_ms median=12.142 min=11.540 max=12.303 nvu=7
+---wait profile---
+{"NONE/NULL": 42.9, "LWLock/WALWrite": 41.1, "Client/ClientRead": 4.6, "Timeout/VacuumDelay": 3.1, "IO/WalSync": 3.0, "IO/DataFileRead": 2.3, "LWLock/WALInsert": 0.8, "IO/DataFileWrite": 0.6, "IO/WalWrite": 0.4, "Timeout/VacuumTruncate": 0.3, "Lock/transactionid": 0.2, "LWLock/CheckpointerComm": 0.2, "Timeout/SpinDelay": 0.1, "IO/DataFileExtend": 0.1, "IO/AioIoUringSubmit": 0.0, "LWLock/ProcArray": 0.0, "LWLock/WALBufMapping": 0.0, "LWLock/BufferMapping": 0.0, "IPC/ProcarrayGroupUpdate": 0.0, "IO/AioIoUringExecution": 0.0, "IPC/XactGroupUpdate": 0.0, "LWLock/XactSLRU": 0.0, "Lock/extend": 0.0,

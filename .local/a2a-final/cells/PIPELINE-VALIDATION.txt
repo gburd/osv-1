@@ -1,0 +1,1 @@
+VU8 pipeline-validation (on schema-build guest, NOT a fresh-boot cell, discarded from curve): 100374 NOPM / 230868 TPM, NEWORD p99 ~4.3ms, io_uring confirmed. Pipeline works.

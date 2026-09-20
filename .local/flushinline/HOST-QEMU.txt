@@ -1,0 +1,2 @@
+host: 6.1.0-53-cloud-amd64
+QEMU emulator version 7.2.22 (Debian 1:7.2+dfsg-7+deb12u18+b3)

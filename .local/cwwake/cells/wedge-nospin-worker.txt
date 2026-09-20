@@ -1,0 +1,26 @@
+=== NO-HALT A/B: OSV_IDLE_SPIN=2000000000, VU64 worker ===
+t=15s WALWrite=26 active=34 xact_commit_delta=? nvme=78.80 3269
+t=30s WALWrite=34 active=65 xact_commit_delta=205938 nvme=55.60 3274
+t=45s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=60s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=225s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=240s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=255s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=285s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=300s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=315s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=330s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=345s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=360s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=375s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3207

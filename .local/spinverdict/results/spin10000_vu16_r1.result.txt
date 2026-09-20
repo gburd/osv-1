@@ -1,0 +1,3 @@
+Vuser 1:TEST RESULT : System achieved 109446 NOPM from 250902 PostgreSQL TPM
+VUCOMPLETE_AFTER 0 s
+metal_cpu_busy_mean=9.8% usr=0.2 sys=1.1 samples=106

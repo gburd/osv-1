@@ -1,0 +1,6 @@
+DRIVER_VERDICT=DRIVER_OK headroom ok
+drv_all_cpu_pct: median=7 max=9  (ncpu=36, limit 70%)
+hdb_cpu_pct_of_one_core: median=249 max=261  (ceiling 3600 for 36 vCPU)
+net rx_Mbps median=25 max=30 | tx_Mbps median=23 max=27  (line-rate flag 7000Mbps)
+net rx_pps median=19979 max=23545 | tx_pps median=19805 max=23374
+n_run_samples=40 of 42 total

@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 18:00:00 -0400
+Subject: [PATCH] zfs: inline ZIL flush completion on the blk thread
+ (OSV_ZIL_FLUSH_INLINE)
+
+A ZIL commit ends with a zero-byte DKIOCFLUSHWRITECACHE (ZIO_TYPE_FLUSH)
+barrier per top vdev.  On OSv the completion path for that barrier is:
+
+  virtio-blk MSI-X IRQ -> blk completion thread -> vdev_disk_bio_done ->
+  zio_interrupt -> zio_taskq_dispatch(ZIO_TASKQ_INTERRUPT) ->
+  [INTERRUPT taskq thread] -> zio_execute(child flush zio) -> zio_done ->
+  zio_notify_parent re-dispatches the lwb_root_zio (a zio_root() with the
+  zil_lwb_flush_vdevs_done done-callback, io_type==NULL, io_done!=NULL, so
+  it is NOT eligible for next_to_execute) -> [INTERRUPT taskq thread again]
+  -> zio_done(root) -> zil_lwb_flush_vdevs_done -> cv_broadcast waiters.
+
+So a trivial zero-byte barrier takes TWO serial cross-vCPU thread hops on
+OSv (blk completion thread + INTERRUPT taskq thread, twice), each ~tens of
+us of wakeup+IPI+VM-exit.  Measured: OSv flush ~114-147us vs Linux ~16-40us
+on the same NVMe (Linux runs flush completion inline in IRQ/softirq).
+
+Fix (env-gated, default OFF): when OSV_ZIL_FLUSH_INLINE=1, run the flush
+completion pipeline INLINE on the blk completion thread instead of
+dispatching to the INTERRUPT taskq.  The blk completion thread already runs
+vdev_disk_bio_done inline (256KB stack), so extending it to the trivial
+flush zio pipeline + the lwb_root_zio done-callback is a natural extension,
+no new thread.  Two changes:
+
+  (1) zio_interrupt(): for a ZIO_TYPE_FLUSH zio, call zio_execute() directly
+      (skips the blk->INTR hop for the child flush zio).
+  (2) zio_notify_parent(): let the flush child's lwb_root_zio parent be
+      returned as next_to_execute (so __zio_execute continues into it inline
+      and runs zil_lwb_flush_vdevs_done on the blk thread too, skipping the
+      second INTR hop).
+
+Safety: zil_lwb_flush_vdevs_done takes zilog->zl_lock + zl_lwb_io_lock and
+cv_broadcasts; the blk completion thread holds no ZFS lock at bio-done time
+(it already runs biodone->bio_done->vdev_disk_bio_done inline), so it can
+take those locks.  The flush zio pipeline is ZIO_FLUSH_PIPELINE (no data,
+no config lock held across I/O, no zio_wait) and the root fan-out is a
+single shallow cv_broadcast - bounded, fits the 256KB stack.  Env resolved
+once, printed once at first flush completion.  No default behavior change.
+---
+diff --git a/module/zfs/zio.c b/module/zfs/zio.c
+--- a/module/zfs/zio.c
++++ b/module/zfs/zio.c
+@@ -174,6 +174,31 @@ static inline void __zio_execute(zio_t *zio);
+ 
+ static void zio_taskq_dispatch(zio_t *, zio_taskq_type_t, boolean_t);
+ 
++/*
++ * OSv A/B: OSV_ZIL_FLUSH_INLINE=1 runs a ZIO_TYPE_FLUSH completion inline on
++ * the blk completion thread instead of hopping to the INTERRUPT taskq (and
++ * lets its lwb_root_zio parent run inline too via next_to_execute).  A ZIL
++ * flush is zero-byte and just wakes commit waiters; on OSv each taskq hop is
++ * a cross-vCPU wakeup/IPI/VM-exit costing ~tens of us.  Resolved once,
++ * printed once.  Default 0 = stock (dispatch to INTERRUPT taskq).
++ */
++static int
++zio_flush_inline_enabled(void)
++{
++	static volatile int cached = -1;
++	int v = cached;
++	if (v < 0) {
++		extern char *getenv(const char *);
++		extern int atoi(const char *);
++		const char *e = getenv("OSV_ZIL_FLUSH_INLINE");
++		v = (e && e[0]) ? (atoi(e) != 0 ? 1 : 0) : 0;
++		cached = v;
++		printf("OSV_ZIL_FLUSH_INLINE: inline flush completion=%d "
++		    "(0=dispatch to INTERRUPT taskq)\n", v);
++	}
++	return (v);
++}
++
+ static int
+ zio_kstats_update(kstat_t *ksp, int rw)
+ {
+@@ -883,6 +908,20 @@ zio_notify_parent(zio_t *pio, zio_t *zio, enum zio_wait_type wait,
+ 		 * so promptly.
+ 		 *
+ 		 * In other cases, dispatching the parent prevents
+ 		 * overflowing the stack when we have deeply nested
+ 		 * parent-child relationships, as we do with the "mega zio"
+ 		 * of writes for spa_sync(), and the chain of ZIL blocks.
+ 		 */
++		/*
++		 * OSv A/B (OSV_ZIL_FLUSH_INLINE): when a ZIO_TYPE_FLUSH child
++		 * completes, let its lwb_root_zio parent (a zio_root() with a
++		 * done-callback, io_type==NULL && io_done!=NULL, so normally
++		 * not eligible below) run inline as next_to_execute too, so
++		 * zil_lwb_flush_vdevs_done fires on the blk completion thread
++		 * instead of a second INTERRUPT taskq hop.  Bounded shallow
++		 * fan-out (single cv_broadcast), fits the 256KB blk stack.
++		 */
++		if (next_to_executep != NULL && *next_to_executep == NULL &&
++		    zio->io_type == ZIO_TYPE_FLUSH &&
++		    pio->io_type == ZIO_TYPE_NULL && pio->io_done != NULL &&
++		    zio_flush_inline_enabled()) {
++			*next_to_executep = pio;
++		} else
+ 		if (next_to_executep != NULL && *next_to_executep == NULL &&
+ 		    (pio->io_type == zio->io_type ||
+ 		    (pio->io_type == ZIO_TYPE_NULL && !pio->io_done))) {
+ 			*next_to_executep = pio;
+ 		} else {
+ 			zio_taskq_dispatch(pio, type, B_FALSE);
+ 		}
+ 	} else {
+ 		mutex_exit(&pio->io_lock);
+ 	}
+ }
+@@ -2216,6 +2255,15 @@ zio_issue_async(zio_t *zio)
+ void
+ zio_interrupt(void *zio)
+ {
++	/*
++	 * OSv A/B (OSV_ZIL_FLUSH_INLINE): run a ZIL flush (zero-byte
++	 * DKIOCFLUSHWRITECACHE) completion inline on the blk completion
++	 * thread instead of hopping to the INTERRUPT taskq.
++	 */
++	if (((zio_t *)zio)->io_type == ZIO_TYPE_FLUSH &&
++	    zio_flush_inline_enabled()) {
++		zio_execute(zio);
++		return;
++	}
+ 	zio_taskq_dispatch(zio, ZIO_TASKQ_INTERRUPT, B_FALSE);
+ }
+ 

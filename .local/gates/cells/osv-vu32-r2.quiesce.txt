@@ -1,0 +1,3 @@
+  checkpoint 1: 88 ms
+  checkpoint 2: 50 ms
+  QUIESCED (two consecutive sub-1s checkpoints)

@@ -1,0 +1,41 @@
+Attaching 5 probes...
+t inflight=0 max=0 issues=0 flushdone=0
+t inflight=0 max=0 issues=0 flushdone=0
+t inflight=-1 max=3 issues=2103 flushdone=2103
+t inflight=-6 max=3 issues=7791 flushdone=7791
+t inflight=0 max=4 issues=13585 flushdone=13584
+t inflight=-5 max=4 issues=18744 flushdone=18743
+t inflight=-2 max=4 issues=24221 flushdone=24219
+t inflight=-7 max=4 issues=29947 flushdone=29946
+t inflight=0 max=5 issues=35781 flushdone=35780
+t inflight=4 max=7 issues=41064 flushdone=41063
+t inflight=13 max=15 issues=46119 flushdone=46119
+t inflight=16 max=19 issues=51237 flushdone=51236
+t inflight=17 max=19 issues=56480 flushdone=56479
+t inflight=18 max=26 issues=62754 flushdone=62753
+t inflight=24 max=26 issues=67462 flushdone=67461
+t inflight=30 max=32 issues=72411 flushdone=72410
+t inflight=36 max=39 issues=77483 flushdone=77482
+t inflight=43 max=47 issues=82400 flushdone=82399
+t inflight=44 max=51 issues=88722 flushdone=88722
+t inflight=52 max=53 issues=93263 flushdone=93262
+t inflight=52 max=57 issues=98486 flushdone=98486
+t inflight=55 max=57 issues=103908 flushdone=103907
+t inflight=60 max=66 issues=109733 flushdone=109730
+t inflight=57 max=66 issues=115367 flushdone=115367
+t inflight=53 max=66 issues=120540 flushdone=120540
+t inflight=53 max=66 issues=125479 flushdone=125478
+t inflight=60 max=66 issues=130817 flushdone=130816
+t inflight=59 max=66 issues=136869 flushdone=136868
+t inflight=62 max=66 issues=141760 flushdone=141759
+t inflight=66 max=68 issues=146752 flushdone=146751
+t inflight=62 max=68 issues=152954 flushdone=152954
+t inflight=69 max=74 issues=158938 flushdone=158936
+t inflight=67 max=77 issues=163007 flushdone=163007
+FINAL inflight_max=77 issues=163007 flushdone=163007
+
+
+@flushdone: 163007
+@inflight: 67
+@issues: 163007
+@max: 77

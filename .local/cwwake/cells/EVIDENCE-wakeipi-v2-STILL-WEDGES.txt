@@ -1,0 +1,21 @@
+=== WEDGE-WATCH label=wakeipi-v2-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (32)
+io_method_in_effect=worker
+  checkpoint 2: 89 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=12.80 474
+t=30s WALWrite=17 active=33 xact_commit_delta=38829 nvme=56.80 1516
+t=45s WALWrite=28 active=60 xact_commit_delta=104934 nvme=52.00 1634
+t=60s WALWrite=35 active=65 xact_commit_delta=147955 nvme=48.00 2072
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 57
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 59
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 56
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 60
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 58
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 60
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 60
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 59
+WAKE_IPI_ALWAYS v2 (unconditional IPI + mask-bypass) STILL WEDGES => lost wake NOT on IPI-delivery side.
