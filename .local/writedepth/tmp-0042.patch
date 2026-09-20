@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gburd <greg@burd.me>
+Date: Mon, 15 Sep 2026 20:00:00 -0400
+Subject: [PATCH] zfs: STEP-2 localize the one-at-a-time lwb issue
+
+The pct-window sweep proved the throttle is not the batch window: depth mean
+stays ~1 and op/s does not scale regardless of window.  This probe localizes
+WHERE the one-at-a-time issue comes from (parent guardrail #1a/b/c):
+ (1) concurrent committers (gauge in zil_commit_writer while holding
+     zl_issuer_lock) - if OSv keeps ~1 active vs Linux many, the low re-entry
+     rate is the throttle.
+ (2) itxs committed per lwb issue (batch width) in zil_lwb_write_issue.
+ (3) commit-entry -> first-issue latency (how long the issuer takes to turn a
+     commit into an issued lwb).
+Pure probe, no behaviour change.  RESULT ZILCOMMIT via zilwake_dump().
+---
+ module/zfs/zil.c | 62 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -158,5 +158,16 @@ static kmem_cache_t *zil_lwb_cache;
+ static kmem_cache_t *zil_zcw_cache;
+ 
++/* STEP-2 probe: localize the one-at-a-time lwb issue (committer concurrency,
++ * batch width, commit->issue latency). */
++static volatile uint64_t zc2_committers;      /* threads currently processing commit list */
++static volatile uint64_t zc2_committers_max;  /* max concurrent committers */
++static volatile uint64_t zc2_passes;          /* # zil_commit_writer passes past the early-bail */
++static volatile uint64_t zc2_itx_sum;         /* sum itxs committed per issued lwb */
++static volatile uint64_t zc2_itx_max;         /* max itxs in one lwb */
++static volatile uint64_t zc2_issue_n;         /* # lwbs issued */
++static volatile uint64_t zc2_c2i_sum;         /* sum commit-entry -> first-issue (ns) */
++static volatile uint64_t zc2_c2i_max;
++static volatile uint64_t zc2_c2i_n;
++
+ void zilwake_dump(void);
+ __attribute__((visibility("default"))) void
+ zilwake_dump(void)
+@@ -353,6 +364,19 @@ zilwake_dump(void)
+ 	    osv_swd_run_ns ? (double)osv_swd_integral / (double)osv_swd_run_ns
+ 	    : 0.0,
+ 	    (unsigned long long)osv_swd_max);
++
++	/* STEP-2: localize the one-at-a-time lwb issue. */
++	printf("RESULT ZILCOMMIT committers_now=%llu committers_max=%llu "
++	    "writer_passes=%llu itx_per_lwb_mean=%.3f itx_per_lwb_max=%llu "
++	    "lwbs_per_pass_mean=%.3f c2i_us_mean=%.3f c2i_us_max=%.3f\n",
++	    (unsigned long long)zc2_committers,
++	    (unsigned long long)zc2_committers_max,
++	    (unsigned long long)zc2_passes,
++	    zc2_issue_n ? (double)zc2_itx_sum / (double)zc2_issue_n : 0.0,
++	    (unsigned long long)zc2_itx_max,
++	    zc2_passes ? (double)zc2_issue_n / (double)zc2_passes : 0.0,
++	    zc2_c2i_n ? (zc2_c2i_sum / 1000.0) / zc2_c2i_n : 0.0,
++	    zc2_c2i_max / 1000.0);
+ }
+ 
+ static int zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+@@ -1935,6 +1960,16 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
+ 
+ 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_CLOSED);
+ 
++	/* STEP-2: count itxs committed to this lwb (batch width). */
++	{
++		uint64_t nitx = 0;
++		for (itx_t *pi = list_head(&lwb->lwb_itxs); pi;
++		    pi = list_next(&lwb->lwb_itxs, pi))
++			nitx++;
++		atomic_add_64(&zc2_itx_sum, nitx);
++		if (nitx > zc2_itx_max) zc2_itx_max = nitx;
++		atomic_inc_64(&zc2_issue_n);
++	}
+ 	/* Actually fill the lwb with the data. */
+ 	for (itx_t *itx = list_head(&lwb->lwb_itxs); itx;
+ 	    itx = list_next(&lwb->lwb_itxs, itx)) {
+@@ -3400,6 +3434,10 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 	list_t ilwbs;
+ 	lwb_t *lwb;
+ 	uint64_t wtxg = 0;
++	/* STEP-2 probe locals (declared here so the early `goto out` is legal). */
++	hrtime_t zc2_t0 = 0;
++	uint64_t zc2_issue_before = 0;
++	boolean_t zc2_active = B_FALSE;
+ 
+ 	ASSERT(!MUTEX_HELD(&zilog->zl_lock));
+ 	ASSERT(spa_writeable(zilog->zl_spa));
+@@ -3430,6 +3468,14 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 		goto out;
+ 	}
+ 
++	/* STEP-2: committer concurrency + commit->issue latency start. */
++	atomic_inc_64(&zc2_committers);
++	{ uint64_t c = zc2_committers; if (c > zc2_committers_max) zc2_committers_max = c; }
++	zc2_t0 = gethrtime();
++	zc2_issue_before = zc2_issue_n;
++	atomic_inc_64(&zc2_passes);
++	zc2_active = B_TRUE;
++
+ 	ZIL_STAT_BUMP(zilog, zil_commit_writer_count);
+ 
+ 	wtxg = zil_get_commit_list(zilog);
+@@ -3441,6 +3482,17 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
+ 	IMPLY(zilog->zl_restart_txg > 0, list_is_empty(&ilwbs));
+ 
+ out:
++	/* STEP-2: on the way out, if we were an active committer, record the
++	 * commit->issue latency (if this pass issued an lwb) and drop the gauge. */
++	if (zc2_active) {
++		if (zc2_issue_n != zc2_issue_before) {
++			uint64_t d = (uint64_t)(gethrtime() - zc2_t0);
++			atomic_add_64(&zc2_c2i_sum, d);
++			if (d > zc2_c2i_max) zc2_c2i_max = d;
++			atomic_inc_64(&zc2_c2i_n);
++		}
++		atomic_add_64(&zc2_committers, (uint64_t)-1);
++	}
+ 	mutex_exit(&zilog->zl_issuer_lock);
+ 	int err = 0;
+ 	while ((lwb = list_remove_head(&ilwbs)) != NULL) {
+-- 
+2.54.0

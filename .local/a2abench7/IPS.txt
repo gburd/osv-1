@@ -1,0 +1,4 @@
+i-06b5f679718f7e389	c5.4xlarge	running	3.148.179.148	172.31.4.2	a2abench7-drv-x86
+i-0ce983c4cb91921cf	m5d.metal	running	3.129.70.203	172.31.1.7	a2abench7-x86-m5d
+i-031434d1538558de9	c7gd.metal	running	18.217.207.217	172.31.5.123	a2abench7-arm-c7gd
+i-02162e8211e14b30f	c5.4xlarge	running	3.144.115.73	172.31.13.240	a2abench7-drv-arm

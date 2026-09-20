@@ -1,0 +1,26 @@
+############ DISCRIMINATOR SUMMARY ############
+--- threads=8 ---
+RESULT ZILDEPTH inflight_now=0 inflight_max=7 issues=298270 depth_integral_ns=126739814426 issue_gap_us_total=90797989.5 issue_gap_us_max=406988.8 mean_issue_gap_us=304.415
+RESULT ZILFLUSHLAT wrlat_us_mean=276.650 wrlat_us_max=197187.347 wr_n=298270 whole_lwblat_us_mean=422.818 est_flush_us_mean=146.168
+RESULT ZILISSUER zp_open=473478 zp_prevnf=230262 zp_decay=56378 lwblat_us_mean=422.818 lwblat_us_max=46653.296 lwblat_us_last=482.896 sleep_us_mean=43.304 sleep_us_max=4665.329 waiter_timedout=1011476 sleeps=1078687
+RESULT ZILSVC svc_us_mean=189.887 svc_us_max=197138.022 svc_n=298497 vqwrite_depth_mean=0.882 vqwrite_depth_max=6
+RESULT syncwrite_mt_p50 median=604.5 stdev=9.1 us reps=[593.8,604.5,611.9]
+RESULT syncwrite_mt_p99 median=1961.9 stdev=42.6 us reps=[1927.0,1961.9,2011.8]
+RESULT syncwrite_mt_persec median=11999.3 stdev=236.2 op/s reps=[11742.0,11999.3,12213.7]
+--- threads=16 ---
+RESULT ZILDEPTH inflight_now=0 inflight_max=11 issues=331516 depth_integral_ns=155208117729 issue_gap_us_total=91240079.0 issue_gap_us_max=650472.1 mean_issue_gap_us=275.221
+RESULT ZILFLUSHLAT wrlat_us_mean=301.290 wrlat_us_max=226721.358 wr_n=331516 whole_lwblat_us_mean=464.318 est_flush_us_mean=163.028
+RESULT ZILISSUER zp_open=511533 zp_prevnf=303457 zp_decay=8784 lwblat_us_mean=464.318 lwblat_us_max=53488.009 lwblat_us_last=410.777 sleep_us_mean=47.912 sleep_us_max=5348.800 waiter_timedout=1521781 sleeps=1693694
+RESULT ZILSVC svc_us_mean=201.492 svc_us_max=225288.444 svc_n=331747 vqwrite_depth_mean=0.938 vqwrite_depth_max=7
+RESULT syncwrite_mt_p50 median=756.0 stdev=11.6 us reps=[736.4,756.0,756.9]
+RESULT syncwrite_mt_p99 median=2516.0 stdev=52.8 us reps=[2482.8,2516.0,2586.3]
+RESULT syncwrite_mt_persec median=18872.1 stdev=309.7 op/s reps=[18484.8,18872.1,19097.0]
+--- threads=32 ---
+RESULT ZILDEPTH inflight_now=0 inflight_max=17 issues=323633 depth_integral_ns=133867583385 issue_gap_us_total=94445572.8 issue_gap_us_max=2256248.6 mean_issue_gap_us=291.829
+RESULT ZILFLUSHLAT wrlat_us_mean=288.044 wrlat_us_max=217381.613 wr_n=323633 whole_lwblat_us_mean=410.970 est_flush_us_mean=122.925
+RESULT ZILISSUER zp_open=449950 zp_prevnf=272549 zp_decay=5863 lwblat_us_mean=410.970 lwblat_us_max=56452.672 lwblat_us_last=475.280 sleep_us_mean=41.317 sleep_us_max=5645.267 waiter_timedout=2357101 sleeps=2891622
+RESULT ZILSVC svc_us_mean=199.351 svc_us_max=178958.720 svc_n=323870 vqwrite_depth_mean=0.916 vqwrite_depth_max=10
+RESULT syncwrite_mt_p50 median=901.8 stdev=70.8 us reps=[785.2,901.8,912.9]
+RESULT syncwrite_mt_p99 median=2804.2 stdev=228.6 us reps=[2530.1,2804.2,2983.9]
+RESULT syncwrite_mt_persec median=31846.0 stdev=1568.3 op/s reps=[30719.1,31846.0,33817.6]
+STEP1_DONE

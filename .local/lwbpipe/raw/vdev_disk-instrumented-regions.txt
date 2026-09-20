@@ -1,0 +1,74 @@
+#include <sys/types.h>
+#include <osv/bio.h>
+#include <osv/device.h>
+#include <osv/prex.h>
+
+#include <sys/zfs_context.h>
+#include <sys/spa_impl.h>
+#include <sys/vdev_impl.h>
+#include <sys/fs/zfs.h>
+#include <sys/zio.h>
+#include <sys/abd.h>
+
+struct vdev_disk {
+	struct device	*device;
+};
+
+static void
+vdev_disk_hold(vdev_t *vd)
+{
+	(void) vd;
+}
+
+static void
+vdev_disk_rele(vdev_t *vd)
+{
+	(void) vd;
+}
+
+static int
+vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
+    uint64_t *logical_ashift, uint64_t *physical_ashift)
+{
+	struct vdev_disk *dvd;
+	int error;
+	char *device_name;
+
+	/*
+	 * We must have a pathname, and it must be absolute.
+	 */
+	if (vd->vdev_path == NULL || vd->vdev_path[0] != '/') {
+		vd->vdev_stat.vs_aux = VDEV_AUX_BAD_LABEL;
+		return (SET_ERROR(EINVAL));
+	}
+
+	if (vd->vdev_tsd == NULL) {
+		dvd = vd->vdev_tsd = kmem_zalloc(sizeof (struct vdev_disk),
+		    KM_SLEEP);
+
+	if (zio->io_type == ZIO_TYPE_FLUSH) {
+		if (!vdev_readable(vd)) {
+			zio->io_error = SET_ERROR(ENXIO);
+			zio_interrupt(zio);
+			return;
+		}
+
+		if (zfs_nocacheflush) {
+			zio_execute(zio);
+			return;
+		}
+
+		if (vd->vdev_nowritecache) {
+			zio->io_error = SET_ERROR(ENOTSUP);
+			zio_execute(zio);
+
+	bio = alloc_bio();
+	if (zio->io_type == ZIO_TYPE_READ)
+		bio->bio_cmd = BIO_READ;
+	else
+		bio->bio_cmd = BIO_WRITE;
+
+	bio->bio_dev = dvd->device;
+	bio->bio_data = data;
+	bio->bio_offset = zio->io_offset;
+	bio->bio_bcount = size;

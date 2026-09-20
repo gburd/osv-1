@@ -1,0 +1,40 @@
+Vuser 59:Initializing xtprof time profiler
+Vuser 59:Assigned 4 WIDs = 58 122 186 50 based on VU count 64, Warehouses = 4 out of 200
+Vuser 59:Processing 100000000 transactions with output suppressed...
+Vuser 60:RUNNING
+Vuser 60:Initializing xtprof time profiler
+Vuser 60:Assigned 4 WIDs = 59 123 187 51 based on VU count 64, Warehouses = 4 out of 200
+Vuser 60:Processing 100000000 transactions with output suppressed...
+Vuser 61:RUNNING
+Vuser 61:Initializing xtprof time profiler
+Vuser 61:Assigned 4 WIDs = 60 124 188 52 based on VU count 64, Warehouses = 4 out of 200
+Vuser 61:Processing 100000000 transactions with output suppressed...
+Vuser 62:RUNNING
+Vuser 62:Initializing xtprof time profiler
+Vuser 62:Assigned 4 WIDs = 61 125 189 53 based on VU count 64, Warehouses = 4 out of 200
+Vuser 62:Processing 100000000 transactions with output suppressed...
+Vuser 63:RUNNING
+Vuser 63:Initializing xtprof time profiler
+Vuser 63:Assigned 4 WIDs = 62 126 190 54 based on VU count 64, Warehouses = 4 out of 200
+Vuser 63:Processing 100000000 transactions with output suppressed...
+Vuser 64:RUNNING
+Vuser 64:Initializing xtprof time profiler
+Vuser 64:Assigned 4 WIDs = 63 127 191 55 based on VU count 64, Warehouses = 4 out of 200
+Vuser 64:Processing 100000000 transactions with output suppressed...
+Vuser 65:RUNNING
+Vuser 65:Initializing xtprof time profiler
+Vuser 65:Assigned 4 WIDs = 64 128 192 56 based on VU count 64, Warehouses = 4 out of 200
+Vuser 65:Processing 100000000 transactions with output suppressed...
+Vuser 1:Rampup 1 minutes complete ...
+Vuser 1:Rampup 2 minutes complete ...
+Vuser 1:Rampup complete, Taking start Transaction Count.
+Vuser 1:Timing test period of 5 in minutes
+Vuser 1:1 ...,
+Vuser 1:2 ...,
+Vuser 1:3 ...,
+Vuser 1:4 ...,
+Vuser 1:5 ...,
+Vuser 1:Test complete, Taking end Transaction Count.
+Vuser 1:64 Active Virtual Users configured
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 200 PostgreSQL TPM
+Vuser 1:Gathering timing data from Active Virtual Users...

@@ -1,0 +1,13 @@
+=== WEDGE-WATCH label=fixed-uring ADAPT=0 io_method=io_uring ===
+BOOTED
+PG up (34)
+io_method_in_effect=io_uring
+  checkpoint 2: 86 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=8.00 331
+t=30s WALWrite=15 active=32 xact_commit_delta=22082 nvme=90.80 1546
+t=45s WALWrite=33 active=65 xact_commit_delta=67258 nvme=33.60 1108
+t=60s WALWrite=23 active=65 xact_commit_delta=54316 nvme=96.80 1797
+t=75s WALWrite=27 active=64 xact_commit_delta=97983 nvme=81.60 728

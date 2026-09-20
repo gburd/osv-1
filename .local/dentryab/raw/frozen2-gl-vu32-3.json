@@ -1,0 +1,45 @@
+{
+ "rc": [
+  0,
+  0
+ ],
+ "gap_s": 5.19,
+ "n_backends_s1": 38,
+ "n_backends_s2": 38,
+ "active_client_stalled_count": 0,
+ "active_client_progressing_count": 32,
+ "active_client_stalled": [],
+ "bgworker_frozen": [
+  [
+   "3046",
+   "autovacuum launcher",
+   "?",
+   "Activity:AutovacuumMain"
+  ],
+  [
+   "3047",
+   "logical replication launcher",
+   "?",
+   "Activity:LogicalLauncherMain"
+  ],
+  [
+   "3036",
+   "checkpointer",
+   "?",
+   "Activity:CheckpointerMain"
+  ],
+  [
+   "3037",
+   "background writer",
+   "?",
+   "IO:DataFileFlush"
+  ],
+  [
+   "3045",
+   "walwriter",
+   "?",
+   "Activity:WalWriterMain"
+  ]
+ ],
+ "note": "active+frozen-state_change = stalled below syscall (OSv not completing). This is the kernel-side view of the wait_event=NULL backends."
+}

@@ -1,0 +1,9 @@
+# BEFORE arm (recycle=0) second boot: PG entered crash recovery (from the earlier
+# BEFORE crash), "redo done" in 0.00s, then the END-OF-RECOVERY CHECKPOINT WEDGED
+# and never completed (>10 min). qemu at ~53% of one CPU, host 98% idle, console
+# still growing (probe printing), memfree flat ~47 GB, ZERO backends.
+# So this is NOT a memory exhaustion -- it is a single-writer checkpoint/ZIL stall
+# in the BEFORE image. The matched BEFORE max-backends sweep could therefore NOT be
+# obtained in this budget; the BEFORE capacity number stands at the previously
+# documented ~74 (VU64-VERDICT-FINAL.md), measured by an earlier campaign, NOT
+# re-measured here.

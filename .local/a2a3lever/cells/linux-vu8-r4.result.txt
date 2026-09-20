@@ -1,0 +1,50 @@
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.03193783760070801,
+ "p95": 0.03355526924133301,
+ "p99": 0.034806251525878906,
+ "max": 0.04287457466125488,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}---waithist---
+{
+ "samples": 522,
+ "active_backend_observations": 3667,
+ "histogram": {
+  "NONE/NULL": 1669,
+  "LWLock/WALWrite": 1027,
+  "IO/WalSync": 426,
+  "Client/ClientRead": 173,
+  "Timeout/VacuumDelay": 157,
+  "IO/DataFileRead": 129,
+  "IO/WalWrite": 47,
+  "IO/DataFileWrite": 12,
+  "LWLock/WALInsert": 9,
+  "IO/DataFilePrefetch": 9,
+  "IO/DataFileExtend": 5,
+  "Timeout/SpinDelay": 1,
+  "Timeout/VacuumTruncate": 1,
+  "LWLock/WALBufMapping": 1,
+  "LWLock/XidGen": 1
+ },
+ "pct": {
+  "NONE/NULL": 45.5,
+  "LWLock/WALWrite": 28.0,
+  "IO/WalSync": 11.6,
+  "Client/ClientRead": 4.7,
+  "Timeout/VacuumDelay": 4.3,
+  "IO/DataFileRead": 3.5,
+  "IO/WalWrite": 1.3,
+  "IO/DataFileWrite": 0.3,
+  "LWLock/WALInsert": 0.2,
+  "IO/DataFilePrefetch": 0.2,
+  "IO/DataFileExtend": 0.1,
+  "Timeout/SpinDelay": 0.0,
+  "Timeout/VacuumTruncate": 0.0,
+  "LWLock/WALBufMapping": 0.0,
+  "LWLock/XidGen": 0.0
+ }
+}---NOPM---
+Vuser 1:TEST RESULT : System achieved 151307 NOPM from 348589 PostgreSQL TPM

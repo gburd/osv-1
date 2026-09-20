@@ -1,0 +1,28 @@
+{
+ "n": 299,
+ "errors": 1,
+ "median": 0.0435633659362793,
+ "p95": 0.04919123649597168,
+ "p99": 0.05951881408691406,
+ "max": 1.0885717868804932,
+ "ge1s": 3,
+ "ge5s": 0,
+ "ge10s": 0
+}---waithist---
+{
+ "samples": 505,
+ "active_backend_observations": 26765,
+ "histogram": {
+  "LWLock/WALWrite": 24240,
+  "IPC/CheckpointStart": 1010,
+  "Lock/transactionid": 1010,
+  "IO/WalSync": 505
+ },
+ "pct": {
+  "LWLock/WALWrite": 90.6,
+  "IPC/CheckpointStart": 3.8,
+  "Lock/transactionid": 3.8,
+  "IO/WalSync": 1.9
+ }
+}---NOPM---
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 318 PostgreSQL TPM

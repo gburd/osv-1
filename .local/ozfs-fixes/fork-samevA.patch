@@ -1,0 +1,700 @@
+From 7a2a7886784921f844b4c19d119da8f73143f370 Mon Sep 17 00:00:00 2001
+From: Greg Burd <greg@burd.me>
+Date: Wed, 22 Jul 2026 21:44:53 +0000
+Subject: [PATCH] mm/fork: same-VA COW stack for fork() (deep call chains,
+ opt-in)
+
+Give a forked child its parent's EXACT user stack -- same virtual
+addresses, private physical pages -- instead of a relocated copy with a
+biased SP.  A relocated+biased stack leaves every saved rbp, return
+address and &local in the copied frames pointing at the parent's stack
+(off by the bias), so a deep unwind in the child dereferences the parent
+and faults.  tst-fork-deep (fork 12 frames deep, child unwinds all the
+way up and _exit()s a checked value) is the test that catches this; it
+now passes.  All gated behind CONF_fork (default n); conf_fork=0 is
+unchanged and builds/boots clean.
+
+Four coupled changes make same-VA correct:
+
+1. core/mmu.cc: clone_address_space() PRIVATIZES the forking thread's
+   live stack VA range into the child AS -- fresh private pages that
+   byte-copy the parent's stack, mapped writable (not COW: OSv runs
+   kernel code with irqs off on the app stack, a COW fault there is
+   illegal) at the SAME VA.  The parent's PTEs are untouched.
+
+2. arch/x64/fork.cc + libc/process/fork.cc + include/osv/fork.hh: the
+   child resumes with the caller's FULL callee-saved register context
+   (rbx, rbp, r12-r15, rsp, rip), captured at fork() entry into
+   osv::fork_resume_ctx and restored by the child trampoline off a
+   scratch base register (so the restore never clobbers its own base).
+   fork() jmps past its own epilogue, so without this the caller would
+   resume with fork()'s internal register values -- a deep chain that
+   keeps an accumulator in a callee-saved reg across fork() computes
+   garbage.
+
+3. arch/x64/arch-switch.hh: defer the fork CR3 switch to EXACTLY the
+   rsp/rbp swap inside switch_to()'s asm.  Loading the incoming AS's
+   CR3 early, while still executing on the outgoing thread's stack (the
+   fpu-cw/mxcsr scratch saves), resolved those shared-VA stack writes
+   through the wrong address space and clobbered a blocked thread's live
+   stack (root-caused via hardware watchpoint: switch_to wrote garbage
+   into a blocked parent's on-stack user_mutex slot in AS0).
+
+4. core/lfmutex.cc + core/mmu.cc: a wait_record on a shared kernel
+   condvar/mutex must live in the identity-mapped kernel heap (coherent
+   in every AS) whenever a cross-address-space wake is possible.  Extend
+   the Option-A rule from 'current thread is a fork child' to also
+   cover 'any child address space is live' (live_child_address_spaces
+   counter), so the parent in AS0 -- woken by a child that walks the
+   queue through its own page tables -- is safe too.
+
+libc/process/execve.cc: on a fork child, move the thread onto its own
+kernel stack before switching to AS0 and running the target, so
+reloading CR3 to AS0 cannot alias the same-VA app stack onto the
+parent's physical page (which would corrupt a blocked parent) and the
+child AS teardown cannot free the running stack.  Pre-check the target
+exists so a failed exec still returns to the caller.
+
+Validated on x86-64 (m5d.metal, KVM): tst-fork 10/10, tst-fork-cow 6/6,
+tst-fork-deep 0 failures, on smp=1 and smp=4; conf_fork=0 builds and
+boots clean (fork() stubbed).
+---
+ arch/aarch64/fork.cc    |   3 +-
+ arch/x64/arch-switch.hh |  52 +++++++++++++++---
+ arch/x64/fork.cc        | 117 ++++++++++++++++++++++------------------
+ core/lfmutex.cc         |  22 ++++++--
+ core/mmu.cc             |  58 +++++++++++++++++++-
+ include/osv/fork.hh     |  17 ++++++
+ libc/process/execve.cc  | 106 ++++++++++++++++++++++++++++--------
+ libc/process/fork.cc    |  31 ++++++++---
+ 8 files changed, 312 insertions(+), 94 deletions(-)
+
+diff --git a/arch/aarch64/fork.cc b/arch/aarch64/fork.cc
+index b5abe39..c51f94b 100644
+--- a/arch/aarch64/fork.cc
++++ b/arch/aarch64/fork.cc
+@@ -18,8 +18,9 @@
+ #include <osv/sched.hh>
+ 
+ sched::thread *fork_thread(void *caller_ret, void *caller_sp,
+-                           void **out_stack_to_free)
++                           void *resume_ctx, void **out_stack_to_free)
+ {
++    (void)resume_ctx;   // aarch64 uses caller_sp bias-copy (same-VA is x86-64)
+     auto parent = sched::thread::current();
+     auto parent_pinned_cpu = parent->pinned() ? sched::cpu::current() : nullptr;
+ 
+diff --git a/arch/x64/arch-switch.hh b/arch/x64/arch-switch.hh
+index 637accb..31f9564 100644
+--- a/arch/x64/arch-switch.hh
++++ b/arch/x64/arch-switch.hh
+@@ -95,14 +95,24 @@ void thread::switch_to()
+     set_fsbase(reinterpret_cast<u64>(_tcb));
+     barrier();
+ #if CONF_fork
+-    // Address-space (CR3) switch for fork COW.  Only touch CR3 when the target
++    // Address-space (CR3) switch for fork COW.  Only switch when the target
+     // thread lives in a different address space than the outgoing one, so the
+-    // common single-address-space case pays nothing (and no TLB flush).  The
+-    // kernel half of every AS is identically mapped, so the switch code, kernel
+-    // stacks and kernel heap remain valid across the write.
+-    if (_current_as != old->_current_as) {
+-        processor::write_cr3(mmu::pt_root_phys(_current_as));
+-    }
++    // common single-address-space case pays nothing (and no TLB flush).
++    //
++    // CRITICAL (same-VA fork stacks): the CR3 write must happen EXACTLY at the
++    // rsp/rbp swap below, NOT here.  OSv runs kernel code (this switch, the
++    // fpu-cw/mxcsr scratch saves, the register-save asm) on the app thread's
++    // stack.  A forked child resumes on the parent's EXACT stack VAs, so parent
++    // and child alias the same stack virtual addresses (backed by different
++    // physical pages per address space).  If we loaded the incoming thread's
++    // CR3 here, the subsequent scratch writes to the OUTGOING thread's stack
++    // (fnstcw/stmxcsr at -0x34(%rbp), etc., with rsp/rbp still the old thread's)
++    // would resolve through the WRONG address space and clobber the incoming
++    // thread's physical page at that shared VA -- corrupting a blocked thread's
++    // live stack.  So we defer the CR3 load into the asm, coincident with the
++    // rsp/rbp swap: old-stack writes use the old AS, new-stack writes the new.
++    bool switch_as = (_current_as != old->_current_as);
++    u64 new_cr3 = switch_as ? mmu::pt_root_phys(_current_as) : 0;
+ #endif
+     auto c = _detached_state->_cpu;
+     old->_state.exception_stack = c->arch.get_exception_stack();
+@@ -119,6 +129,34 @@ void thread::switch_to()
+     c->arch._current_thread_kernel_tcb = reinterpret_cast<u64>(_tcb);
+     auto fpucw = processor::fnstcw();
+     auto mxcsr = processor::stmxcsr();
++#if CONF_fork
++    if (switch_as) {
++        // Same-VA-safe switch: swap rsp/rbp to the incoming thread, THEN load
++        // its CR3 (mov %rax,%cr3), THEN jump.  All old-stack writes above ran
++        // under the old AS; every access after the rsp/rbp swap is to the new
++        // thread's stack, now resolved through the new AS -- so a shared stack
++        // VA never resolves through the wrong address space.  Kernel .text and
++        // the thread_state (heap) are identically mapped in every AS, so the
++        // instruction fetch across the mov-to-cr3 and the %c[rip] load are
++        // valid before and after the CR3 write.
++        asm volatile
++            ("mov %%rbp, %c[rbp](%0) \n\t"
++             "movq $1f, %c[rip](%0) \n\t"
++             "mov %%rsp, %c[rsp](%0) \n\t"
++             "mov %c[rsp](%1), %%rsp \n\t"
++             "mov %c[rbp](%1), %%rbp \n\t"
++             "mov %2, %%cr3 \n\t"
++             "jmpq *%c[rip](%1) \n\t"
++             "1: \n\t"
++             :
++             : "a"(&old->_state), "c"(&this->_state), "d"(new_cr3),
++               [rsp]"i"(offsetof(thread_state, rsp)),
++               [rbp]"i"(offsetof(thread_state, rbp)),
++               [rip]"i"(offsetof(thread_state, rip))
++             : "rbx", "rsi", "rdi", "r8", "r9",
++               "r10", "r11", "r12", "r13", "r14", "r15", "memory");
++    } else
++#endif
+     asm volatile
+         ("mov %%rbp, %c[rbp](%0) \n\t"
+          "movq $1f, %c[rip](%0) \n\t"
+diff --git a/arch/x64/fork.cc b/arch/x64/fork.cc
+index c606bc6..1a43075 100644
+--- a/arch/x64/fork.cc
++++ b/arch/x64/fork.cc
+@@ -4,17 +4,26 @@
+  * This work is open source software, licensed under the terms of the
+  * BSD license as described in the LICENSE file in the top-level directory.
+  *
+- * fork_thread(): create a child thread that resumes in fork()'s CALLER, on a
+- * private copy of the parent's user stack, returning 0 from fork() in the child.
+- * The x86-64 arch half of the fork() emulation (see documentation/fork.md).
++ * fork_thread(): create a child thread that resumes in fork()'s CALLER on the
++ * SAME user stack virtual addresses the parent had -- no stack relocation, no
++ * SP bias -- and with the caller's FULL callee-saved register context restored,
++ * exactly as a normal `ret` from fork() would leave it.  The child's address
++ * space (built by clone_address_space) maps the parent's live stack VA range to
++ * freshly-allocated PRIVATE physical pages that byte-copy the parent's stack,
++ * so the child sees identical stack contents at identical addresses but writes
++ * to its own private frames.
+  *
+- * fork() (libc/process/fork.cc) passes us the caller's resume point:
+- *   caller_ret  = the address fork() would return to  (__builtin_return_address)
+- *   caller_sp   = the parent's SP at fork()'s return   (fork()'s frame base)
+- * We copy the parent stack region [caller_sp .. stack_base) into a fresh stack,
+- * bias caller_sp into the copy, and start a child thread whose trampoline sets
+- * rsp=child_sp, rax=0, and jumps to caller_ret -- i.e. the child returns from
+- * fork() with value 0 on its own private stack, in the caller.
++ * Why same-VA + full register restore: OSv/x86-64 code addresses saved frame
++ * pointers (rbp), return addresses, and &local pointers as absolute stack VAs,
++ * and keeps live values in callee-saved registers (rbx, r12-r15) across calls.
++ * Relocating the child stack to a different VA and biasing rsp leaves every
++ * saved rbp/&local pointing at the PARENT's stack (off by the bias), and simply
++ * jmp-ing to the return address skips fork()'s epilogue so the caller resumes
++ * with fork()'s internal register values.  Either corrupts a deep unwind.
++ * Keeping the child on the parent's exact VAs (private phys) AND restoring the
++ * full caller register context (osv::fork_resume_ctx, captured at fork() entry)
++ * makes the child continue in fork()'s caller as if fork() had returned 0 -- the
++ * only correct way to fork a deep stack (see tst-fork-deep, documentation/fork.md).
+  */
+ 
+ #include "arch.hh"
+@@ -23,13 +32,16 @@
+ #include <string.h>
+ #include <cstdlib>
+ #include <osv/sched.hh>
++#include <osv/fork.hh>
+ 
+ // Run pthread_atfork child handlers in the child's context (e.g. reset the
+ // malloc arena lock) before resuming user code.  Defined in libc/pthread.cc.
+ extern "C" void __osv_run_atfork_child();
+ 
+-sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_to_free)
++sched::thread *fork_thread(void *caller_ret, void *caller_sp,
++                           void *resume_ctx, void **out_stack_to_free)
+ {
++    auto ctx = static_cast<osv::fork_resume_ctx*>(resume_ctx);
+     auto parent = sched::thread::current();
+     auto parent_pinned_cpu = parent->pinned() ? sched::cpu::current() : nullptr;
+ 
+@@ -39,57 +51,56 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
+     if (sp < static_cast<char*>(si.begin) || sp > stack_base) {
+         return nullptr;   // caller SP not within the known user stack
+     }
+-    size_t stack_size = si.size;
+ 
+-    char *child_stack_mem = static_cast<char*>(malloc(stack_size));
+-    if (!child_stack_mem) {
+-        return nullptr;
+-    }
+-    // Copy ONLY the live top of the stack, [caller_sp .. stack_base), into the
+-    // TOP of the child buffer.  App (pthread) stacks are demand-paged: only the
+-    // used top is mapped, so copying from si.begin would fault on the first
+-    // unmapped page.  Keeping the copy at the top of the child buffer preserves
+-    // the base-relative bias so a biased SP resolves correctly.
+-    char *child_base = child_stack_mem + stack_size;
+-    ptrdiff_t bias = child_base - stack_base;
+-    size_t live = static_cast<size_t>(stack_base - sp);
+-    memcpy(child_base - live, sp, live);
+-    char *child_sp = sp + bias;
+-
+-    volatile u64 resume_sp = reinterpret_cast<u64>(child_sp);
+-    volatile u64 resume_pc = reinterpret_cast<u64>(caller_ret);
+-    char *stack_to_free = child_stack_mem;
++    // Same-VA stack: the child resumes on the parent's EXACT register context.
++    // No copy and no bias here -- clone_address_space() privatizes the parent's
++    // live stack VA range into the child's address space (fresh private pages
++    // that byte-copy the parent's stack), so these very addresses are valid and
++    // private in the child.  Capture the resume context by value in the lambda
++    // (the parent's on-stack ctx is gone by the time the child runs).
++    (void)caller_ret;
++    osv::fork_resume_ctx rc = *ctx;
+ 
+     // TLS handling.  The child is a real OSv sched::thread, so its constructor
+-    // already ran setup_tcb() and installed a FRESH, private OSv TLS block
+-    // (with its own errno and all libc __thread state).  Two cases:
+-    //
+-    //  (1) The app uses OSv's libc TLS (the normal dynamically-linked path,
+-    //      app_tcb == 0): the child's own fresh TCB is exactly right -- do NOT
+-    //      touch fsbase, let the child run on its private per-thread TLS.  This
+-    //      is the clean case and fork() "just works" for TLS.
+-    //  (2) The app installed its own TCB via arch_prctl(SET_FS) (app_tcb != 0,
+-    //      e.g. a glibc binary's __libc_setup_tls): the child would need a
+-    //      private COPY of that app TCB.  We do not duplicate it here yet;
+-    //      the child inherits the parent's app_tcb (shared), which is the
+-    //      documented multi-process-glibc limitation.  A musl app built against
+-    //      OSv's libc takes path (1) and avoids this entirely.
++    // already ran setup_tcb() and installed a FRESH, private OSv TLS block.  If
++    // the parent installed its own app TCB via arch_prctl (app_tcb != 0), the
++    // child inherits it (shared) -- the documented multi-process-glibc limit;
++    // otherwise the child keeps its own private OSv per-thread TLS.
+     u64 parent_app_tcb = parent->get_app_tcb();
+ 
+-    auto t = sched::thread::make([resume_sp, resume_pc, parent_app_tcb] {
+-        // Only override the child's own (fresh) TLS if the parent had installed
+-        // an app TCB via arch_prctl; otherwise keep the child's private OSv TCB.
++    auto t = sched::thread::make([rc, parent_app_tcb] {
+         if (parent_app_tcb) {
+             arch::set_fsbase(parent_app_tcb);
+         }
+         // Run pthread_atfork child handlers in the child's context (e.g. reset
+         // the malloc arena lock) before resuming user code.
+         __osv_run_atfork_child();
++        // Restore the caller's full callee-saved register context and resume in
++        // fork()'s caller with return value 0, on the parent's exact stack VAs
++        // (private phys in the child AS).  We base all loads off a scratch
++        // register (rax) pointing at a LOCAL copy of the context, and restore
++        // the base-conflicting registers (rbx, rbp) LAST, so the load sequence
++        // never clobbers its own base pointer.
++        osv::fork_resume_ctx c = rc;   // local copy the asm can address stably
++        // %0 = &c pinned in a register that is NOT one of the restored regs
++        // (we let the compiler pick, but we consume it only to seed rax).  We
++        // move &c into rax first, then load every callee-saved reg from rax-
++        // relative offsets, and load rsp last -- rax (the base) is never in the
++        // restore set, so the sequence never clobbers its own base pointer.
++        // Offsets match struct fork_resume_ctx { rbx,rbp,r12,r13,r14,r15,rsp,rip }.
+         asm volatile
+-          ("movq %0, %%rsp \n\t"    // install the private copied stack
+-           "xorq %%rax, %%rax \n\t" // fork() returns 0 in the child
+-           "jmpq *%1 \n\t"          // resume in fork()'s caller
+-           : : "r"(resume_sp), "r"(resume_pc) : "memory");
++          ("movq %0, %%rax        \n\t"  // rax = &c (base; not restored)
++           "movq  0(%%rax), %%rbx \n\t"  // rbx
++           "movq  8(%%rax), %%rbp \n\t"  // rbp
++           "movq 16(%%rax), %%r12 \n\t"  // r12
++           "movq 24(%%rax), %%r13 \n\t"  // r13
++           "movq 32(%%rax), %%r14 \n\t"  // r14
++           "movq 40(%%rax), %%r15 \n\t"  // r15
++           "movq 56(%%rax), %%rcx \n\t"  // rcx = caller rip (scratch)
++           "movq 48(%%rax), %%rsp \n\t"  // adopt parent's exact rsp
++           "xorq %%rax, %%rax     \n\t"  // fork() returns 0 in the child
++           "jmpq *%%rcx           \n\t"  // resume in fork()'s caller
++           : : "r"(&c) : "rax", "rcx", "memory");
+     }, sched::thread::attr().
+         stack(4096 * 4),
+         false,
+@@ -98,10 +109,10 @@ sched::thread *fork_thread(void *caller_ret, void *caller_sp, void **out_stack_t
+     if (parent_pinned_cpu) {
+         t->pin(parent_pinned_cpu);
+     }
+-    // The caller (fork.cc) owns the single cleanup; hand back the copied user
+-    // stack so it can be freed when the child is reaped.
++    // Same-VA: no separate user-stack buffer to free (the child's stack pages
++    // are owned by its address space and freed on destroy_address_space()).
+     if (out_stack_to_free) {
+-        *out_stack_to_free = stack_to_free;
++        *out_stack_to_free = nullptr;
+     }
+     return t;
+ }
+diff --git a/core/lfmutex.cc b/core/lfmutex.cc
+index fd128cf..3540cd2 100644
+--- a/core/lfmutex.cc
++++ b/core/lfmutex.cc
+@@ -16,11 +16,27 @@
+ #endif
+ 
+ #if CONF_fork
+-// See wait_record.hh: true iff the current thread runs in a forked-child
+-// (non-AS0) address space, in which case a wait_record queued on a shared
+-// kernel object must be heap-allocated to stay coherent cross-address-space.
++namespace mmu {
++    // Live fork-child address-space count (defined in core/mmu.cc).  When > 0,
++    // more than one address space exists and a stack-resident wait_record on a
++    // shared kernel object can be dereferenced cross-AS.
++    extern std::atomic<int> live_child_address_spaces;
++}
++
++// See wait_record.hh: with per-child same-VA private stacks, a wait_record
++// queued on a SHARED kernel condvar/mutex must live in the identity-mapped
++// kernel heap (same VA->phys in every address space) whenever a cross-address-
++// space wake is possible.  That is true when EITHER the current thread runs in
++// a forked-child (non-AS0) address space (a child woken by the parent), OR any
++// child address space is currently live (the parent, in AS0, woken by a child
++// -- the child dereferences the parent's stack-resident wait_record through
++// its own page tables and would read a stale private stack copy).  Default OSv
++// (no fork, single AS) always takes the zero-overhead on-stack fast path.
+ bool fork_child_needs_heap_wait_record()
+ {
++    if (mmu::live_child_address_spaces.load(std::memory_order_relaxed) > 0) {
++        return true;
++    }
+     auto t = sched::thread::current();
+     return t && t->address_space() &&
+            t->address_space() != mmu::kernel_address_space();
+diff --git a/core/mmu.cc b/core/mmu.cc
+index ba4238d..1ad4180 100644
+--- a/core/mmu.cc
++++ b/core/mmu.cc
+@@ -222,6 +222,17 @@ pt_element<4> *current_pt_root()
+ 
+ // --- fork COW page-table clone --------------------------------------------
+ //
++// Number of live fork-child address spaces.  A wait_record placed on a SHARED
++// kernel condvar/mutex is a stack local; with per-child same-VA private stacks,
++// that stack VA resolves to DIFFERENT physical pages in different address
++// spaces, so a thread in one AS that walks the queue and dereferences another
++// thread's stack-resident wait_record reads the wrong page.  When any child AS
++// is live, ANY thread's wait_record can be dereferenced cross-AS (the parent's
++// by a child, a child's by the parent), so wait_records must come from the
++// identity-mapped kernel heap (same VA->phys in every AS) -- see
++// fork_child_needs_heap_wait_record() and include/osv/wait_record.hh.
++std::atomic<int> live_child_address_spaces{0};
++
+ // Recursively clone the child's copy of an application-range subtree of the
+ // parent's page table, level by level, marking most private 4K leaf pages
+ // copy-on-write.
+@@ -237,6 +248,14 @@ pt_element<4> *current_pt_root()
+ // These "share, don't COW" address ranges are passed in via cow_share_ranges.
+ struct cow_range { uintptr_t start, end; };
+ static const std::vector<cow_range> *cow_share_ranges;
++// Ranges (the FORKING thread's live stack) that must be PRIVATIZED into the
++// child: fresh private physical pages that byte-copy the parent's page, mapped
++// at the SAME VA in the child, writable and NOT COW (OSv runs kernel code with
++// irqs off on the app stack, so a COW write-fault there is illegal) and NOT
++// shared (so the child owns its stack and frees it on teardown).  This is what
++// lets the child resume on the parent's exact rsp/rbp (same-VA stack) while
++// having private stack memory -- see arch/x64/fork.cc.
++static const std::vector<cow_range> *cow_privatize_ranges;
+ 
+ static bool addr_is_shared(uintptr_t va)
+ {
+@@ -247,6 +266,15 @@ static bool addr_is_shared(uintptr_t va)
+     return false;
+ }
+ 
++static bool addr_is_privatize(uintptr_t va)
++{
++    if (!cow_privatize_ranges) return false;
++    for (auto &r : *cow_privatize_ranges) {
++        if (va >= r.start && va < r.end) return true;
++    }
++    return false;
++}
++
+ // The parent must hold vma_list_mutex for write while this runs.  base_virt is
+ // the virtual address that leaf entry 0 of this PT maps.
+ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
+@@ -259,7 +287,23 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
+             continue;
+         }
+         uintptr_t va = base_virt + (uintptr_t)i * page_size;
+-        if (addr_is_shared(va)) {
++        if (addr_is_privatize(va)) {
++            // Forking thread's live stack: give the child its OWN physical
++            // page (byte-copy of the parent's), mapped at the SAME VA, plain
++            // writable (no COW bit, no shared bit).  The parent's PTE is left
++            // untouched -- only the child diverges -- so the parent keeps
++            // writing its own stack with irqs off and never faults, and the
++            // child owns/frees this page on address-space teardown.
++            void *child_page = memory::alloc_page();
++            memcpy(child_page, phys_to_virt(ppte.addr()), page_size);
++            pt_element<0> pv = ppte;
++            if (pte_is_cow(pv)) {
++                pv = pte_mark_cow(pv, false);
++            }
++            pv.set_writable(true);
++            pv.set_addr(virt_to_phys(child_page), false);
++            child_pt[i] = pv;
++        } else if (addr_is_shared(va)) {
+             // Stack / MAP_SHARED page: must stay genuinely shared + writable in
+             // both parent and child (never COW).  Clear any COW bit and grant
+             // write so both sides see each other's writes to the same phys
+@@ -366,10 +410,16 @@ address_space *clone_address_space(address_space *parent)
+         // Always share the forking thread's live stack: OSv runs kernel code
+         // (incl. the context switch, with irqs off) on it, so it must never be
+         // write-protected.  get_stack_info() gives the current thread's stack.
++        std::vector<cow_range> privatize_ranges;
+         {
++            // The FORKING thread's live stack is PRIVATIZED (not shared): the
++            // child gets private byte-copies at the same VA so it can resume on
++            // the parent's exact rsp/rbp with independent stack memory.  It
++            // must stay plain-writable (no COW) since OSv runs kernel code with
++            // irqs off on it -- a COW fault there is illegal.
+             auto si = sched::thread::current()->get_stack_info();
+             uintptr_t s = reinterpret_cast<uintptr_t>(si.begin);
+-            share_ranges.push_back({s, s + si.size});
++            privatize_ranges.push_back({s, s + si.size});
+         }
+         // Likewise every OTHER live thread's stack: those threads keep running
+         // in the PARENT address space and perform context switches (irqs off) on
+@@ -384,6 +434,7 @@ address_space *clone_address_space(address_space *parent)
+             }
+         });
+         cow_share_ranges = &share_ranges;
++        cow_privatize_ranges = &privatize_ranges;
+ 
+         for (unsigned slot = 0; slot < pte_per_page; slot++) {
+             if (slot >= pml4_app_first && slot <= pml4_app_last) {
+@@ -409,6 +460,8 @@ address_space *clone_address_space(address_space *parent)
+             }
+         }
+         cow_share_ranges = nullptr;
++        cow_privatize_ranges = nullptr;
++        live_child_address_spaces.fetch_add(1, std::memory_order_relaxed);
+ 
+         // Any write-protection we applied to the parent's page tables above
+         // must be made visible on all CPUs before the parent continues.
+@@ -499,6 +552,7 @@ void destroy_address_space(address_space *as)
+         memory::free_page(phys_to_virt(pml4_phys));
+     }
+     delete as;
++    live_child_address_spaces.fetch_sub(1, std::memory_order_relaxed);
+ }
+ #endif // CONF_fork
+ 
+diff --git a/include/osv/fork.hh b/include/osv/fork.hh
+index 474eae7..f7ec0fc 100644
+--- a/include/osv/fork.hh
++++ b/include/osv/fork.hh
+@@ -66,4 +66,21 @@ bool exit_current_child(int status);
+ extern "C" pid_t fork(void);
+ extern "C" pid_t vfork(void);
+ 
++#ifdef __x86_64__
++namespace osv {
++// x86-64 machine context a forked child must resume with so it continues in
++// fork()'s caller EXACTLY as a normal `ret` from fork() would -- restoring all
++// callee-saved registers (rbx, rbp, r12-r15) the caller relies on across the
++// call, plus rsp and the return address.  fork() jmps past its own epilogue
++// (the child is a different thread), so unless these are restored the caller
++// resumes with fork()'s internal register values -> a deep call chain that
++// keeps live values in callee-saved regs across fork() (e.g. an accumulator)
++// computes garbage.  Captured at fork() entry, where the regs still hold the
++// caller's values; restored by the child trampoline (arch/x64/fork.cc).
++struct fork_resume_ctx {
++    unsigned long rbx, rbp, r12, r13, r14, r15, rsp, rip;
++};
++} // namespace osv
++#endif
++
+ #endif // OSV_FORK_HH
+diff --git a/libc/process/execve.cc b/libc/process/execve.cc
+index 7546b93..7e0eb31 100644
+--- a/libc/process/execve.cc
++++ b/libc/process/execve.cc
+@@ -47,6 +47,34 @@ int execve(const char *path, char *const argv[], char *const envp[])
+ // state is not torn down the way a real address-space replacement would; the
+ // new program runs in its own ELF namespace but shares the kernel heap.
+ 
++// Continuation of execve() that runs the exec'd program to completion.  It is
++// invoked either directly (normal case) or on a fresh stack after we have left
++// the same-VA fork stack (fork-child case); either way it never returns -- a
++// successful exec ends the thread with the program's exit code.
++static void execve_run_and_exit(const std::string *path,
++                                const std::vector<std::string> *args,
++                                const std::unordered_map<std::string,std::string> *env,
++                                bool have_env)
++{
++    osv::shared_app_t child;
++    try {
++        // new_program=true => fresh ELF namespace, so the exec'd program gets
++        // its own globals rather than colliding with the caller's.
++        child = osv::application::run(*path, *args, true, have_env ? env : nullptr);
++    } catch (const osv::launch_error &e) {
++        // Could not load/exec the target - Linux returns ENOENT/ENOEXEC/EACCES.
++        errno = ENOENT;
++        _exit(127);
++    }
++    // Record the exec'd app so the fork/wait layer can reap it under the pid of
++    // the thread that called execve() (Linux keeps the pid across exec).
++    osv::fork::adopt_execed_app(child);
++    // A successful execve() does not return to the caller: run the program to
++    // completion on this thread and exit with its return code.
++    int rc = child->join();
++    _exit(rc);
++}
++
+ extern "C"
+ int execve(const char *path, char *const argv[], char *const envp[])
+ {
+@@ -74,22 +102,65 @@ int execve(const char *path, char *const argv[], char *const envp[])
+         }
+     }
+ 
+-    osv::shared_app_t child;
+-    // execve() replaces the address space entirely: the forked child's COW
+-    // private memory is discarded.  Move this thread back to the kernel (global)
+-    // address space BEFORE launching the new program, so the new program's
+-    // mappings go into the global vma_list + page table (consistent with
+-    // get_root_pt) rather than the now-defunct child COW address space.  The
+-    // freshly created app threads inherit this thread's (now global) AS.
+-    {
+-        auto self = sched::thread::current();
+-        auto old_as = self->address_space();
+-        if (old_as != mmu::kernel_address_space()) {
+-            self->set_address_space(mmu::kernel_address_space());
+-            mmu::switch_to_runtime_page_tables();  // reload CR3 = global root
+-            mmu::destroy_address_space(old_as);
++    // execve() replaces the caller's program: the exec'd target must run in the
++    // GLOBAL (AS0) address space, not the forked child's COW address space, so
++    // its ELF mappings and demand-paged I/O behave normally (a fault during
++    // block-I/O completion in a COW child AS is illegal -- assert(preemptable)).
++    // But with same-VA fork stacks, THIS thread is currently executing on its
++    // app stack whose pages are PRIVATE to the child AS at VAs it shares with
++    // the (possibly blocked) parent.  Switching CR3 to AS0 while on that stack
++    // would alias the stack onto the parent's physical page and destroy_address
++    // _space() would free the running stack.  So we first move this thread onto
++    // its own kernel stack (allocated in the global heap, valid in every AS),
++    // THEN switch to AS0, tear down the child AS, and run the target.
++    //
++    // Because that stack/AS switch is a point of no return (we cannot return -1
++    // to the caller afterwards), first verify the target is loadable so a
++    // failed exec still returns to the caller (which typically _exit()s its own
++    // fallback status) instead of stranding the thread.
++    std::string spath(path);
++    auto self = sched::thread::current();
++    auto old_as = self->address_space();
++    if (old_as && old_as != mmu::kernel_address_space()) {
++        if (::access(path, F_OK) != 0) {
++            return libc_error(ENOENT);   // caller decides the fallback
+         }
++        auto si = self->get_stack_info();   // the thread's own kernel stack
++        void *kstack_top = static_cast<char*>(si.begin) + si.size;
++        // 16-byte align and leave a little headroom.
++        uintptr_t sp = (reinterpret_cast<uintptr_t>(kstack_top) & ~uintptr_t(15)) - 256;
++        // Package the continuation args so the new stack frame can reach them.
++        static thread_local std::string s_path;
++        static thread_local std::vector<std::string> s_args;
++        static thread_local std::unordered_map<std::string,std::string> s_env;
++        static thread_local bool s_have_env;
++        s_path = spath; s_args = args; s_env = env; s_have_env = (envp != nullptr);
++        // Switch to AS0 and tear down the child AS -- but do it from the kernel
++        // stack, so freeing the child's app-stack pages cannot pull the rug.
++        // We accomplish the ordering with an rsp switch: move to the kernel
++        // stack, then call a lambda that switches CR3, destroys old_as, and
++        // runs the program.  It never returns.
++        self->set_address_space(mmu::kernel_address_space());
++        asm volatile(
++            "movq %0, %%rsp \n\t"
++            "movq %0, %%rbp \n\t"
++            "call *%1 \n\t"
++            : : "r"(sp), "r"(reinterpret_cast<void*>(+[]{
++                    // Now on the kernel stack (valid in every AS) with this
++                    // thread reassigned to AS0; reload CR3 to AS0 and run the
++                    // target.  The child AS's page tables (incl. the old app
++                    // stack) are freed later by the thread's reap-time cleanup
++                    // (libc/process/fork.cc), by which point nothing runs on
++                    // them.  Never returns.
++                    mmu::switch_to_runtime_page_tables();
++                    execve_run_and_exit(&s_path, &s_args, &s_env, s_have_env);
++                }))
++            : "memory");
++        __builtin_unreachable();
+     }
++
++    // Not a fork child (or already in AS0): run the target directly.
++    osv::shared_app_t child;
+     try {
+         // new_program=true => fresh ELF namespace, so the exec'd program gets
+         // its own globals rather than colliding with the caller's.
+@@ -99,14 +170,7 @@ int execve(const char *path, char *const argv[], char *const envp[])
+         // Could not load/exec the target - Linux returns ENOENT/ENOEXEC/EACCES.
+         return libc_error(ENOENT);
+     }
+-
+-    // Record the exec'd app so the fork/wait layer can reap it under the pid
+-    // of the thread that called execve() (Linux keeps the pid across exec).
+     osv::fork::adopt_execed_app(child);
+-
+-    // A successful execve() does not return to the caller.  Join the child app
+-    // (run it to completion on this thread) and then exit with its return code,
+-    // so this thread never re-enters the old program.
+     int rc = child->join();
+     _exit(rc);
+     // not reached
+diff --git a/libc/process/fork.cc b/libc/process/fork.cc
+index 4bc3f0e..cb08c11 100644
+--- a/libc/process/fork.cc
++++ b/libc/process/fork.cc
+@@ -25,7 +25,7 @@
+ // parent's user stack, returning 0 in the child.  Hands back the copied stack
+ // via out_stack_to_free so fork() can release it when the child is reaped.
+ extern sched::thread *fork_thread(void *caller_ret, void *caller_sp,
+-                                  void **out_stack_to_free);
++                                  void *resume_ctx, void **out_stack_to_free);
+ 
+ // atfork handler chains (defined in libc/pthread.cc).  glibc/musl register
+ // these internally; fork() must run prepare() in the parent before forking,
+@@ -163,18 +163,35 @@ extern "C"
+ __attribute__((noinline))
+ pid_t fork(void)
+ {
++    // Capture the caller's full callee-saved register context FIRST, before
++    // fork()'s body clobbers rbx/r12-r15.  At this point (right after fork's
++    // prologue) those registers still hold the caller's values, and fork's rbp
++    // frame gives us the caller's saved rbp ([rbp]), return address ([rbp+8]),
++    // and post-return rsp (rbp+16).  The child resumes with exactly this
++    // context so it continues in fork()'s caller as a normal `ret` would --
++    // essential for deep call chains (see osv::fork_resume_ctx, tst-fork-deep).
++    fork_resume_ctx ctx;
++    void **fp = static_cast<void**>(__builtin_frame_address(0));
++    asm volatile("movq %%rbx, %0\n\t"
++                 "movq %%r12, %1\n\t"
++                 "movq %%r13, %2\n\t"
++                 "movq %%r14, %3\n\t"
++                 "movq %%r15, %4\n\t"
++                 : "=m"(ctx.rbx), "=m"(ctx.r12), "=m"(ctx.r13),
++                   "=m"(ctx.r14), "=m"(ctx.r15));
++    ctx.rbp = reinterpret_cast<unsigned long>(fp[0]);          // caller's rbp
++    ctx.rip = reinterpret_cast<unsigned long>(__builtin_return_address(0));
++    ctx.rsp = reinterpret_cast<unsigned long>(fp + 2);         // fork rbp + 16
++
+     pid_t parent = getpid();
+ 
+-    // Capture the point fork() will return to in its caller, and the caller's
+-    // stack pointer (fork()'s own frame base == caller SP at the return).  The
+-    // child thread resumes exactly there, on a private copy of the stack.
+-    void *caller_ret = __builtin_return_address(0);
+-    void *caller_sp  = __builtin_frame_address(0);
++    void *caller_ret = reinterpret_cast<void*>(ctx.rip);
++    void *caller_sp  = reinterpret_cast<void*>(ctx.rsp);
+ 
+     void *stack_to_free = nullptr;
+     // POSIX: run pthread_atfork prepare handlers in the parent before forking.
+     __osv_run_atfork_prepare();
+-    sched::thread *child = fork_thread(caller_ret, caller_sp, &stack_to_free);
++    sched::thread *child = fork_thread(caller_ret, caller_sp, &ctx, &stack_to_free);
+     if (!child) {
+         __osv_run_atfork_parent();  // undo prepare-side locking
+         errno = ENOMEM;
+-- 
+2.47.0
+

@@ -1,0 +1,365 @@
+diff --git a/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c b/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
+index aac97ce8..16344d31 100644
+--- a/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
++++ b/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
+@@ -37,10 +37,56 @@
+ 
+ #include <osv/export.h>
+ 
++#include <osv/kernel_config_fork.h>
++#if CONF_fork
++/*
++ * Fork COW-coherence for the ZFS (SPL) heap.
++ *
++ * OSv gives a forked child its own copy-on-write address space; APPLICATION
++ * heap allocations made on an app thread land in the per-AS COW "fork arena"
++ * (VA 0x3000..), which diverges physically per child.  ZFS, however, is a
++ * KERNEL subsystem whose objects are touched from BOTH sides of the fork COW
++ * boundary: an app thread calling in from a fork child's AS (e.g. PostgreSQL's
++ * forked startup process running recovery/checkpoint) AND ZFS's own kernel
++ * threads / I/O-completion paths in AS0 (the block-completion thread,
++ * txg_sync_thread, dp_sync_taskq, zil lwb writer).  A great many of those
++ * objects embed a synchronization primitive on which one side BLOCKS and the
++ * other SIGNALS across the AS boundary, or are simply dereferenced by an AS0
++ * thread: zio_t.io_cv, zil_commit_waiter_t.zcw_cv, dmu_tx / dbuf / dnode /
++ * objset / arc_buf_hdr and their embedded locks and condvars.
++ *
++ * If such an object sits in the COW fork arena, the two address spaces touch
++ * DIFFERENT physical copies -- a lost wakeup (every vCPU idles, PostgreSQL
++ * never reaches "ready to accept connections") or an AS0 fault on a stale
++ * pointer.  (The wait_record is already made cross-AS coherent by
++ * coherent_wait_record in condvar::wait; the block-I/O bio by alloc_bio(); the
++ * remaining divergence is the ZFS objects these primitives are embedded in.)
++ *
++ * Fix: route ALL SPL/ZFS heap allocations onto the identity kernel heap
++ * (mapped verbatim in every address space) so every ZFS object is coherent in
++ * every fork address space.  ZFS objects are shared kernel state, not
++ * per-process app state, so this is their correct home; it only forgoes COW
++ * isolation for the ZFS heap (which must be AS-coherent anyway) and is a no-op
++ * for allocations already made on AS0 kernel threads (those never route to the
++ * arena).  Mirrors the fork_arena::kernel_heap_scope used in-kernel for thread
++ * objects, wait_records, epoll containers, the block bio, etc.  free()
++ * dispatches purely by address, so identity-heap ZFS objects free correctly
++ * from any address space.
++ */
++extern void fork_kernel_heap_push(void);
++extern void fork_kernel_heap_pop(void);
++#endif
++
+ void *
+ zfs_kmem_alloc(size_t size, int kmflags)
+ {
++#if CONF_fork
++	fork_kernel_heap_push();
++#endif
+ 	void *ptr = malloc(size);
++#if CONF_fork
++	fork_kernel_heap_pop();
++#endif
+ 	if (ptr && (kmflags & M_ZERO))
+ 		memset(ptr, 0, size);
+ 	return ptr;
+@@ -98,6 +144,9 @@ void *
+ kmem_cache_alloc(kmem_cache_t *cache, int flags)
+ {
+ 	void *p;
++#if CONF_fork
++	fork_kernel_heap_push();
++#endif
+ 	if (cache->kc_align) {
+ 		int error = posix_memalign(&p, cache->kc_align, cache->kc_size);
+ 		if (error)
+@@ -108,6 +157,9 @@ kmem_cache_alloc(kmem_cache_t *cache, int flags)
+ 		memset(p, 0, cache->kc_size);
+ 	if (p != NULL && cache->kc_constructor != NULL)
+ 		kmem_std_constructor(p, cache->kc_size, cache, flags);
++#if CONF_fork
++	fork_kernel_heap_pop();
++#endif
+ 	return (p);
+ }
+ 
+diff --git a/core/elf.cc b/core/elf.cc
+index 51d0980b..7fc91022 100644
+--- a/core/elf.cc
++++ b/core/elf.cc
+@@ -428,6 +428,24 @@ void file::load_segment(const Elf64_Phdr& phdr)
+             mmu::map_anon(_base + vstart + filesz, memsz - filesz, flag, perm);
+         }
+     }
++#if CONF_fork
++    // libsolaris.so (the OpenZFS kernel module) is loaded into the COW-cloned
++    // application VA slot, but its writable .data/.bss hold GLOBAL ZFS state
++    // (buf_hash_table, arc_anon/mru/mfu, the dbuf hash, arc_stats, ...) that
++    // both AS0 ZFS kernel threads and forked app threads must see identically.
++    // Register its writable segments so clone_address_space shares them verbatim
++    // (never COW) across every fork child -- otherwise a forked PostgreSQL
++    // process and the AS0 txg_sync / dp_sync_taskq threads diverge and ZFS
++    // corrupts (e.g. NULL-deref in buf_hash_remove).  libsolaris.so is mlocked
++    // and never unloaded, so its VA range is fixed for the life of the system.
++    if ((perm & mmu::perm_write) &&
++        _pathname.size() >= 13 &&
++        _pathname.compare(_pathname.size() - 13, 13, "libsolaris.so") == 0) {
++        uintptr_t rstart = reinterpret_cast<uintptr_t>(_base) + vstart;
++        uintptr_t rend = reinterpret_cast<uintptr_t>(_base) + vstart + memsz;
++        mmu::add_fork_shared_module_range(rstart, rend);
++    }
++#endif
+     elf_debug("Loaded and mapped PT_LOAD segment at: %018p of size: 0x%x\n", _base + vstart, filesz);
+ }
+ 
+diff --git a/core/fork_arena.cc b/core/fork_arena.cc
+index 2a9268c2..ad56888e 100644
+--- a/core/fork_arena.cc
++++ b/core/fork_arena.cc
+@@ -321,4 +321,17 @@ void release_as(void *as)
+ 
+ } // namespace fork_arena
+ 
++// -----------------------------------------------------------------------------
++// C-linkage accessors for the per-thread force_kernel_heap depth, exported to
++// kernel modules (libsolaris.so / OpenZFS) via exported_symbols.  A module that
++// allocates a kernel object which MUST be coherent across every fork address
++// space -- e.g. a zio_t, whose embedded io_cv/io_lock a forked waiter blocks on
++// while the AS0 block-completion thread signals it, and which that same AS0
++// thread dereferences via bio->bio_caller1 in vdev_disk_bio_done -- brackets
++// that allocation with fork_kernel_heap_push()/pop() so the object lands on the
++// identity heap (shared verbatim in every AS) instead of the COW fork arena.
++// Mirrors the C++ fork_arena::kernel_heap_scope used in-kernel.
++extern "C" void fork_kernel_heap_push(void) { ++fork_arena::force_kernel_heap; }
++extern "C" void fork_kernel_heap_pop(void)  { --fork_arena::force_kernel_heap; }
++
+ #endif // CONF_fork
+diff --git a/core/mempool.cc b/core/mempool.cc
+index e88d2b39..0b233a14 100644
+--- a/core/mempool.cc
++++ b/core/mempool.cc
+@@ -905,6 +905,23 @@ static void* mapped_malloc_large(size_t size, size_t offset)
+     void* obj = mmu::map_anon(nullptr, size, mmu::mmap_populate, mmu::perm_read | mmu::perm_write);
+     size_t* ret_header = static_cast<size_t*>(obj);
+     *ret_header = size;
++#if CONF_fork
++    // A large allocation made under fork_arena::kernel_heap_scope (force_kernel_heap)
++    // must be coherent across every fork address space, just like the small-object
++    // identity heap.  But map_anon() lands in the COW-cloned app mmap slot, so a
++    // forked child would get a private copy.  The prime case is ZFS's 8 MB ARC
++    // buf_hash_table / dbuf hash arrays (vmem_zalloc at module init): a forked
++    // PostgreSQL process inserting an arc_buf_hdr writes its COW copy while the
++    // AS0 txg_sync / dp_sync_taskq threads read the original (empty) array and
++    // NULL-deref in buf_hash_remove.  Register the range as fork-shared so
++    // clone_address_space maps it verbatim (never COW) in every child.  Such ZFS
++    // allocations live for the life of the pool; a stale range entry after free
++    // is harmless (clone only shares present PTEs).
++    if (fork_arena::force_kernel_heap) {
++        mmu::add_fork_shared_module_range(reinterpret_cast<uintptr_t>(obj),
++                                          reinterpret_cast<uintptr_t>(obj) + size);
++    }
++#endif
+     return obj + offset;
+ }
+ 
+diff --git a/core/mmu.cc b/core/mmu.cc
+index 83fa73e9..02d8e1fe 100644
+--- a/core/mmu.cc
++++ b/core/mmu.cc
+@@ -323,6 +323,26 @@ static const std::vector<cow_range> *cow_share_ranges;
+ // having private stack memory -- see arch/x64/fork.cc.
+ static const std::vector<cow_range> *cow_privatize_ranges;
+ 
++// ---- fork: writable segments of in-app-slot kernel modules -----------------
++//
++// libsolaris.so (the OpenZFS kernel module) is loaded into the COW-cloned
++// application VA slot (slot 32), not the shared kernel slots.  Its writable
++// .data/.bss therefore diverge per fork child under COW -- but they hold GLOBAL
++// ZFS state that BOTH a forked app thread (calling into ZFS) and AS0 ZFS kernel
++// threads (txg_sync, dp_sync_taskq, block completion) must see identically:
++// buf_hash_table (the ARC hash table pointer + mask), arc_anon / arc_mru /
++// arc_mfu state, the dbuf hash, arc_stats, etc.  A child inserting an
++// arc_buf_hdr into buf_hash_table.ht_table[] writes its private COW copy; the
++// AS0 sync thread then reads an empty table and NULL-derefs in buf_hash_remove.
++// So these ranges must be SHARED (mapped verbatim, never COW) across every fork
++// address space, exactly like the kernel .data.  The ELF loader records each
++// such writable module segment here (see elf.cc load_segment).  Fixed after
++// load (libsolaris.so is mlocked and never unloaded), so this list is
++// append-only and read lock-free during clone_address_space.
++static std::vector<cow_range> fork_shared_module_ranges;
++static mutex fork_shared_module_lock;
++
++
+ static bool addr_is_shared(uintptr_t va)
+ {
+     if (!cow_share_ranges) return false;
+@@ -460,6 +480,14 @@ void clone_pt_level<2>(pt_element<2> *parent_pt, pt_element<2> *child_pt,
+     }
+ }
+ 
++// Register a writable segment of an in-app-slot kernel module (libsolaris.so)
++// to be SHARED (not COW) across fork children -- see fork_shared_module_ranges.
++void add_fork_shared_module_range(uintptr_t start, uintptr_t end)
++{
++    SCOPE_LOCK(fork_shared_module_lock);
++    fork_shared_module_ranges.push_back({start, end});
++}
++
+ address_space *clone_address_space(address_space *parent)
+ {
+     // Force every allocation done while cloning (the child's anon_vma copies,
+@@ -516,7 +544,7 @@ address_space *clone_address_space(address_space *parent)
+         snap.reserve(n + 8);
+         // share_ranges holds MAP_SHARED/stack vmas + every live thread's stack;
+         // reserve room for all vmas plus all threads so it never reallocates.
+-        share_ranges.reserve(n + threads + 16);
++        share_ranges.reserve(n + threads + 16 + fork_shared_module_ranges.size());
+         privatize_ranges.reserve(4);
+     }
+ 
+@@ -534,6 +562,16 @@ address_space *clone_address_space(address_space *parent)
+                 share_ranges.push_back({v.start(), v.end()});
+             }
+         }
++        // Share libsolaris.so writable .data/.bss verbatim (never COW): its
++        // global ZFS state (buf_hash_table, arc_anon/mru/mfu, dbuf hash, ...)
++        // must be coherent in every fork address space, or an AS0 ZFS sync
++        // thread sees a stale/empty copy of what a forked child wrote.
++        {
++            SCOPE_LOCK(fork_shared_module_lock);
++            for (auto &r : fork_shared_module_ranges) {
++                share_ranges.push_back({r.start, r.end});
++            }
++        }
+         // Always share the forking thread's live stack: OSv runs kernel code
+         // (incl. the context switch, with irqs off) on it, so it must never be
+         // write-protected.  get_stack_info() gives the current thread's stack.
+diff --git a/exported_symbols/osv_libsolaris.so.symbols b/exported_symbols/osv_libsolaris.so.symbols
+index 64c9d396..5ea2c69b 100644
+--- a/exported_symbols/osv_libsolaris.so.symbols
++++ b/exported_symbols/osv_libsolaris.so.symbols
+@@ -1,3 +1,7 @@
++SHA256_Final
++SHA256_Init
++SHA256_Update
++_msleep
+ alloc_bio
+ bio_wait
+ bsd_pause
+@@ -8,7 +12,6 @@ copyin
+ copyinstr
+ copyout
+ cv_timedwait
+-openzfs_cv_timedwait
+ debug
+ destroy_bio
+ device_close
+@@ -21,6 +24,8 @@ file_dentry
+ file_flags
+ file_offset
+ file_setoffset
++fork_kernel_heap_pop
++fork_kernel_heap_push
+ get_cpuid
+ get_curproc
+ get_curthread
+@@ -35,13 +40,13 @@ lockfree_mutex_try_lock
+ lockfree_mutex_unlock
+ mmu_map
+ mmu_unmap
+-_msleep
+ nmount
++openzfs_cv_timedwait
+ osv_alloc_page
+ osv_free_page
+ osv_free_pages
+-osv_pagecache_map_page
+ osv_pagecache_map_arc_page
++osv_pagecache_map_page
+ osv_pagecache_register_arc_rele
+ osv_reclaimer_thread
+ physmem
+@@ -52,8 +57,6 @@ register_pagecache_arc_funs
+ register_shrinker_arc_funs
+ release_mp_dentries
+ rw_downgrade
+-rwlock_destroy
+-rwlock_init
+ rw_rlock
+ rw_runlock
+ rw_try_rlock
+@@ -62,13 +65,12 @@ rw_try_wlock
+ rw_wlock
+ rw_wowned
+ rw_wunlock
++rwlock_destroy
++rwlock_init
+ sbuf_delete
+ sbuf_finish
+ sbuf_new
+ sbuf_printf
+-SHA256_Final
+-SHA256_Init
+-SHA256_Update
+ smp_processors
+ start_pagecache_access_scanner
+ sys_open
+@@ -97,6 +99,6 @@ vm_throttling_needed
+ vrele
+ vttoif_tab
+ wakeup
+-zfsdev_init
+ zfs_driver_initialized
+ zfs_update_vfsops
++zfsdev_init
+diff --git a/fs/vfs/kern_physio.cc b/fs/vfs/kern_physio.cc
+index 67893c3a..2d9ebca3 100644
+--- a/fs/vfs/kern_physio.cc
++++ b/fs/vfs/kern_physio.cc
+@@ -19,10 +19,32 @@
+ #include <sys/refcount.h>
+ #include <osv/mutex.h>
+ #include <osv/waitqueue.hh>
++#include <osv/kernel_config_fork.h>
++#if CONF_fork
++#include <osv/fork_arena.hh>
++#endif
+ 
+ OSV_LIBSOLARIS_API struct bio *
+ alloc_bio(void)
+ {
++#if CONF_fork
++	// A bio is a kernel I/O descriptor handed off across the fork COW address
++	// space boundary: a forked process (e.g. PostgreSQL's startup process doing
++	// recovery/checkpoint on ZFS) allocates it here while issuing a synchronous
++	// read/write, but the SINGLE block-device completion thread (virtio-blk
++	// req_done, running in AS0) reads it back -- bio_done, bio_caller1 (the
++	// zio), bio_flags -- to complete the I/O.  If the bio landed in the per-AS
++	// COW fork arena, the AS0 completion thread would read a DIFFERENT physical
++	// copy than the submitter wrote: it would fetch a stale bio_caller1/bio_done
++	// and drive completion (zio_interrupt -> zio_done -> cv_broadcast) against
++	// the wrong zio, so the real waiter's zio_wait() is never woken -- all vCPUs
++	// go idle and PostgreSQL never reaches "ready to accept connections".
++	// Allocate the bio on the identity kernel heap (mapped verbatim in every
++	// address space) so the submitter and the AS0 completion thread share ONE
++	// coherent bio.  Same rule as the shipped virtio-blk blk_req / virtio-net
++	// net_req cross-AS fixes.
++	fork_arena::kernel_heap_scope kh;
++#endif
+ 	auto *b = new (std::nothrow) bio();
+ 	if (!b)
+ 		return nullptr;
+diff --git a/include/osv/mmu.hh b/include/osv/mmu.hh
+index 8c368d2f..56f0d5b5 100644
+--- a/include/osv/mmu.hh
++++ b/include/osv/mmu.hh
+@@ -407,6 +407,13 @@ phys pt_root_phys(address_space *as);
+ // The kernel half of the page table is shared with the parent.
+ address_space *clone_address_space(address_space *parent);
+ 
++// Register a writable segment of an in-app-slot kernel module (e.g.
++// libsolaris.so / OpenZFS) so it is SHARED verbatim -- never COW -- across every
++// fork child address space.  Such modules live in the COW-cloned app slot but
++// hold global kernel state that AS0 kernel threads and forked app threads must
++// see identically.  Called by the ELF loader for each writable PT_LOAD segment.
++void add_fork_shared_module_range(uintptr_t start, uintptr_t end);
++
+ // Tear down a child address_space (frees its private page tables + VMAs).
+ // Never call on the kernel address space.
+ void destroy_address_space(address_space *as);

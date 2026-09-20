@@ -1,0 +1,24 @@
+---NOPM/TPM---
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 200 PostgreSQL TPM
+---VUCOMPLETE---
+---NEWORD p99 (median across vusers from hdbxtprofile)---
+NEWORD_p99_ms NONE
+---wait profile---
+{
+ "samples": 500,
+ "active_backend_observations": 33419,
+ "histogram": {
+  "LWLock/WALWrite": 32416,
+  "Lock/transactionid": 500,
+  "IO/WalSync": 500,
+  "Timeout/VacuumDelay": 2,
+  "IO/AioIoUringExecution": 1
+ },
+ "pct": {
+  "LWLock/WALWrite": 97.0,
+  "Lock/transactionid": 1.5,
+  "IO/WalSync": 1.5,
+  "Timeout/VacuumDelay": 0.0,
+  "IO/AioIoUringExecution": 0.0
+ }
+}

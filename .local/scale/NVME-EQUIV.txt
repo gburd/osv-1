@@ -1,0 +1,6 @@
+=== /dev/nvme1n1 ===
+  write: IOPS=100k, BW=783MiB/s (821MB/s)(15.3GiB/20002msec); 0 zone resets
+   iops        : min=75340, max=120382, avg=100405.69, stdev=2259.54, samples=156
+=== /dev/nvme3n1 ===
+  write: IOPS=101k, BW=786MiB/s (824MB/s)(15.4GiB/20002msec); 0 zone resets
+   iops        : min=86428, max=124788, avg=100831.44, stdev=2527.11, samples=156

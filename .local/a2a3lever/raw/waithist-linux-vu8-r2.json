@@ -1,0 +1,36 @@
+{
+ "samples": 523,
+ "active_backend_observations": 3690,
+ "histogram": {
+  "NONE/NULL": 1811,
+  "LWLock/WALWrite": 917,
+  "IO/WalSync": 426,
+  "Timeout/VacuumDelay": 213,
+  "Client/ClientRead": 179,
+  "IO/DataFileRead": 70,
+  "IO/WalWrite": 45,
+  "IO/DataFilePrefetch": 12,
+  "IO/DataFileWrite": 8,
+  "IO/DataFileExtend": 5,
+  "LWLock/ProcArray": 1,
+  "LWLock/WALInsert": 1,
+  "LWLock/XactSLRU": 1,
+  "IO/SlruWrite": 1
+ },
+ "pct": {
+  "NONE/NULL": 49.1,
+  "LWLock/WALWrite": 24.9,
+  "IO/WalSync": 11.5,
+  "Timeout/VacuumDelay": 5.8,
+  "Client/ClientRead": 4.9,
+  "IO/DataFileRead": 1.9,
+  "IO/WalWrite": 1.2,
+  "IO/DataFilePrefetch": 0.3,
+  "IO/DataFileWrite": 0.2,
+  "IO/DataFileExtend": 0.1,
+  "LWLock/ProcArray": 0.0,
+  "LWLock/WALInsert": 0.0,
+  "LWLock/XactSLRU": 0.0,
+  "IO/SlruWrite": 0.0
+ }
+}

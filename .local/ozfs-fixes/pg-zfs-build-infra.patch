@@ -1,0 +1,26 @@
+diff --git a/scripts/build b/scripts/build
+index 95e0f01a..46463758 100755
+--- a/scripts/build
++++ b/scripts/build
+@@ -383,7 +383,7 @@ create_zfs_filesystem() {
+ 			console='--console=serial'
+ 			zfs_builder_name='zfs_builder-stripped.elf'
+ 		fi
+-		"$SRC"/scripts/run.py -k --kernel-path $zfs_builder_name --arch=$qemu_arch --vnc none -m 512 -c1 -i ${image_path} --block-device-cache writeback \
++		"$SRC"/scripts/run.py -k --kernel-path $zfs_builder_name --arch=$qemu_arch --vnc none -m ${zfs_builder_mem:-4G} -c1 -i ${image_path} --block-device-cache writeback \
+ 			-s -e "${console} --norandom --nomount --noinit --preload-zfs-library /tools/mkfs.so ${device_path}; /zfs.so set compression=off osv"
+ 	fi
+ }
+diff --git a/scripts/upload_manifest.py b/scripts/upload_manifest.py
+index 72809274..2a69c2e9 100755
+--- a/scripts/upload_manifest.py
++++ b/scripts/upload_manifest.py
+@@ -191,7 +191,7 @@ def main():
+         '/zfs.so set compression=off osv; '
+         '/tools/umount.so /zfs/zfs; /tools/umount.so /zfs; '
+         '/zpool.so export osv') % console
+-    osv = subprocess.Popen('cd ../..; scripts/run.py -k --kernel-path build/last/%s --arch=%s --vnc none -m 512 -c1 -i "%s" --block-device-cache writeback -s -e "%s" --forward tcp:127.0.0.1:%s-:10000' % (zfs_builder_name,arch,image_path,zfs_builder_cmd,upload_port), shell=True, stdout=subprocess.PIPE)
++    osv = subprocess.Popen('cd ../..; scripts/run.py -k --kernel-path build/last/%s --arch=%s --vnc none -m 4G -c1 -i "%s" --block-device-cache writeback -s -e "%s" --forward tcp:127.0.0.1:%s-:10000' % (zfs_builder_name,arch,image_path,zfs_builder_cmd,upload_port), shell=True, stdout=subprocess.PIPE)
+ 
+     upload(osv, manifest, depends, upload_port)
+ 

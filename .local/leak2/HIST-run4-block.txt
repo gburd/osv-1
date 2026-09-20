@@ -1,0 +1,13 @@
+FBHIST t=1100 pc=0x100000b426c3 pc2=0 pc3=0 fb_b=3655167472 app_b=3512949632 kern_b=2178240 leak_b=139687568
+FBHIST t=1100 pc=0x1000009cad71 pc2=0 pc3=0 fb_b=3679840 app_b=0 kern_b=0 leak_b=3676352
+FBHIST t=1100 pc=0x1000009cad8f pc2=0 pc3=0 fb_b=239416320 app_b=0 kern_b=0 leak_b=239189600
+FBHIST t=1100 pc=0x4041edbb pc2=0 pc3=0 fb_b=75132 app_b=273 kern_b=0 leak_b=74779
+FBHIST t=1100 pc=0x1000009cb37d pc2=0 pc3=0 fb_b=113360 app_b=0 kern_b=0 leak_b=0
+FBHIST t=1100 pc=0x100000b427df pc2=0 pc3=0 fb_b=388098048 app_b=0 kern_b=0 leak_b=387662848
+FBHIST t=1100 pc=0x100000b425a8 pc2=0 pc3=0 fb_b=1138277376 app_b=334309376 kern_b=909312 leak_b=800610304
+FBHIST t=1100 pc=0x40376d36 pc2=0 pc3=0 fb_b=59136 app_b=58968 kern_b=0 leak_b=168
+FBHIST t=1100 pc=0x40276ea0 pc2=0 pc3=0 fb_b=16880 app_b=16880 kern_b=0 leak_b=0
+FBHIST t=1100 pc=0x40376dae pc2=0 pc3=0 fb_b=1894144 app_b=0 kern_b=0 leak_b=1890560
+FBHIST t=1100 pc=0x403e44f8 pc2=0 pc3=0 fb_b=5475600 app_b=5475600 kern_b=0 leak_b=0
+FBHIST t=1100 pc=0x4043f75c pc2=0 pc3=0 fb_b=73596640 app_b=73592544 kern_b=0 leak_b=0
+FBHIST t=1100 pc=0x403fbdc5 pc2=0 pc3=0 fb_b=13702 app_b=0 kern_b=0 leak_b=13702

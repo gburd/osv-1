@@ -1,0 +1,28 @@
+# LUNA burner account (LOCAL ONLY - never push to any git remote)
+# Authenticated 2026-08-20. Succeeds fred (443433794128) as the active burner.
+AWS_PROFILE=luna
+Account: 187887018457
+IAM user: Luna (arn:aws:iam::187887018457:user/Luna)
+Creds: long-lived AKIA key in ~/.aws/credentials [luna] (took 2 tries to paste the full 40-char secret cleanly)
+Region: us-east-2 (primary, matching fred; no region set in profile - pass --region us-east-2)
+Status at first login: FRESH - 0 instances, 0 keypairs, 0 custom SGs.
+vCPU quota (L-1216C47A): DEFAULT 5 - NEEDS A RAISE for metal work (fred was 192). Request an increase (192 in us-east-2) before dispatching metal-benchmark agents.
+Egress (Starlink Italy / XSTREAM, rotates): current 150.228.93.204 (in Starlink 150.228.0.0/16). Same rotation handling as fred.
+## SETUP STILL NEEDED before metal work (mirror fred's scaffold):
+##  1. vCPU quota increase L-1216C47A -> 192 (us-east-2) [request + wait for approval]
+##  2. keypair osv-ec2 (import ~/.ssh/osv-ec2.pem.pub, or create new)
+##  3. SG osv-bench: SSH from the Starlink/XSTREAM egress prefixes (150.228.0.0/16, 212.105.128.0/17, 216.128.0.0/19, 128.65.200.0/21) + intra-SG. NEVER 0.0.0.0/0.
+##  4. builder AMI (AL2023 x64) + subnet IDs in us-east-2.
+## SECURITY (same as always): NEVER 0.0.0.0/0; never push acct-id/SG/infra/.local to git; clean up all resources.
+
+## 2026-08-20 luna setup done:
+## QUOTA REQUESTS submitted (PENDING): L-1216C47A standard->192 (Id fd9c7e53..), L-DB2E81BA G/VT-GPU->8 (Id 1015dc63..), L-3819A6DF P-GPU->8 (Id 982db18c..). (Standard already shows 32 = partial auto-approve.)
+## IAM USER 'chiuso' created (arn:aws:iam::187887018457:user/chiuso) with INLINE policy 'chiuso-bench' (the 10-statement policy: ec2/ssm/cloudwatch/logs/autoscaling/s3/servicequotas/support/kms + scoped iam self-inspect + bench-*/vmimport role lifecycle + PassRole). Verified: ec2/servicequotas ALLOW, iam:create-user DENY (correct). AK/SK added to ~/.aws/credentials [chiuso], region us-east-2. chiuso = the day-to-day working profile (scoped); luna = the admin/root profile.
+## GPU note: G/VT (g4dn/g5/g6) + P (p3/p4/p5) quotas requested at 8 vCPU each - enough for one mid GPU box; raise later if a bigger GPU instance is needed.
+
+## chiuso SCAFFOLD (2026-08-20, us-east-2, acct 187887018457):
+##  keypair: osv-ec2 (imported from ~/.ssh/osv-ec2.pem)
+##  VPC: vpc-02fbb3d4f59d48b69 (default); subnets 2a subnet-0bacf32f8c7ba9a5b / 2b subnet-010be65dba4df6406 / 2c subnet-05bae4df6cb419e7f
+##  SG osv-bench: sg-06d74f51c58cbd98d (SSH from 150.228.0.0/16 + 212.105.128.0/17 + 216.128.0.0/19 + 128.65.200.0/21 + intra-SG; NO 0.0.0.0/0)
+##  builder AMI (AL2023 x64): ami-06475e8f54266e38e
+##  quota L-1216C47A=192 CLEARED -> m5d.metal launchable. Use AWS_PROFILE=chiuso.

@@ -1,0 +1,13 @@
+=== shapefix-osv-vu32-r3 ===
+Vuser 1:TEST RESULT : System achieved 62832 NOPM from 144632 PostgreSQL TPM
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.061672210693359375,
+ "p95": 0.06717133522033691,
+ "p99": 0.07673954963684082,
+ "max": 0.09349846839904785,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}

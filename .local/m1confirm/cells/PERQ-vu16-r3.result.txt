@@ -1,0 +1,24 @@
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.04503989219665527,
+ "p95": 0.049666404724121094,
+ "p99": 0.05622673034667969,
+ "max": 0.06216597557067871,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}---waithist---
+{
+ "samples": 512,
+ "active_backend_observations": 9680,
+ "histogram": {
+  "LWLock/WALWrite": 9168,
+  "IO/WalSync": 512
+ },
+ "pct": {
+  "LWLock/WALWrite": 94.7,
+  "IO/WalSync": 5.3
+ }
+}---NOPM---
+Vuser 1:TEST RESULT : System achieved 0 NOPM from 322 PostgreSQL TPM

@@ -1,0 +1,26 @@
+Vuser 1:TEST RESULT : System achieved 149905 NOPM from 345434 PostgreSQL TPM
+Vuser 190:Processing 100000000 transactions with output suppressed...
+Vuser 191:RUNNING
+Vuser 191:Initializing xtprof time profiler
+Vuser 191:Assigned 2 WIDs = 190 182 based on VU count 192, Warehouses = 2 out of 200
+Vuser 191:Processing 100000000 transactions with output suppressed...
+Vuser 192:RUNNING
+Vuser 192:Initializing xtprof time profiler
+Vuser 192:Assigned 2 WIDs = 191 183 based on VU count 192, Warehouses = 2 out of 200
+Vuser 192:Processing 100000000 transactions with output suppressed...
+Vuser 193:RUNNING
+Vuser 193:Initializing xtprof time profiler
+Vuser 193:Assigned 2 WIDs = 192 184 based on VU count 192, Warehouses = 2 out of 200
+Vuser 193:Processing 100000000 transactions with output suppressed...
+Vuser 1:Rampup 2 minutes complete ...
+Vuser 1:Rampup complete, Taking start Transaction Count.
+Vuser 1:Timing test period of 5 in minutes
+Vuser 1:1 ...,
+Vuser 1:2 ...,
+Vuser 1:3 ...,
+Vuser 1:4 ...,
+Vuser 1:5 ...,
+Vuser 1:Test complete, Taking end Transaction Count.
+Vuser 1:192 Active Virtual Users configured
+Vuser 1:TEST RESULT : System achieved 149905 NOPM from 345434 PostgreSQL TPM
+Vuser 1:Gathering timing data from Active Virtual Users...

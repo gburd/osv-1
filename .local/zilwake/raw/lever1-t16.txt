@@ -1,0 +1,47 @@
+c[?7l[2J[0mSeaBIOS (version 1.16.2-debian-1.16.2-1)
+
+
+iPXE (http://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+BEFCEE60+BEF0EE60 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from ROM..OSv v0.57.0-529-gd89f8868
+WAKE_PULL ON
+WAKE_LOCAL off
+OSV_BLK_MQ_COMPLETE: virtio-blk completion mode=per-queue num_queues=32
+OSV_BLK_MQ_COMPLETE: virtio-blk completion mode=per-queue num_queues=32
+ZFS: OpenZFS 5000 initialized
+Booted up in 645.74 ms
+Cmdline: /zfs-bench.so syncwrite threads=16 secs=20 reps=3 recsize=8k bs=8192 vdevs=/dev/vblk1
+=== zfs-bench workload=syncwrite impl=unknown pool=bench vdevs=/dev/vblk1 recsize=8k comp=off size_mb=6144 qd=8 bs=8192 secs=20 reps=3 direct=0 ===
+OSV_ZIO_INTR_THREADS: z_null-INTERRUPT taskq count=1
+OSV_ZIO_INTR_THREADS: z_flush-INTERRUPT taskq count=1
+[ZFS] Pool 'bench' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+  $ /zpool.so zpool create -f -o ashift=12 -O compression=off -O atime=off bench /dev/vblk1   -> ret=0
+[ZFS] Pool 'bench' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+  $ /zfs.so zfs create -o recordsize=8k bench/fs   -> ret=0
+  pool: bench
+ state: ONLINE
+config:
+
+	NAME        STATE     READ WRITE CKSUM
+	bench       ONLINE       0     0     0
+	  vblk1     ONLINE       0     0     0
+
+errors: No known data errors
+  $ /zpool.so zpool status bench   -> ret=0
+NAME   PROPERTY  VALUE   SOURCE
+bench  ashift    12      local
+bench  size      832G    -
+bench  free      832G    -
+  $ /zpool.so zpool get ashift,size,free bench   -> ret=0
+OSV_ZIL_WAKE_UNLOCKED: zil wake fan-out mode=unlocked (Lever1)
+RESULT syncwrite_mt_persec median=15931.2 stdev=531.9 op/s reps=[15184.0,15931.2,16213.5]
+RESULT syncwrite_mt_p50 median=843.7 stdev=26.7 us reps=[801.1,843.7,850.2]
+RESULT syncwrite_mt_p99 median=2866.6 stdev=206.2 us reps=[2729.8,2866.6,3135.1]
+RESULT ZILWAKE fanouts=214591 waiters_total=946638 mean_N=4.41 max_N=16 lockhold_us_total=1235165.6 wakeloop_us_total=270669.6 fanout_us_total=8140890.1 mean_lockhold_us=5.756 mean_wakeloop_us=1.261 mean_fanout_us=37.937 wakeloop_frac=0.033 mode=unlocked
+RESULT ZILWAKE_NHIST n1=21919 n2=31128 n3_4=75494 n5_8=67920 n9_16=18130 n17_32=0 n33plus=0
+=== zfs-bench done (syncwrite) ===
+ZFSBENCH_DONE rc=0

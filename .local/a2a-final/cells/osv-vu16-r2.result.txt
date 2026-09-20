@@ -1,0 +1,45 @@
+---NOPM/TPM---
+Vuser 1:TEST RESULT : System achieved 171502 NOPM from 394456 PostgreSQL TPM
+---VUCOMPLETE---
+VUCOMPLETE_AFTER 0 s
+---NEWORD p99 (median across vusers from hdbxtprofile)---
+NEWORD_p99_ms median=6.935 min=6.807 max=7.129 nvu=17
+---wait profile---
+{
+ "samples": 504,
+ "active_backend_observations": 7158,
+ "histogram": {
+  "LWLock/WALWrite": 3033,
+  "NONE/NULL": 2871,
+  "Client/ClientRead": 606,
+  "IO/WalSync": 440,
+  "IO/DataFileRead": 77,
+  "IO/DataFileWrite": 48,
+  "IO/WalWrite": 46,
+  "Timeout/VacuumDelay": 15,
+  "IO/DataFileExtend": 9,
+  "LWLock/WALInsert": 6,
+  "IO/AioIoUringExecution": 2,
+  "IO/AioIoUringSubmit": 2,
+  "LWLock/ProcArray": 1,
+  "LWLock/XactSLRU": 1,
+  "IPC/XactGroupUpdate": 1
+ },
+ "pct": {
+  "LWLock/WALWrite": 42.4,
+  "NONE/NULL": 40.1,
+  "Client/ClientRead": 8.5,
+  "IO/WalSync": 6.1,
+  "IO/DataFileRead": 1.1,
+  "IO/DataFileWrite": 0.7,
+  "IO/WalWrite": 0.6,
+  "Timeout/VacuumDelay": 0.2,
+  "IO/DataFileExtend": 0.1,
+  "LWLock/WALInsert": 0.1,
+  "IO/AioIoUringExecution": 0.0,
+  "IO/AioIoUringSubmit": 0.0,
+  "LWLock/ProcArray": 0.0,
+  "LWLock/XactSLRU": 0.0,
+  "IPC/XactGroupUpdate": 0.0
+ }
+}

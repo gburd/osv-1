@@ -1,0 +1,18 @@
+=== VU64 memory trajectory (qemu RSS = guest physical footprint) + PG backends, worker, -m 64G ===
+  t=6s   qemu_RSS=36.3 GB  backends=37   OOM=0
+  t=12s  qemu_RSS=41.0 GB  backends=50   (+4.7GB)
+  t=18s  qemu_RSS=46.3 GB  backends=63   (+5.3GB)
+  t=24s  qemu_RSS=53.8 GB  backends=74   (+7.5GB; backends now maxed)
+  t=30s  qemu_RSS=61.5 GB  backends=74   (+7.7GB with NO new backends -- growth continues!)
+  t=36s  qemu_RSS=62.6 GB  backends=74
+  t=42s  qemu_RSS=62.6 GB  backends=74
+  t=48s  qemu_RSS=67.2 GB (>64G) backends=<timeout> OOM=1  -> OOM PANIC
+
+TWO PHASES:
+ (1) t=6->24s: RSS 36->54GB as backends fork 37->74 (~0.25GB/backend fork-COW footprint).
+ (2) t=24->30s: backends FLAT at 74, yet RSS climbs 54->61GB (+7.7GB with ZERO new forks).
+     => a WRITE-PATH memory accumulation independent of backend count: dirty buffers / WAL / ZIL
+        dirty-data / ARC growing under sustained write load, NOT reclaimed/synced fast enough.
+Base ~36GB = shared_buffers(16G) + ARC + kernel. ARC=8G cap did NOT prevent OOM, so phase-2 growth is
+NOT the ARC. Prime suspect: ZFS dirty-data not throttled (zfs_dirty_data_max not enforced on OSv) OR
+PG/ZFS write buffers accumulating. Next: per-pool probe (ARC size vs dp_dirty_total vs osv_free_pages).

@@ -1,0 +1,5 @@
+Linux ip-172-31-10-18 6.1.0-53-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.187-1 (2026-09-07) x86_64 GNU/Linux
+---qemu---
+QEMU emulator version 7.2.22 (Debian 1:7.2+dfsg-7+deb12u18+b3)
+---zfs---
+ZFS: OpenZFS 5000 initialized

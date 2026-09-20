@@ -1,0 +1,7 @@
+Owner tag: agent-zilab
+Account: 769093516156 (lava)  Region: us-east-2
+
+METAL HOST (OSv guest):  i-035bbc5224b0eecbf   m5d.metal      (96 vCPU)
+DRIVER (HammerDB):        i-01869557eb2764838   c5.4xlarge     (16 vCPU)
+
+Launched: see file mtime. Terminate both on completion/failure.

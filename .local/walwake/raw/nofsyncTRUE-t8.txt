@@ -1,0 +1,40 @@
+c[?7l[2J[0mSeaBIOS (version 1.16.3-1.fc39)
+
+
+iPXE (https://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+BEFCBCC0+BEF0BCC0 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from ROM..OSv v0.57.0-526-g9d8a2747
+WAKE_PULL ON
+WAKE_LOCAL off
+ZFS: OpenZFS 5000 initialized
+Booted up in 304.05 ms
+Cmdline: /zfs-bench.so syncwrite threads=8 secs=20 reps=3 recsize=8k bs=8192 vdevs=/dev/vblk1 nofsync=1
+=== zfs-bench workload=syncwrite impl=unknown pool=bench vdevs=/dev/vblk1 recsize=8k comp=off size_mb=6144 qd=8 bs=8192 secs=20 reps=3 direct=0 ===
+[ZFS] Pool 'bench' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+  $ /zpool.so zpool create -f -o ashift=12 -O compression=off -O atime=off bench /dev/vblk1   -> ret=0
+[ZFS] Pool 'bench' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+  $ /zfs.so zfs create -o recordsize=8k bench/fs   -> ret=0
+  pool: bench
+ state: ONLINE
+config:
+
+	NAME        STATE     READ WRITE CKSUM
+	bench       ONLINE       0     0     0
+	  vblk1     ONLINE       0     0     0
+
+errors: No known data errors
+  $ /zpool.so zpool status bench   -> ret=0
+NAME   PROPERTY  VALUE   SOURCE
+bench  ashift    12      local
+bench  size      832G    -
+bench  free      832G    -
+  $ /zpool.so zpool get ashift,size,free bench   -> ret=0
+RESULT syncwrite_nofsync_mt_persec median=105144.8 stdev=4305.7 op/s reps=[105024.5,105144.8,112541.6]
+RESULT syncwrite_nofsync_mt_p50 median=74.2 stdev=12.9 us reps=[52.7,74.2,75.7]
+RESULT syncwrite_nofsync_mt_p99 median=283.2 stdev=67.9 us reps=[272.2,283.2,394.9]
+=== zfs-bench done (syncwrite) ===
+ZFSBENCH_DONE rc=0

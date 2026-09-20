@@ -1,0 +1,13 @@
+--- mount | grep tmpfs (guest data must NOT be here) ---
+devtmpfs on /dev type devtmpfs (rw,nosuid,seclabel,size=4096k,nr_inodes=49477841,mode=755)
+tmpfs on /dev/shm type tmpfs (rw,nosuid,nodev,seclabel)
+tmpfs on /run type tmpfs (rw,nosuid,nodev,seclabel,size=79170000k,nr_inodes=819200,mode=755)
+tmpfs on /tmp type tmpfs (rw,nosuid,nodev,seclabel,nr_inodes=1048576)
+tmpfs on /run/user/1000 type tmpfs (rw,nosuid,nodev,relatime,seclabel,size=39584996k,nr_inodes=9896249,mode=700,uid=1000,gid=1000)
+--- backing file ---
+-rw-r--r--. 1 root root 644245094400 Sep 11 14:13 /mnt/nv/pgdata.raw
+Filesystem     Type  Size  Used Avail Use% Mounted on
+/dev/nvme0n1   xfs   838G  6.0G  832G   1% /mnt/nv
+--- device model ---
+NAME      SIZE MODEL                            ROTA
+nvme0n1 838.2G Amazon EC2 NVMe Instance Storage    0

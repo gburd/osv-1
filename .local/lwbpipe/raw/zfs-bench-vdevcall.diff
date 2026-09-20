@@ -1,0 +1,20 @@
+diff --git a/scripts/bench/zfs-bench.c b/scripts/bench/zfs-bench.c
+index 5201c318..881f11fa 100644
+--- a/scripts/bench/zfs-bench.c
++++ b/scripts/bench/zfs-bench.c
+@@ -34,6 +34,7 @@ extern int osv_run_app(const char *app_path, const char *args[], int args_len);
+ extern void zfsdev_init(void);
+ /* zilwake fan-out probe (OpenZFS build only); weak so a BSD-ZFS .so still loads. */
+ extern void zilwake_dump(void) __attribute__((weak));
++extern void vdev_disk_dump(void) __attribute__((weak));
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -615,6 +616,7 @@ int main(int ac, char **av) {
+         report_stat(nm, vp99, o.reps, "us");
+         /* Dump the ZIL wakeup fan-out probe (N, zl_lock hold, wake-loop time). */
+         if (zilwake_dump) zilwake_dump();
++        if (vdev_disk_dump) vdev_disk_dump();
+     } else if (!strcmp(wl, "meta")) {
+         for (unsigned long r=0;r<o.reps;r++) v[r] = wl_meta(ds,&o);
+         report_stat("meta_opspers", v, o.reps, "ops/s");

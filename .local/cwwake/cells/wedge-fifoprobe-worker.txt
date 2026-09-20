@@ -1,0 +1,34 @@
+=== WEDGE-WATCH label=fifoprobe-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (23)
+io_method_in_effect=worker
+  checkpoint 2: 85 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=8.80 462
+t=30s WALWrite=24 active=30 xact_commit_delta=41162 nvme=61.20 1479
+t=45s WALWrite=44 active=65 xact_commit_delta=116970 nvme=52.80 1559
+t=60s WALWrite=34 active=65 xact_commit_delta=160255 nvme=62.40 1977
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 59
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 60
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 54
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 54
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 57
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 57
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 58
+t=225s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=240s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 -30350
+awk: cannot open /proc/46174/stat (No such file or directory)
+t=255s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=285s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=300s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=315s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=330s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=30.00 226
+t=345s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=23.20 222
+t=360s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=24.40 215
+=== WEDGE-WATCH fifoprobe-worker DONE ===

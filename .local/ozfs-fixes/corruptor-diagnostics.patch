@@ -1,0 +1,405 @@
+diff --git a/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c b/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
+index 16344d31..c1eb8001 100644
+--- a/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
++++ b/bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c
+@@ -77,24 +77,291 @@ extern void fork_kernel_heap_push(void);
+ extern void fork_kernel_heap_pop(void);
+ #endif
+ 
++/*
++ * ==========================================================================
++ * ZFS_KMEM_REDZONE  --  WALL-3 diagnostic (residual heap-overflow/UAF hunt)
++ * ==========================================================================
++ * Append a guard word after every SPL/ZFS heap object (kmem_alloc AND every
++ * kmem_cache object) and verify it at free.  An ~8-byte overflow of the
++ * offending allocation is caught AT THE FREE of that object, naming the cache
++ * (or size class) plus the free-site backtrace.  UAF variant: freed objects
++ * are poisoned (0xDE) and the guard re-checked so a later free of a
++ * clobbered-by-neighbour object still trips.
++ *
++ * REMOVE before shipping (kept behind ZFS_KMEM_REDZONE, off by default).
++ */
++#ifndef ZFS_KMEM_REDZONE
++#define ZFS_KMEM_REDZONE 0
++#endif
++
++#if ZFS_KMEM_REDZONE
++#include <stdio.h>
++#define RZ_BYTES   16
++/*
++ * RZ_UAF: poison-on-free + check-on-alloc UAF detector.  DISABLED: OSv's
++ * allocator uses shared per-size-class pools, so a slot we free+poison can be
++ * legitimately reused by any other caller of that size class before it is
++ * handed back to ZFS -- the freed guard survives (it lives past the object)
++ * but the body is validly overwritten, producing false positives.  Only the
++ * tail-overflow redzone (rz_check) is allocator-safe and kept live.
++ */
++#define RZ_UAF     0
++#define RZ_MAGIC0  0xABADCAFEDEADBEEFULL
++#define RZ_MAGIC1  0xFEEDFACE0BADF00DULL
++/* distinct guard stamped at free so alloc can tell a recycled slot from fresh */
++#define RZ_FREED0  0xF7EEF7EEF7EEF7EEULL
++#define RZ_FREED1  0xDEADFEEDDEADFEEDULL
++#define RZ_POISON  0xDE   /* body fill on free; UAF write breaks it */
++
++/* kernel-safe frame walker (arch/x64/backtrace.cc), C++ symbol. */
++extern int backtrace_safe(void **pc, int nr) __asm__("_Z14backtrace_safePPvi");
++
++static void __attribute__((unused))
++rz_bt(const char *what, const char *where, void *buf, size_t size)
++{
++	void *bt[16];
++	int n = backtrace_safe(bt, 16);
++	printf("\n*** ZFS_KMEM_REDZONE %s (%s) ***\n", what, where);
++	printf("    obj=%p size=%zu\n", buf, size);
++	printf("    site backtrace (%d frames):\n", n);
++	for (int i = 0; i < n; i++)
++		printf("      #%d %p\n", i, bt[i]);
++	abort();
++}
++
++static void
++rz_write(void *buf, size_t size)
++{
++	volatile uint64_t *g = (volatile uint64_t *)((char *)buf + size);
++	g[0] = RZ_MAGIC0;
++	g[1] = RZ_MAGIC1;
++}
++
++/* overflow check at free: tail guard must still be the live magic */
++static void
++rz_check(const char *where, void *buf, size_t size)
++{
++	volatile uint64_t *g = (volatile uint64_t *)((char *)buf + size);
++	if (g[0] != RZ_MAGIC0 || g[1] != RZ_MAGIC1) {
++		printf("\n(overflow) tail16 %016lx %016lx expected %016lx %016lx\n",
++		    (unsigned long)g[0], (unsigned long)g[1],
++		    (unsigned long)RZ_MAGIC0, (unsigned long)RZ_MAGIC1);
++		rz_bt("OVERFLOW-AT-FREE", where, buf, size);
++	}
++}
++
++/* poison the body + stamp a FREED guard so alloc can UAF-check it */
++static void __attribute__((unused))
++rz_poison(void *buf, size_t size)
++{
++	memset(buf, RZ_POISON, size);
++	volatile uint64_t *g = (volatile uint64_t *)((char *)buf + size);
++	g[0] = RZ_FREED0;
++	g[1] = RZ_FREED1;
++}
++
++/*
++ * UAF check at alloc: if this slot carries the FREED guard it was poisoned by
++ * a previous free and NOBODY should have touched it since.  A byte that is no
++ * longer RZ_POISON means a stale writer scribbled a freed ZFS buffer -> the
++ * use-after-free we are hunting.  Fresh (never-freed) slots have random guard
++ * bytes and are skipped.
++ *
++ * OSv's small-object pool stores its freelist next-pointer in the first 8
++ * bytes of a freed object (struct free_object), so byte 0..RZ_SKIP-1 is
++ * legitimately overwritten by the allocator and must be skipped.
++ */
++#define RZ_SKIP  16
++static void __attribute__((unused))
++rz_uaf_check(const char *where, void *buf, size_t size)
++{
++	volatile uint64_t *g = (volatile uint64_t *)((char *)buf + size);
++	if (g[0] != RZ_FREED0 || g[1] != RZ_FREED1)
++		return;                 /* not a recycled-by-us slot */
++	if (size <= RZ_SKIP)
++		return;                 /* whole body is allocator freelist space */
++	const unsigned char *p = (const unsigned char *)buf;
++	for (size_t i = RZ_SKIP; i < size; i++) {
++		if (p[i] != RZ_POISON) {
++			printf("\n(UAF) first-dirty off=%zu val=0x%02x; "
++			    "dword@off=0x%016lx\n", i, p[i],
++			    (unsigned long)*(const uint64_t *)
++			    ((const char *)buf + (i & ~7UL)));
++			rz_bt("USE-AFTER-FREE", where, buf, size);
++		}
++	}
++}
++#endif /* ZFS_KMEM_REDZONE */
++
++/*
++ * ==========================================================================
++ * ZFS_KMEM_QUARANTINE  --  WALL-3 UAF hunt (allocator-safe)
++ * ==========================================================================
++ * The residual corruptor is a wild/stale pointer write into freed-and-reused
++ * ZFS heap memory (confirmed victims: a dbuf's db_buf field cleared to NULL, a
++ * pool page_header clobbered, a data block torn).  A plain poison-on-free /
++ * check-on-alloc scheme is defeated because OSv's shared per-size-class pool
++ * hands a freed slot to ANY caller and writes a freelist next-pointer into it.
++ *
++ * Instead: intercept every ZFS free, DO NOT return the object to the allocator
++ * yet.  Fill it with a per-object poison keyed by its address, and stash it in
++ * a bounded ring.  When the ring is full, pop the OLDEST entry, verify its
++ * poison is still intact (a stale writer that scribbled the freed object is
++ * caught here, with the object's cache name + first-dirty offset), then really
++ * free it.  Quarantined objects are never handed back to the allocator while
++ * under watch, so no freelist writes corrupt the poison -- allocator-safe.
++ *
++ * REMOVE before shipping (behind ZFS_KMEM_QUARANTINE, off by default).
++ */
++#ifndef ZFS_KMEM_QUARANTINE
++#define ZFS_KMEM_QUARANTINE 0
++#endif
++
++#if ZFS_KMEM_QUARANTINE
++#include <stdio.h>
++#include <osv/mutex.h>
++
++extern int backtrace_safe(void **pc, int nr) __asm__("_Z14backtrace_safePPvi");
++
++#define QZ_N       16384          /* ring capacity (objects) */
++#define QZ_MAXSCAN 4096           /* cap per-object scan cost */
++#define QZ_POISON(addr, off) \
++	((unsigned char)(0xC5 ^ (((uintptr_t)(addr) >> 4) & 0xff) ^ ((off) & 0xff)))
++
++struct qz_ent {
++	void  *ptr;
++	size_t size;
++	const char *tag;
++};
++static struct qz_ent qz_ring[QZ_N];
++static size_t qz_head;            /* next slot to fill */
++static size_t qz_count;
++static mutex_t qz_lock;
++static unsigned long qz_frees;    /* total frees seen */
++/*
++ * Arm only after import/mkfs quiesces.  ZFS legitimately frees-and-recreates
++ * some long-lived structures during module/pool init (self-referential list /
++ * refcount anchors reinitialized on reused memory), which the quarantine would
++ * flag; the sustained-write corruptor we hunt only appears under the pgbench
++ * write load, millions of frees later.  Gate reporting past that init window.
++ */
++#define QZ_ARM_AFTER 3000000UL
++
++static void
++qz_fill(void *p, size_t size)
++{
++	unsigned char *b = (unsigned char *)p;
++	size_t n = size < QZ_MAXSCAN ? size : QZ_MAXSCAN;
++	for (size_t i = 0; i < n; i++)
++		b[i] = QZ_POISON(p, i);
++}
++
++static void
++qz_verify(struct qz_ent *e)
++{
++	const unsigned char *b = (const unsigned char *)e->ptr;
++	size_t n = e->size < QZ_MAXSCAN ? e->size : QZ_MAXSCAN;
++	for (size_t i = 0; i < n; i++) {
++		unsigned char want = QZ_POISON(e->ptr, i);
++		if (b[i] != want) {
++			void *bt[20];
++			int nb = backtrace_safe(bt, 20);
++			printf("\n*** ZFS_KMEM_QUARANTINE UAF: freed %s obj scribbled "
++			    "***\n", e->tag ? e->tag : "kmem_alloc");
++			printf("    obj=%p size=%zu first-dirty off=%zu "
++			    "got=0x%02x want=0x%02x\n", e->ptr, e->size, i,
++			    b[i], want);
++			printf("    dword@off=0x%016lx  (off&~7=%zu)\n",
++			    (unsigned long)*(const uint64_t *)
++			    ((const char *)e->ptr + (i & ~7UL)), i & ~7UL);
++			/* dump first 8 qwords of the scribbled object */
++			const uint64_t *q = (const uint64_t *)e->ptr;
++			for (int k = 0; k < 8 && (size_t)(k*8) < e->size; k++)
++				printf("    [%d] 0x%016lx\n", k,
++				    (unsigned long)q[k]);
++			printf("    detect backtrace (%d):\n", nb);
++			for (int j = 0; j < nb; j++)
++				printf("      #%d %p\n", j, bt[j]);
++			abort();
++		}
++	}
++}
++
++/* returns 1 if the object was quarantined (caller must NOT free it) */
++static int
++qz_free(void *p, size_t size, const char *tag)
++{
++	if (!p || size == 0)
++		return 0;
++	void *evict = NULL;
++	size_t evict_size = 0;
++	const char *evict_tag = NULL;
++	mutex_lock(&qz_lock);
++	qz_frees++;
++	if (qz_count == QZ_N) {
++		struct qz_ent *old = &qz_ring[qz_head];
++		if (qz_frees > QZ_ARM_AFTER)
++			qz_verify(old);
++		evict = old->ptr; evict_size = old->size; evict_tag = old->tag;
++	}
++	qz_fill(p, size);
++	qz_ring[qz_head].ptr = p;
++	qz_ring[qz_head].size = size;
++	qz_ring[qz_head].tag = tag;
++	qz_head = (qz_head + 1) % QZ_N;
++	if (qz_count < QZ_N)
++		qz_count++;
++	mutex_unlock(&qz_lock);
++	if (evict) {
++		(void) evict_size; (void) evict_tag;
++		free(evict);
++	}
++	return 1;
++}
++#endif /* ZFS_KMEM_QUARANTINE */
++
+ void *
+ zfs_kmem_alloc(size_t size, int kmflags)
+ {
+ #if CONF_fork
+ 	fork_kernel_heap_push();
+ #endif
++#if ZFS_KMEM_REDZONE
++	void *ptr = malloc(size + RZ_BYTES);
++#else
+ 	void *ptr = malloc(size);
++#endif
+ #if CONF_fork
+ 	fork_kernel_heap_pop();
++#endif
++#if ZFS_KMEM_REDZONE && RZ_UAF
++	if (ptr)
++		rz_uaf_check("zfs_kmem_alloc", ptr, size);
+ #endif
+ 	if (ptr && (kmflags & M_ZERO))
+ 		memset(ptr, 0, size);
++#if ZFS_KMEM_REDZONE
++	if (ptr)
++		rz_write(ptr, size);
++#endif
+ 	return ptr;
+ }
+ 
+ void
+ zfs_kmem_free(void *buf, size_t size)
+ {
++#if ZFS_KMEM_REDZONE
++	if (buf) {
++		rz_check("zfs_kmem_free", buf, size);
++#if RZ_UAF
++		rz_poison(buf, size);
++#endif
++	}
++#endif
++#if ZFS_KMEM_QUARANTINE
++	if (qz_free(buf, size, "kmem_alloc"))
++		return;
++#endif
+ 	free(buf);
+ }
+ 
+@@ -146,15 +413,28 @@ kmem_cache_alloc(kmem_cache_t *cache, int flags)
+ 	void *p;
+ #if CONF_fork
+ 	fork_kernel_heap_push();
++#endif
++#if ZFS_KMEM_REDZONE
++	size_t asize = cache->kc_size + RZ_BYTES;
++#else
++	size_t asize = cache->kc_size;
+ #endif
+ 	if (cache->kc_align) {
+-		int error = posix_memalign(&p, cache->kc_align, cache->kc_size);
++		int error = posix_memalign(&p, cache->kc_align, asize);
+ 		if (error)
+ 			p = NULL;
+ 	} else
+-		p = malloc(cache->kc_size);
++		p = malloc(asize);
++#if ZFS_KMEM_REDZONE && RZ_UAF
++	if (p)
++		rz_uaf_check(cache->kc_name, p, cache->kc_size);
++#endif
+ 	if (p && (flags & M_ZERO))
+ 		memset(p, 0, cache->kc_size);
++#if ZFS_KMEM_REDZONE
++	if (p)
++		rz_write(p, cache->kc_size);
++#endif
+ 	if (p != NULL && cache->kc_constructor != NULL)
+ 		kmem_std_constructor(p, cache->kc_size, cache, flags);
+ #if CONF_fork
+@@ -166,8 +446,20 @@ kmem_cache_alloc(kmem_cache_t *cache, int flags)
+ void
+ kmem_cache_free(kmem_cache_t *cache, void *buf)
+ {
++#if ZFS_KMEM_REDZONE
++	if (buf)
++		rz_check(cache->kc_name, buf, cache->kc_size);
++#endif
+ 	if (cache->kc_destructor != NULL)
+ 		kmem_std_destructor(buf, cache->kc_size, cache);
++#if ZFS_KMEM_REDZONE && RZ_UAF
++	if (buf)
++		rz_poison(buf, cache->kc_size);
++#endif
++#if ZFS_KMEM_QUARANTINE
++	if (qz_free(buf, cache->kc_size, cache->kc_name))
++		return;
++#endif
+ 	free(buf);
+ }
+ 
+diff --git a/core/mempool.cc b/core/mempool.cc
+index 802b0138..3b99a03a 100644
+--- a/core/mempool.cc
++++ b/core/mempool.cc
+@@ -37,6 +37,11 @@
+ #include <osv/migration-lock.hh>
+ #include <osv/export.h>
+ #include <osv/kernel_config_fork.h>
++#include <osv/execinfo.hh>
++#include "processor.hh"
++
++/* WALL-3 diagnostic: validate pool page_header at free (see pool::free). */
++#define MEMPOOL_FREE_GUARD 0
+ #if CONF_fork
+ #include <osv/fork_arena.hh>
+ #include <osv/wait_record.hh>
+@@ -367,6 +372,40 @@ void pool::free(void* object)
+         unsigned obj_cpu = header->cpu_id;
+         unsigned cur_cpu = mempool_cpuid();
+ 
++#ifdef MEMPOOL_FREE_GUARD
++        /*
++         * WALL-3 diagnostic: the residual corruptor clobbers a pool page_header
++         * (owner/cpu_id) via a wild write, GPF'ing later in free_different_cpu.
++         * Validate the header at the moment of free and dump the victim page +
++         * a backtrace so the writer's context is captured.  debug_ll is the
++         * lock-free console writer (safe under preempt_lock); we halt via a
++         * direct hlt loop rather than abort() (which takes locks and would
++         * deadlock while preempt_lock is held).  (Reverted before shipping.)
++         */
++        if (obj_cpu >= sched::cpus.size() ||
++            _size < sizeof(free_object) || _size > page_size) {
++            void* bt[20];
++            int nb = ::backtrace_safe(bt, 20);
++            uint64_t* pg = reinterpret_cast<uint64_t*>(header);
++            uint64_t* po = reinterpret_cast<uint64_t*>(obj);
++            debug_ll("\n*** MEMPOOL_FREE_GUARD: corrupt page_header ***\n");
++            debug_ll("  pool(this)=%p _size=%u obj=%p header=%p ncpu=%u\n",
++                     this, _size, obj, header, (unsigned)sched::cpus.size());
++            debug_ll("  header->owner=%p cpu_id=%u nalloc=%u local_free=%p\n",
++                     header->owner, obj_cpu, header->nalloc, header->local_free);
++            debug_ll("  header[0..5]: %016lx %016lx %016lx %016lx %016lx %016lx\n",
++                     pg[0], pg[1], pg[2], pg[3], pg[4], pg[5]);
++            debug_ll("  obj[0..3]:    %016lx %016lx %016lx %016lx\n",
++                     po[0], po[1], po[2], po[3]);
++            debug_ll("  free backtrace (%d):\n", nb);
++            for (int i = 0; i < nb; i++)
++                debug_ll("    #%d %p\n", i, bt[i]);
++            debug_ll("*** MEMPOOL_FREE_GUARD: halting ***\n");
++            while (true)
++                processor::cli_hlt();
++        }
++#endif
++
+         if (obj_cpu == cur_cpu) {
+             // free from the same CPU this object has been allocated on.
+             free_same_cpu(obj, obj_cpu);

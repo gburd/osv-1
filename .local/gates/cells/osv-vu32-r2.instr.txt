@@ -1,0 +1,52 @@
+nvme1n1 %util: median=74.08 max=92.52 n=41
+nvme1n1 w_await: median=0.86 max=1.15 n=41
+nvme1n1 aqu-sz: median=6.64 max=9.16 n=41
+nvme1n1 wkB/s: median=735295.60 max=809265.20 n=41
+nvme1n1 r/s: median=1066.30 max=6977.10 n=41
+nvme1n1 w/s: median=6824.30 max=7445.40 n=41
+---qemu cpu ALL samples---
+qemu_cpu_pct_of_one_core=1344  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2166  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2176  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2188  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2225  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2225  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2236  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2230  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2278  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2301  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2320  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2313  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2327  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2307  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2316  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2322  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2254  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2219  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2184  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2194  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2190  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=1996  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2303  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2315  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2324  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2329  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2358  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2385  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2352  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2372  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2413  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2322  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2355  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2356  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2350  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2383  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2307  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2282  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2311  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2288  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2269  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=2278  (ceiling 3200 for 32 vCPU)
+---qemu cpu DISCRIMINATOR---
+during_run_median_pct_of_one_core=2305 n_hi=42 min_hi=1344 max_hi=2413 (ceiling 3200 = 32 vCPU)
+---mem/leak check---

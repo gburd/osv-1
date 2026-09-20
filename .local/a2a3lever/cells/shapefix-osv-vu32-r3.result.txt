@@ -1,0 +1,44 @@
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.061672210693359375,
+ "p95": 0.06717133522033691,
+ "p99": 0.07673954963684082,
+ "max": 0.09349846839904785,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}---waithist---
+{
+ "samples": 446,
+ "active_backend_observations": 14074,
+ "histogram": {
+  "NONE/NULL": 12137,
+  "LWLock/WALWrite": 1136,
+  "IO/WalSync": 363,
+  "Client/ClientRead": 277,
+  "IO/DataFileRead": 68,
+  "IO/WalWrite": 46,
+  "Lock/transactionid": 28,
+  "Timeout/VacuumDelay": 8,
+  "IO/DataFileExtend": 6,
+  "LWLock/LockManager": 3,
+  "LWLock/XactSLRU": 1,
+  "Lock/extend": 1
+ },
+ "pct": {
+  "NONE/NULL": 86.2,
+  "LWLock/WALWrite": 8.1,
+  "IO/WalSync": 2.6,
+  "Client/ClientRead": 2.0,
+  "IO/DataFileRead": 0.5,
+  "IO/WalWrite": 0.3,
+  "Lock/transactionid": 0.2,
+  "Timeout/VacuumDelay": 0.1,
+  "IO/DataFileExtend": 0.0,
+  "LWLock/LockManager": 0.0,
+  "LWLock/XactSLRU": 0.0,
+  "Lock/extend": 0.0
+ }
+}---NOPM---
+Vuser 1:TEST RESULT : System achieved 62832 NOPM from 144632 PostgreSQL TPM

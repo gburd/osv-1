@@ -1,0 +1,12 @@
+qemu_cpu_pct_of_one_core=767  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=750  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=749  (ceiling 3200 for 32 vCPU)
+%util: median=26.50 min=18.10 max=40.20 n=29
+w_await: median=0.15 min=0.11 max=0.22 n=29
+aqu-sz: median=0.66 min=0.49 max=0.80 n=29
+wkB/s: median=189499.80 min=146136.90 max=265834.95 n=29
+qemu_cpu_pct_of_one_core=741  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=764  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=767  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=750  (ceiling 3200 for 32 vCPU)
+qemu_cpu_pct_of_one_core=749  (ceiling 3200 for 32 vCPU)

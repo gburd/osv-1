@@ -1,0 +1,40 @@
+=== NO-HALT A/B: OSV_IDLE_SPIN=2000000000, VU64 worker ===
+t=15s WALWrite=26 active=34 xact_commit_delta=? nvme=78.80 3269
+t=30s WALWrite=34 active=65 xact_commit_delta=205938 nvme=55.60 3274
+t=45s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=60s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=225s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=240s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=255s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=285s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=300s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=315s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=330s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=345s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=360s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3205
+t=375s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 3207
+--- DECISIVE VERDICT: wake-ENQUEUE-DROP, not halt-entry-race ---
+OSV_IDLE_SPIN=2000000000 (vCPUs NEVER deep-halt; spin-poll incoming_wakeups forever). qemu pinned at
+~3205% (32 vCPUs * ~100%, all spinning) for the ENTIRE run, healthy ~30s then WEDGE at t=45s: nvme=0,
+PG TIMEOUT, never recovers t=45->375s while all 32 vCPUs keep spinning.
+=> The wedge PERSISTS even when no vCPU ever halts. The steer's clean split: wedge-persists-no-halt =>
+   the woken thread NEVER REACHES incoming_wakeups/runqueue AT ALL. It is a WAKE-ENQUEUE-DROP, NOT the
+   halt<->wake path (halt-entry-race REFUTED: spinning vCPUs would catch any enqueued wake, but there is
+   nothing to catch). NOT the LAPIC-timer-lost-on-halt theory either.
+   Combined with the smoking gun (zcw_done=1, waiter's wr.woken()==false => wr->wake()'s action
+   [t.store(nullptr)] never ran => wr->wake() was NEVER CALLED for the stuck waiter): condvar::wake_all
+   never processed that waiter's wr => the wr was NOT on _waiters_fifo when wake_all ran. A condvar fifo
+   enqueue-vs-scan race (or CONF_fork cross-AS coherence of _waiters_fifo), BELOW the ZIL layer.
+GUARDRAIL (holds): Linux scales to VU64 on the SAME host/qemu/NVMe -> the host CAN wake/schedule fine;
+this is OSv-specific (OSv drops the wake enqueue under VU64 load), NOT a qemu -M pc / nested-KVM defect.

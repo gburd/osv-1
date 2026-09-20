@@ -1,0 +1,69 @@
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.042981863021850586,
+ "p95": 0.04988741874694824,
+ "p99": 0.08294963836669922,
+ "max": 0.4431648254394531,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}---waithist---
+{
+ "samples": 511,
+ "active_backend_observations": 14841,
+ "histogram": {
+  "LWLock/WALWrite": 8732,
+  "NONE/NULL": 3367,
+  "Client/ClientRead": 1295,
+  "IO/WalSync": 434,
+  "IO/DataFileWrite": 429,
+  "IO/DataFileRead": 389,
+  "Lock/transactionid": 40,
+  "Timeout/VacuumDelay": 27,
+  "IO/WalWrite": 25,
+  "LWLock/WALInsert": 23,
+  "Timeout/VacuumTruncate": 18,
+  "IO/WalInitSync": 17,
+  "LWLock/XidGen": 10,
+  "IO/WalInitWrite": 8,
+  "IO/DataFileExtend": 7,
+  "LWLock/ProcArray": 5,
+  "IPC/XactGroupUpdate": 3,
+  "LWLock/XactSLRU": 3,
+  "IPC/ProcarrayGroupUpdate": 3,
+  "LWLock/WALBufMapping": 2,
+  "LWLock/BufferContent": 1,
+  "LWLock/BufferMapping": 1,
+  "Timeout/SpinDelay": 1,
+  "LWLock/LockManager": 1
+ },
+ "pct": {
+  "LWLock/WALWrite": 58.8,
+  "NONE/NULL": 22.7,
+  "Client/ClientRead": 8.7,
+  "IO/WalSync": 2.9,
+  "IO/DataFileWrite": 2.9,
+  "IO/DataFileRead": 2.6,
+  "Lock/transactionid": 0.3,
+  "Timeout/VacuumDelay": 0.2,
+  "IO/WalWrite": 0.2,
+  "LWLock/WALInsert": 0.2,
+  "Timeout/VacuumTruncate": 0.1,
+  "IO/WalInitSync": 0.1,
+  "LWLock/XidGen": 0.1,
+  "IO/WalInitWrite": 0.1,
+  "IO/DataFileExtend": 0.0,
+  "LWLock/ProcArray": 0.0,
+  "IPC/XactGroupUpdate": 0.0,
+  "LWLock/XactSLRU": 0.0,
+  "IPC/ProcarrayGroupUpdate": 0.0,
+  "LWLock/WALBufMapping": 0.0,
+  "LWLock/BufferContent": 0.0,
+  "LWLock/BufferMapping": 0.0,
+  "Timeout/SpinDelay": 0.0,
+  "LWLock/LockManager": 0.0
+ }
+}---NOPM---
+Vuser 1:TEST RESULT : System achieved 321412 NOPM from 740438 PostgreSQL TPM
+VUCOMPLETE_AFTER 0 s

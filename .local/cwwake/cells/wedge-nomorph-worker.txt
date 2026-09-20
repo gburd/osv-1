@@ -1,0 +1,37 @@
+=== WEDGE-WATCH label=nomorph-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (53)
+io_method_in_effect=worker
+  checkpoint 2: 78 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=10.30 678
+t=30s WALWrite=36 active=66 xact_commit_delta=41827 nvme=24.00 844
+t=45s WALWrite=64 active=120 xact_commit_delta=19117 nvme=36.40 740
+t=60s WALWrite=42 active=93 xact_commit_delta=40607 nvme=50.40 959
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 54
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+t=225s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 -25729
+awk: cannot open /proc/42960/stat (No such file or directory)
+t=240s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=255s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+awk: cannot open /proc/43542/stat (No such file or directory)
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+awk: cannot open /proc/43567/stat (No such file or directory)
+t=285s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=300s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=315s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=330s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+t=345s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+awk: cannot open /proc/44211/stat (No such file or directory)
+t=360s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 0
+=== WEDGE-WATCH nomorph-worker DONE ===

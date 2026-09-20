@@ -1,0 +1,46 @@
+=== DECISIVE A/B: shared_buffers 16G -> 1G. VERDICT: shared_buffers COW footprint IS the OOM driver ===
+
+sb=16G (VU64): free_MB collapses 64GB -> 0.5GB monotonically -> OOM PANIC at ~t45-48s.
+sb=1G  (VU64): NO OOM. Survives healthy through t=192s+ at FULL VU64 load (backends=74):
+  t=8s  RSS=46.8GB free=30.3GB backends=44
+  t=24s RSS=48.4GB free=29.0GB backends=74 (maxed)
+  t=88s RSS=64.4GB free=17.7GB backends=74   (footprint grows...)
+  t=96s RSS=65.6GB free=34.7GB              (...but reclaim RECOVERS free memory)
+  t=104-192s: free oscillates 22-43GB, RSS plateau ~65GB, backends 74, NO OOM -> HEALTHY STEADY STATE.
+
+=> Dropping shared_buffers 16G->1G (a ~15GB delta) moves the guest from OOM to healthy at the same VU64
+   load / same 74 backends. The shared_buffers size is the dominant OOM driver. With sb=1G the reclaimer
+   keeps free memory oscillating in a healthy band; with sb=16G the per-backend COW footprint of the
+   16GB shared_buffers region + base pushes total past 64GB before reclaim can catch up -> OOM.
+
+VERDICT = (a) BUG-leaning: the MAP_SHARED|MAP_ANONYMOUS shared_buffers region is contributing a
+PER-BACKEND COW footprint proportional to its size. If it were genuinely shared across all fork children
+(as MAP_SHARED requires), shared_buffers size would NOT scale the per-backend footprint and sb=16G vs
+sb=1G would not swing OOM-vs-healthy so sharply. The swing tracking the shared_buffers delta indicates
+shared_buffers pages are being COW-duplicated per backend rather than staying shared.
+Prior art: commit 3364d5c68 "share writable MAP_SHARED 2MB large pages verbatim across fork" is exactly
+this area -> likely a GAP (does not cover PG's anon-MAP_SHARED shared_buffers, or a later fault path
+re-COWs them). NEXT: direct page-table check (postmaster vs backend physical mapping of a shbuf page)
+to confirm duplicated-vs-shared, then the fix = keep anon-MAP_SHARED genuinely shared across fork.
+
+--- AIRTIGHT FINAL: sb=1G VU64 stayed HEALTHY (0 OOM, free floor 16.9GB, stable) for the full run ---
+Reconciliation that settles bug-vs-cost:
+- Per-backend footprint (~600-800MB) is present at BOTH sb=16G AND sb=1G (RSS hit 65GB even at sb=1G).
+  => that footprint is NOT shared_buffers; it is genuine per-backend PRIVATE working memory.
+- shared_buffers acts as a FIXED BASE (one shared copy: 16GB vs 1GB), NOT a per-backend multiplier.
+  => OSv's shared_anon_registry (core/mmu.cc:1844, "fork MAP_SHARED coherence" for PG shared_buffers)
+     is WORKING: shared_buffers is one shared copy across all 74 backends, not COW-duplicated.
+- The OOM = base(shbuf 16G + ARC 2G + kernel) + 74 x per-backend-private. At sb=16G that sum > 64G -> OOM.
+  At sb=1G the 15G smaller base leaves reclaim headroom -> free floor 17G, healthy.
+
+VERDICT = (b) COST, NOT a fork MAP_SHARED bug. The VU64 wedge is memory EXHAUSTION from the SUM of a
+large shared_buffers base + the legitimate per-backend private footprint of 74 concurrent PG backends,
+exceeding the 64GB guest. shared_buffers is correctly shared across fork. NOT a leak, NOT a lost wakeup,
+NOT a fork COW-duplication bug.
+OSv-SPECIFIC ANGLE: OSv's per-backend private footprint (~600-800MB) may be higher than Linux's (fork
+COW page-table clone + per-AS private anon), which is why Linux at the same 64G/sb=16G/VU64 scales while
+OSv OOMs. That per-backend fork footprint is the real OSv scaling cost to reduce (harder fix), but it is
+a COST characteristic, not a discrete bug.
+FIX/MITIGATION (sizing): size guest RAM >= base + N_backends x per-backend + reclaim headroom; or cap
+max_connections/shared_buffers to fit; or reduce OSv's per-backend fork footprint. sb=1G proves the
+workload runs VU64 to completion when sized correctly.

@@ -1,0 +1,17 @@
+MAXBK2 step=48 max=600 settle=20s burst=30 rows=20000
+t=1789848389 target=48 live=49 OK
+t=1789848409 target=96 live=97 OK
+t=1789848429 target=144 live=145 OK
+t=1789848449 target=192 live=193 OK
+t=1789848470 target=240 live=241 OK
+t=1789848490 target=288 live=289 OK
+t=1789848510 target=336 live=337 OK
+t=1789848530 target=384 live=385 OK
+t=1789848550 target=432 live=433 OK
+t=1789848570 target=480 live=481 OK
+t=1789848590 target=528 live=529 OK
+t=1789848611 target=576 live=576 OK
+NOT_ANSWERING_AT=624
+MAXBK2_STOP reached=624
+MAXBK2_RESULT reached=624
+MAXBK2_DONE

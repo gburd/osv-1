@@ -1,0 +1,56 @@
+{
+ "n": 300,
+ "errors": 0,
+ "median": 0.03287076950073242,
+ "p95": 0.034835100173950195,
+ "p99": 0.05943584442138672,
+ "max": 0.15877556800842285,
+ "ge1s": 0,
+ "ge5s": 0,
+ "ge10s": 0
+}---waithist---
+{
+ "samples": 520,
+ "active_backend_observations": 7213,
+ "histogram": {
+  "NONE/NULL": 3230,
+  "LWLock/WALWrite": 2431,
+  "IO/WalSync": 438,
+  "Client/ClientRead": 409,
+  "Timeout/VacuumDelay": 310,
+  "IO/DataFileRead": 229,
+  "IO/WalWrite": 56,
+  "LWLock/WALInsert": 38,
+  "IO/DataFileWrite": 37,
+  "Timeout/SpinDelay": 12,
+  "IO/DataFileExtend": 6,
+  "Lock/transactionid": 4,
+  "IO/DataFilePrefetch": 4,
+  "LWLock/ProcArray": 3,
+  "LWLock/BufferMapping": 3,
+  "LWLock/BufferContent": 1,
+  "LWLock/XactSLRU": 1,
+  "IPC/ProcarrayGroupUpdate": 1
+ },
+ "pct": {
+  "NONE/NULL": 44.8,
+  "LWLock/WALWrite": 33.7,
+  "IO/WalSync": 6.1,
+  "Client/ClientRead": 5.7,
+  "Timeout/VacuumDelay": 4.3,
+  "IO/DataFileRead": 3.2,
+  "IO/WalWrite": 0.8,
+  "LWLock/WALInsert": 0.5,
+  "IO/DataFileWrite": 0.5,
+  "Timeout/SpinDelay": 0.2,
+  "IO/DataFileExtend": 0.1,
+  "Lock/transactionid": 0.1,
+  "IO/DataFilePrefetch": 0.1,
+  "LWLock/ProcArray": 0.0,
+  "LWLock/BufferMapping": 0.0,
+  "LWLock/BufferContent": 0.0,
+  "LWLock/XactSLRU": 0.0,
+  "IPC/ProcarrayGroupUpdate": 0.0
+ }
+}---NOPM---
+Vuser 1:TEST RESULT : System achieved 268921 NOPM from 618558 PostgreSQL TPM

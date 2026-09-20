@@ -1,0 +1,32 @@
+=== LINUX WEDGE/SCALE label=linux-vu64 vu=64 (same ZFS/io_uring/HW as OSv) ===
+io_method_in_effect=io_uring
+  checkpoint 2: 50 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, WALWrite_waiters, active, xact_commit_delta/15s, nvme_util%, qemu_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=10.80 586
+t=30s WALWrite=18 active=31 xact_commit_delta=44212 nvme=44.80 1963
+t=45s WALWrite=58 active=65 xact_commit_delta=141912 nvme=62.00 2321
+t=60s WALWrite=3 active=64 xact_commit_delta=260376 nvme=60.40 2631
+t=75s WALWrite=26 active=55 xact_commit_delta=323592 nvme=23.60 2670
+t=90s WALWrite=41 active=61 xact_commit_delta=243504 nvme=15.60 2698
+t=105s WALWrite=41 active=61 xact_commit_delta=251864 nvme=20.00 2685
+t=120s WALWrite=31 active=58 xact_commit_delta=247343 nvme=25.60 2701
+t=135s WALWrite=62 active=65 xact_commit_delta=286345 nvme=54.40 2358
+t=150s WALWrite=12 active=65 xact_commit_delta=324917 nvme=28.00 2316
+t=165s WALWrite=41 active=65 xact_commit_delta=368508 nvme=37.60 2600
+t=180s WALWrite=28 active=65 xact_commit_delta=370127 nvme=39.20 2398
+t=195s WALWrite=36 active=58 xact_commit_delta=317709 nvme=52.40 2457
+t=210s WALWrite=60 active=66 xact_commit_delta=306312 nvme=41.60 2337
+t=225s WALWrite=37 active=57 xact_commit_delta=292734 nvme=55.20 2322
+t=240s WALWrite=27 active=36 xact_commit_delta=278919 nvme=46.34 2375
+t=255s WALWrite=31 active=51 xact_commit_delta=284440 nvme=23.20 2344
+t=270s WALWrite=24 active=60 xact_commit_delta=299658 nvme=71.60 2323
+t=285s WALWrite=62 active=64 xact_commit_delta=280732 nvme=22.40 2248
+t=300s WALWrite=29 active=58 xact_commit_delta=291331 nvme=26.00 2429
+t=315s WALWrite=61 active=65 xact_commit_delta=315158 nvme=60.00 2363
+t=330s WALWrite=32 active=55 xact_commit_delta=302422 nvme=16.40 2357
+t=345s WALWrite=62 active=66 xact_commit_delta=314683 nvme=43.20 2271
+t=360s WALWrite=20 active=50 xact_commit_delta=279607 nvme=15.20 2197
+--- final TEST RESULT ---
+=== LINUX WEDGE/SCALE linux-vu64 DONE ===

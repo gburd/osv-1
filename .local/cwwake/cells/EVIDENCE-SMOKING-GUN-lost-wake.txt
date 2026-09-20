@@ -1,0 +1,39 @@
+=== WEDGE-WATCH label=wedgeprobe-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (32)
+io_method_in_effect=worker
+  checkpoint 2: 61 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=5.60 490
+t=30s WALWrite=14 active=33 xact_commit_delta=34325 nvme=71.20 1657
+t=45s WALWrite=54 active=65 xact_commit_delta=104364 nvme=48.80 1883
+t=60s WALWrite=24 active=53 xact_commit_delta=154127 nvme=68.00 1413
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 52
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 54
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=225s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=240s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 57
+t=255s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=270s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 54
+BOOT CMDLINE: --rootfs=rofs --env=OSV_ZFS_ARC_MAX=34359738368 --env=OSV_BLK_MQ_COMPLETE=1 --env=OSV_IDLE_SPIN_ADAPTIVE=1 --env=OSV_ZIL_WEDGE_PROBE=1 --ip=eth0,192.168.100.2,255.255.255.0 --defaultgw=192.168.100.1 --nameserver=192.168.100.1 /zpool.so import -f -N pgdata ; /zfs.so mount pgdata ; /zpool.so get ashift pgdata ; /usr/bin/postgres -D /data/pg -c listen_addresses=* -c max_connections=400 -c shared_buffers=16GB -c effective_cache_size=32GB -c max_wal_size=64GB -c min_wal_size=2GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c log_checkpoints=on -c fsync=on -c synchronous_commit=on -c autovacuum=on -c io_method=worker -c shared_preload_libraries=plpgsql -c max_files_per_process=200
+OSV_ZIL_WEDGE_PROBE: zil wedge smoking-gun probe=ON
+ZWEDGE LOST-WAKE slot=0 zcw=0x60085471e100 blocked_ms=418.3 zcw_done=1 (completion RAN, waiter STILL ASLEEP = lost wake)
+--- PROOF ---
+ZWEDGE LOST-WAKE slot=0 zcw=0x60085471e100 blocked_ms=418.3 zcw_done=1
+A backend blocked in the UNTIMED cv_wait(&zcw->zcw_cv). Its zcw_done==1 => zil_commit_waiter_done
+ALREADY ran (set zcw_done=TRUE, called cv_broadcast). Yet 418ms later the waiter is STILL ASLEEP.
+The completion RAN + the waiter is STILL ASLEEP = LOST OSv condvar wakeup. NOT an upstream ZFS hang
+(that would show zcw_done=0). Only ONE line because post-wedge zil_commit_waiter_done stops being
+called (all commits deadlocked), so the watchdog stops scanning.
+Combined with FLUSH_INLINE=1 STILL WEDGES + WAKE_IPI_ALWAYS=1 STILL WEDGES: the wake is lost in the
+cv_broadcast->condvar_wake_all->mutex::send_lock->unlock->other->wake() WAIT-MORPHING handoff on
+zcw_lock, or thread::wake_impl's waiting->waking CAS - BEFORE send_wakeup_ipi.

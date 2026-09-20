@@ -1,0 +1,52 @@
+c[?7l[2J[0mSeaBIOS (version 1.16.2-debian-1.16.2-1)
+
+
+iPXE (http://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+BEFCEE60+BEF0EE60 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from ROM..OSv v0.57.0-534-g7e297fbc
+WAKE_PULL ON
+WAKE_LOCAL off
+OSV_BLK_MQ_COMPLETE: virtio-blk completion mode=per-queue num_queues=32
+OSV_BLK_MQ_COMPLETE: virtio-blk completion mode=per-queue num_queues=4
+ZFS: OpenZFS 5000 initialized
+Booted up in 541.49 ms
+Cmdline: /zfs-bench.so syncwrite threads=32 bs=4096 secs=25 reps=1 recsize=8k comp=off pool=bench vdevs=/dev/vblk1
+=== zfs-bench workload=syncwrite impl=unknown pool=bench vdevs=/dev/vblk1 recsize=8k comp=off size_mb=6144 qd=8 bs=4096 secs=25 reps=1 direct=0 ===
+OSV_ZIO_INTR_THREADS: z_null-INTERRUPT taskq count=1
+OSV_ZIO_INTR_THREADS: z_flush-INTERRUPT taskq count=1
+[ZFS] Pool 'bench' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+  $ /zpool.so zpool create -f -o ashift=12 -O compression=off -O atime=off bench /dev/vblk1   -> ret=0
+[ZFS] Pool 'bench' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+  $ /zfs.so zfs create -o recordsize=8k bench/fs   -> ret=0
+  pool: bench
+ state: ONLINE
+config:
+
+	NAME        STATE     READ WRITE CKSUM
+	bench       ONLINE       0     0     0
+	  vblk1     ONLINE       0     0     0
+
+errors: No known data errors
+  $ /zpool.so zpool status bench   -> ret=0
+NAME   PROPERTY  VALUE   SOURCE
+bench  ashift    12      local
+bench  size      832G    -
+bench  free      832G    -
+  $ /zpool.so zpool get ashift,size,free bench   -> ret=0
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=30 (0=default 10)
+OSV_ZIL_WAKE_UNLOCKED: zil wake fan-out mode=under-zl_lock (baseline)
+RESULT syncwrite_mt_persec median=34606.5 stdev=0.0 op/s reps=[34606.5]
+RESULT syncwrite_mt_p50 median=763.4 stdev=0.0 us reps=[763.4]
+RESULT syncwrite_mt_p99 median=2740.7 stdev=0.0 us reps=[2740.7]
+RESULT ZILWAKE fanouts=69759 waiters_total=865153 mean_N=12.40 max_N=32 lockhold_us_total=4094590.3 wakeloop_us_total=3520923.6 fanout_us_total=4115666.4 mean_lockhold_us=58.696 mean_wakeloop_us=50.473 mean_fanout_us=58.998 wakeloop_frac=0.855 mode=baseline
+RESULT ZILWAKE_NHIST n1=659 n2=950 n3_4=4311 n5_8=14861 n9_16=31989 n17_32=16989 n33plus=0
+RESULT ZILDEPTH inflight_now=0 inflight_max=7 issues=69832 depth_integral_ns=27098825594 issue_gap_us_total=25003250.0 issue_gap_us_max=488082.2 mean_issue_gap_us=358.049
+RESULT ZILISSUER zp_open=173161 zp_prevnf=60892 zp_decay=1438 lwblat_us_mean=386.024 lwblat_us_max=115628.314 lwblat_us_last=350.786 sleep_us_mean=119.293 sleep_us_max=30413.267 waiter_timedout=766926 sleeps=865206
+RESULT ZILWAIT wait_us_mean=143.664 wait_us_max=488950.741 waits=767265 wait_timedout_us_mean=142.340 timedout_waits=766926
+RESULT ZILISSUEPATH issue_us_mean=13.065 issue_us_max=3650.289 issues=69832 alloc_us_mean=5.450 alloc_us_max=1543.533 dmutx_us_mean=8.348
+RESULT ZILFLUSHLAT wrlat_us_mean=289.605 wrlat_us_max=488990.606 wr_n=69832 whole_lwblat_us_mean=386.024 est_flush_us_mean=96.420
+=== zfs-bench done (syncwrite) ===

@@ -1,0 +1,26 @@
+---NOPM/TPM---
+---VUCOMPLETE---
+VUCOMPLETE_AFTER 360 s
+---NEWORD p99 (median across vusers from hdbxtprofile)---
+NEWORD_p99_ms NONE
+---wait profile---
+{
+ "samples": 494,
+ "active_backend_observations": 33024,
+ "histogram": {
+  "IO/DataFileRead": 23712,
+  "NONE/NULL": 6917,
+  "Lock/extend": 988,
+  "IO/AioIoUringExecution": 912,
+  "Lock/transactionid": 494,
+  "Timeout/VacuumDelay": 1
+ },
+ "pct": {
+  "IO/DataFileRead": 71.8,
+  "NONE/NULL": 20.9,
+  "Lock/extend": 3.0,
+  "IO/AioIoUringExecution": 2.8,
+  "Lock/transactionid": 1.5,
+  "Timeout/VacuumDelay": 0.0
+ }
+}

@@ -1,0 +1,33 @@
+=== WEDGE-WATCH label=nomorph2-worker ADAPT=1 io_method=worker ===
+BOOTED
+PG up (32)
+io_method_in_effect=worker
+  checkpoint 2: 107 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, walwrite_waiters, active, xact_committed_delta_since_prev, nvme_util%, qemu_5s_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=10.40 678
+t=30s WALWrite=29 active=39 xact_commit_delta=42262 nvme=24.40 840
+t=45s WALWrite=79 active=117 xact_commit_delta=18681 nvme=35.20 742
+t=60s WALWrite=56 active=130 xact_commit_delta=40562 nvme=50.40 959
+t=75s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 53
+t=90s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 52
+t=105s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 55
+t=120s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 51
+t=135s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 54
+t=150s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 50
+t=165s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+t=180s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+t=195s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 52
+t=210s WALWrite=TIMEOUT active=TIMEOUT xact_commit_delta=? nvme=0.00 49
+--- VERDICT ---
+OSV_CONDVAR_NO_MORPH=1 (condvar::wake_one/all wake the waiter DIRECTLY via wr->wake(), bypassing the
+wait-morphing send_lock/RHO handoff on zcw_lock; waiter re-locks normally on wake) STILL WEDGES
+identically (cliff t=75s, nvme=0, PG TIMEOUT, never recovers).
+=> The lost wake is NOT in the morph/RHO handoff (candidate 1 REFUTED). Per the clean split, it is the
+   raw thread::wake_impl waiting->waking CAS (candidate 2): wr->wake() -> thread::wake_with_from_mutex
+   -> wake_impl. Either the CAS finds the thread not in `waiting` (drops the wake), or the
+   incoming_wakeups enqueue/mask/IPI loses it, or st->_cpu is stale. Instrument wake_impl next.
+
+CUMULATIVE REFUTATIONS (all still wedge): FLUSH_INLINE=1 (taskq hop), WAKE_IPI_ALWAYS=1 (send IPI
+suppression), CONDVAR_NO_MORPH=1 (morph/RHO). All roads -> thread::wake_impl (the raw cross-vCPU wake).

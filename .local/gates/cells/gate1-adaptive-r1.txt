@@ -1,0 +1,3 @@
+QPID=62207
+CLK_TCK=100
+GATE1_RESULT arm=adaptive window_s=120.00 delta_jiffies=2452 cpu_core_seconds=24.520 pct_of_one_core=20.43

@@ -1,0 +1,11 @@
+Host wakelat
+    HostName 18.227.10.136
+    User admin
+    IdentityFile ~/.ssh/osv-lava
+    IdentitiesOnly yes
+    IdentityAgent none
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ConnectTimeout 25
+    ServerAliveInterval 15
+    ServerAliveCountMax 4

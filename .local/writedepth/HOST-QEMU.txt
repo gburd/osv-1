@@ -1,0 +1,16 @@
+=== HOST ===
+Linux ip-172-31-22-151 6.1.0-53-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.187-1 (2026-09-07) x86_64 GNU/Linux
+12.15
+
+=== QEMU ===
+QEMU emulator version 7.2.22 (Debian 1:7.2+dfsg-7+deb12u18+b3)
+
+=== DATA DISK (must be raw Instance Storage, NOT root EBS, NOT xfs raw-file) ===
+NAME      SIZE MODEL                            MOUNTPOINT
+nvme1n1 838.2G Amazon EC2 NVMe Instance Storage /work
+nvme0n1 838.2G Amazon EC2 NVMe Instance Storage 
+
+data=/dev/nvme0n1
+=== confirm data disk unmounted + no fs ===
+
+no fs on nvme0n1 (good, raw)

@@ -1,0 +1,28 @@
+
+=== WATCH-LONGER (finding a): TRUE DEADLOCK, not slow-stall ===
+Both io_uring and worker: run starts HEALTHY (~110-116k xact_commit per 15s, NVMe 58-97% util, qemu
+2075-2208% = CPU-saturated) for the first ~60s, then FALLS OFF A CLIFF at t~75s to xact_commit_delta=2
+per 15s (just autovacuum/checkpointer housekeeping), NVMe=0.00, qemu ~45-49% of one core (idle), and
+STAYS there for the full remaining ~5 min (t=75 -> t=360). It NEVER recovers => true lost-wakeup
+DEADLOCK on the WAL-commit path, not a slow-drain stall.
+
+=== io_uring vs WORKER A/B (finding b): NOT io_uring-specific ===
+io_method=io_uring: wedges (WALWrite waiters=65, NVMe=0, idle, never recovers).
+io_method=worker:   wedges IDENTICALLY (WALWrite waiters=5 - blocks at IO-worker submit instead - but
+                    same outcome: commit_delta=2, NVMe=0, idle, never recovers).
+=> The lost wake is NOT in OSv's io_uring completion path (core/io_uring.cc). Both io_methods funnel
+   through the same ZFS-ZIL / WAL-commit sync-write completion -> waiter wakeup, which is where the
+   wake is lost. This is the OSv cross-vCPU wakeup deficit on the ZIL-commit/fsync completion path,
+   deeper and more general than io_uring, surfacing under VU64 concurrency.
+
+=== matched LINUX VU64 (finding d): Linux SCALES, does NOT wedge => wedge is OSv-SPECIFIC ===
+Same m5d.metal, same raw /dev/nvme1n1 ZFS pool (ashift=12/recordsize=8k/sync=standard, 32GiB ARC),
+io_method=io_uring, same 200wh/19GB schema. Linux VU64 sustained xact_commit_delta ~280k-370k per 15s
+for the FULL 6 minutes (t=30 -> t=360), qemu 2200-2700% of one core (22-27 vCPU busy, CPU-saturated),
+NVMe util 15-72% (real IO throughout), WALWrite waiters oscillating 3-62 (normal contention, NOT a
+stuck pileup). NO wedge, no fall to commit_delta=2, no zero-IO idle state.
+CONTRAST: OSv VU64 (every config) goes healthy ~60s then PERMANENTLY wedges (commit_delta=2, NVMe=0,
+qemu idle ~45%) for 5 min. => The VU64 lost-wakeup deadlock on the WAL-commit/ZIL-completion path is
+OSv-SPECIFIC. It is NOT a PG/ZFS-on-this-hardware ceiling (Linux on the identical stack scales fine).
+It is the OSv cross-vCPU wakeup deficit at the completion->waiter layer, deeper than the idle-spin layer
+adaptive-idle-spin addresses, surfacing under VU64 concurrency (untested before; a2a stopped at VU32).

@@ -1,0 +1,40 @@
+Vuser 33:Assigned 7 WIDs = 32 64 96 128 160 192 24 based on VU count 32, Warehouses = 7 out of 200
+Vuser 33:Processing 100000000 transactions with output suppressed...
+Vuser 1:Rampup 1 minutes complete ...
+Vuser 1:Rampup 2 minutes complete ...
+Vuser 1:Rampup complete, Taking start Transaction Count.
+VUCOMPLETE_AFTER 360 s
+Virtual Users remain running in background or shutting down, retry
+Shutting down HammerDB CLI
+can't rename "::_unknown": command doesn't exist
+    while executing
+"rename ::_unknown ::unknown"
+    (procedure "restore" line 4)
+    invoked from within
+"restore "
+    (procedure "TclReadLine::doExit" line 12)
+    invoked from within
+"TclReadLine::doExit"
+    invoked from within
+"if [expr {[llength [info procs TclReadLine::doExit]] > 0}] {
+    #in Tcl TclReadLine is loaded call exit
+    TclReadLine::doExit
+    } else {
+    #in ..."
+    (procedure "quit" line 3)
+    invoked from within
+"quit"
+    (file "/tmp/run-osv-vu32-r4.tcl" line 33)
+    invoked from within
+"source $autostart::autoloadscript"
+    ("eval" body line 2)
+    invoked from within
+"eval $cli_common_init"
+    invoked from within
+"if { $lang == "tcl" } {
+  append cli_common_init $cli_tcl_append
+  eval $cli_common_init
+  #Initialise CLI in Python
+} elseif { $lang eq "python" } {
+..."
+    (file "//zipfs:/app/main.tcl" line 146)

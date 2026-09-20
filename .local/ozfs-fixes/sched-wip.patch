@@ -1,0 +1,43 @@
+diff --git a/apps b/apps
+index 57c607984..2347c09a7 160000
+--- a/apps
++++ b/apps
+@@ -1 +1 @@
+-Subproject commit 57c607984393901ce556a75f81ea40f7c469d1f3
++Subproject commit 2347c09a7fb55e6e13474a83339d6f4e26e43c85
+diff --git a/libc/signal.cc b/libc/signal.cc
+index d7a11bf12..4d415e4e5 100644
+--- a/libc/signal.cc
++++ b/libc/signal.cc
+@@ -603,6 +603,19 @@ int kill(pid_t pid, int sig)
+             errno = ESRCH;
+             return -1;
+         }
++    } else if (pid == getpid()) {
++        // [K1] Self-signal from a fork child: run the handler in the CALLER's
++        // own COW address space so a self-directed handler (PostgreSQL Emit-
++        // ProcSignalBarrier -> kill(getpid(), SIGUSR1) -> HandleProcSignal-
++        // BarrierInterrupt) sets ProcSignalBarrierPending in the COPY the
++        // backend reads.  If it ran in AS0 the ack lands in AS0 and the backend
++        // waits forever (DROP DATABASE / DROP TABLESPACE hang).  A fork child
++        // has a non-kernel _current_as; AS0/kernel and the non-fork app keep
++        // nullptr (-> AS0), so that path is unchanged.
++        mmu::address_space *cur = mmu::current_address_space();
++        if (cur != mmu::kernel_address_space()) {
++            target_as = cur;
++        }
+     }
+ #else
+     // OSv only implements one process, whose pid is getpid().
+diff --git a/modules/httpserver-html5-gui/osv-gui b/modules/httpserver-html5-gui/osv-gui
+--- a/modules/httpserver-html5-gui/osv-gui
++++ b/modules/httpserver-html5-gui/osv-gui
+@@ -1 +1 @@
+-Subproject commit c93b2f5cf80ac2a84b312aa97eb70a311989cf12
++Subproject commit c93b2f5cf80ac2a84b312aa97eb70a311989cf12-dirty
+diff --git a/modules/httpserver-html5-gui/swagger-ui b/modules/httpserver-html5-gui/swagger-ui
+--- a/modules/httpserver-html5-gui/swagger-ui
++++ b/modules/httpserver-html5-gui/swagger-ui
+@@ -1 +1 @@
+-Subproject commit 5d7010b96bf64a5820f397140d270454fc6eac86
++Subproject commit 5d7010b96bf64a5820f397140d270454fc6eac86-dirty

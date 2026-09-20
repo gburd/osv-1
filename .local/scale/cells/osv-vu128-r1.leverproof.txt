@@ -1,0 +1,29 @@
+===== RESOLVED-LEVER PROOF (source: /work/console-run.log) =====
+--- boot line as GIVEN (audit only, NOT proof of binding) ---
+BOOT IMG: /work/img-fix  MEM=64G CPUS=32 SB=16GB MAXCONN=400 IOMETHOD=io_uring SYNCCOMMIT=on FSYNC=on
+BOOT IMG SHA: bcfd7058e7cf38a6 loader=d6f39b285be8ef13
+--- KERNEL-EMITTED resolved values (this IS the proof) ---
+FOOTPRINT_FIX(ovf_recycle): NO-LINE-YET (prints on first overflow free; check again under load)
+FP_PROBE: FPPROBE started interval_s=000000000000000a
+OSV_WAKE_PULL: WAKE_PULL ON
+OSV_WAKE_LOCAL: WAKE_LOCAL off
+OSV_BLK_MQ_COMPLETE: OSV_BLK_MQ_COMPLETE: virtio-blk completion mode=per-queue num_queues=32
+OSV_ZIO_INTR_THREADS: OSV_ZIO_INTR_THREADS: z_null-INTERRUPT taskq count=1
+OSV_ZIO_INTR_THREADS: z_flush-INTERRUPT taskq count=1
+OSV_ZIL_FLUSH_INLINE: OSV_ZIL_FLUSH_INLINE: inline flush completion=0 (0=dispatch to INTERRUPT taskq)
+OSV_ZIL_COMMIT_TIMEOUT_PCT: OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=0 (0=default 10)
+OSV_ZIL_WAKE_UNLOCKED: OSV_ZIL_WAKE_UNLOCKED: zil wake fan-out mode=under-zl_lock (baseline)
+--- FORKFLAG resolved values (the fork levers report their own resolution) ---
+FORKFLAG OSV_FORK_TIMING unset, default 0
+FORKFLAG OSV_FORK_RANGE_BS unset, default 1
+FORKFLAG OSV_FORK_LARGE_SHARE unset, default 1
+--- ARC RESOLVED, MEASURED (OSV_ZFS_ARC_MAX is ABSENT on this base: zfs_arc_max_MB=0
+--- proves the knob has no consumer here, so ARC is measured, never assumed) ---
+ARCPROBE arc_size_MB=0 arc_c_MB=0 arc_c_max_MB=0 zfs_arc_max_MB=0 dirty_max_MB=0 free_MB=65404 physmem_MB=65535
+ARCPROBE arc_size_MB=71 arc_c_MB=2047 arc_c_max_MB=32767 zfs_arc_max_MB=0 dirty_max_MB=3276 free_MB=49321 physmem_MB=65535
+--- OSv version + boot ---
+Booting from ROM..OSv v0.57.0-546-g1480fbee
+Booted up in 427.07 ms
+--- FPTOT (footprint probe: per_as_KB = the per-backend number) ---
+FPTOTEND
+===== END LEVER PROOF =====

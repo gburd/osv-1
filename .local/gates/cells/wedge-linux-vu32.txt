@@ -1,0 +1,32 @@
+=== LINUX WEDGE/SCALE label=linux-vu32 vu=32 (same ZFS/io_uring/HW as OSv) ===
+io_method_in_effect=io_uring
+  checkpoint 3: 48 ms
+  QUIESCED (two consecutive sub-1s checkpoints)
+HDB_DETACHED
+--- SAMPLES (t, WALWrite_waiters, active, xact_commit_delta/15s, nvme_util%, qemu_pct_of_one_core) ---
+t=15s WALWrite=0 active=1 xact_commit_delta=? nvme=2.40 467
+t=30s WALWrite=30 active=33 xact_commit_delta=40524 nvme=31.60 1623
+t=45s WALWrite=16 active=20 xact_commit_delta=81146 nvme=34.00 1708
+t=60s WALWrite=20 active=33 xact_commit_delta=120646 nvme=34.80 1966
+t=75s WALWrite=12 active=26 xact_commit_delta=165801 nvme=49.20 2019
+t=90s WALWrite=11 active=18 xact_commit_delta=189311 nvme=58.40 2007
+t=105s WALWrite=12 active=31 xact_commit_delta=200381 nvme=40.40 1987
+t=120s WALWrite=13 active=29 xact_commit_delta=193237 nvme=35.20 2085
+t=135s WALWrite=8 active=31 xact_commit_delta=221167 nvme=22.40 1936
+t=150s WALWrite=13 active=34 xact_commit_delta=192705 nvme=20.00 1975
+t=165s WALWrite=16 active=28 xact_commit_delta=208478 nvme=44.00 2089
+t=180s WALWrite=14 active=26 xact_commit_delta=209883 nvme=30.40 1951
+t=195s WALWrite=7 active=23 xact_commit_delta=206692 nvme=30.00 2174
+t=210s WALWrite=13 active=28 xact_commit_delta=235351 nvme=46.40 2159
+t=225s WALWrite=9 active=17 xact_commit_delta=193536 nvme=42.40 2240
+t=240s WALWrite=0 active=34 xact_commit_delta=213003 nvme=86.00 2232
+t=255s WALWrite=11 active=33 xact_commit_delta=212950 nvme=64.00 2202
+t=270s WALWrite=0 active=25 xact_commit_delta=208565 nvme=29.20 2098
+t=285s WALWrite=13 active=23 xact_commit_delta=211421 nvme=22.00 2078
+t=300s WALWrite=15 active=26 xact_commit_delta=188635 nvme=15.20 2037
+t=315s WALWrite=10 active=28 xact_commit_delta=221534 nvme=25.60 2069
+t=330s WALWrite=13 active=23 xact_commit_delta=225886 nvme=70.00 2181
+t=345s WALWrite=18 active=29 xact_commit_delta=232086 nvme=14.26 2043
+t=360s WALWrite=13 active=28 xact_commit_delta=225236 nvme=29.60 2213
+--- final TEST RESULT ---
+=== LINUX WEDGE/SCALE linux-vu32 DONE ===
