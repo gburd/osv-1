@@ -78,6 +78,16 @@ init:
     mov %ax, %es
     mov %ax, %ss
     mov $0x7c00, %sp
+    # EARLY-BOOT VISIBILITY (OSV_BOOT16_SERIAL): write one byte straight to the
+    # 16550 THR at 0x3F8 before anything else can fail.  A metal boot that
+    # produces ZERO console bytes gives no information about WHERE it died; this
+    # makes "we reached real mode at all" observable.  No init, no line-status
+    # poll: the firmware has already configured the UART on any machine with a
+    # serial console, and a poll that spins forever would itself be a hang.
+    # '1' = real mode reached.
+    mov $0x31, %al
+    mov $0x3f8, %dx
+    outb %al, %dx
     mov $0x2401, %ax # enable a20 gate
     int $0x15
     lea int1342_boot_struct, %si
@@ -85,6 +95,10 @@ init:
     mov $0x80, %dl
     int $0x13
     movl $cmdline, mb_cmdline
+    # '2' = the cmdline sector read returned (carry not yet checked).
+    mov $0x32, %al
+    mov $0x3f8, %dx
+    outb %al, %dx
 read_disk:
     lea int1342_struct, %si
     mov $0x42, %ah
@@ -128,6 +142,10 @@ read_disk:
 read_error:
     mov %ah, mb_disk_err
 done_disk:
+    # '3' = every sector read is done (the count32 loop drained).
+    mov $0x33, %al
+    mov $0x3f8, %dx
+    outb %al, %dx
     rdtsc
     mov %eax, mb_tsc_disk_lo
     mov %edx, mb_tsc_disk_hi
@@ -149,6 +167,12 @@ more_e820:
 done_e820:
     sub $e820data, %edi
     mov %edi, mb_mmap_len
+    # '4' = e820 walked and the whole kernel image is loaded.  If '4' appears and
+    # nothing follows, the failure is at or after the final jump to 32-bit code,
+    # i.e. in lzloader/early arch setup rather than in this loader.
+    mov $0x34, %al
+    mov $0x3f8, %dx
+    outb %al, %dx
 
     cli
     mov $0x11, %ax

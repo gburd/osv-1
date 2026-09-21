@@ -106,6 +106,19 @@ extern "C" {
 
 void premain()
 {
+    // EARLY-BOOT VISIBILITY: a raw byte to the 16550 THR before ANY OSv
+    // initialization, including arch_init_early_console().  On a machine that
+    // produces zero console bytes there is no way to tell "the loader never ran"
+    // from "the console was never set up", and those point at completely
+    // different bugs.  '5' means 64-bit C code is executing, so a failure after
+    // this point is an OSv problem and one before it is a loader/firmware
+    // problem.  Raw outb, no UART init and no line-status poll: a poll that
+    // spins would itself be a hang, and the firmware has already configured the
+    // port on any machine that has a serial console at all.
+#ifdef __x86_64__
+    asm volatile("outb %0, %1" :: "a"((char)'5'), "Nd"((unsigned short)0x3f8));
+#endif
+
     arch_init_early_console();
 
     /* besides reporting the OSV version, this string has the function
