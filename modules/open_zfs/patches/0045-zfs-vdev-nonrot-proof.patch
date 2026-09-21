@@ -1,0 +1,113 @@
+From: OSv projmax agent
+Subject: [PATCH] zfs: prove the vdev_nonrot lever at runtime (NONROTPROOF/VDEVIO)
+
+The standing rule on this campaign is that an A/B is valid only if the lever's
+RESOLVED value is printed to the console and read back per arm, and that source
+presence is not proof a fix is live.  Patch 0044 sets vd->vdev_nonrot, but
+nothing observable changes at boot, so a build could carry it and still be
+measured as though it did not.
+
+Two proof lines, both printf (NOT debugf, which is verbose-gated and silent by
+default -- that has already cost this campaign a run):
+
+  NONROTPROOF, once per vdev from vdev_disk_open(): the resolved vdev_nonrot,
+  the compile-time default behind it, and the 128 KiB cap the flag selects.
+  This proves the FLAG.
+
+  VDEVIO, every 10 s from the bio submit path in vdev_disk_io_start(): bio
+  count, total bytes, the count of requests longer than SPA_OLD_MAXBLOCKSIZE
+  (128 KiB), and the longest request seen.  This proves the flag is HONOURED:
+  with vdev_nonrot correct, vdev_queue_aggregate() cannot build a span above
+  the non-rotating cap, so gt128k must stay 0.  A nonzero gt128k alongside
+  nonrot=1 is exactly the failure a source grep cannot detect.
+
+Total bytes is reported as an absolute quantity, not normalised per
+transaction: a kB-per-transaction ratio previously produced a bogus 4.8x on
+this campaign because write volume is checkpoint/WAL/autovacuum backlog and
+not proportional to throughput.
+
+Copyright (C) 2026 Greg Burd
+
+--- a/module/os/osv/zfs/vdev_disk.c
++++ b/module/os/osv/zfs/vdev_disk.c
+@@ -27,6 +27,26 @@
+ 	struct device	*device;
+ };
+ 
++/*
++ * Lever-proof instrumentation for the vdev_nonrot fix (patch 0044).
++ *
++ * The standing campaign rule is that a lever counts as live only when its
++ * RESOLVED value is printed to the console and read back per arm; source
++ * presence is not proof.  printf, never debugf: debugf is verbose-gated and
++ * silent by default.
++ *
++ * Counters are plain size_t updated without a lock.  They are diagnostic: a
++ * torn read costs one wrong digit in a log line, while a lock on the bio
++ * submit path would perturb the very thing being measured.
++ */
++extern int printf(const char *, ...);
++static size_t osv_vdevio_bios;
++static size_t osv_vdevio_bytes;
++static size_t osv_vdevio_gt128k;
++static size_t osv_vdevio_maxlen;
++static hrtime_t osv_vdevio_last_report;
++#define OSV_VDEVIO_REPORT_NS 10000000000LL
++
+ static void
+ vdev_disk_hold(vdev_t *vd)
+ {
+@@ -136,6 +156,20 @@
+ #endif
+ 	vd->vdev_nonrot = OSV_VDEV_NONROT_DEFAULT ? B_TRUE : B_FALSE;
+ 
++	/*
++	 * NONROTPROOF: prove the RESOLVED lever, not the patch's presence.
++	 * agg_cap_nonrot_KB is the cap vdev_queue_aggregate() selects when
++	 * vdev_nonrot is true (SPA_OLD_MAXBLOCKSIZE, 128 KiB); the rotating
++	 * alternative is 1 MiB.  The aggregation tunables are static to
++	 * module/zfs/vdev_queue.c and not exported, so this line proves the
++	 * FLAG and the VDEVIO gt128k counter proves it is HONOURED.
++	 */
++	printf("NONROTPROOF nonrot=%d default=%d agg_cap_nonrot_KB=%llu "
++	    "agg_cap_rot_KB=1024 vdev=%s\n",
++	    (int)vd->vdev_nonrot, (int)(OSV_VDEV_NONROT_DEFAULT),
++	    (unsigned long long)(SPA_OLD_MAXBLOCKSIZE >> 10),
++	    vd->vdev_path ? vd->vdev_path : "?");
++
+ 	return (0);
+ }
+ 
+@@ -291,6 +325,32 @@
+ 	bio->bio_done = vdev_disk_bio_done;
+ 
+ 	/*
++	 * VDEVIO: prove vdev_nonrot is HONOURED, not merely set.  With a correct
++	 * non-rotating vdev, vdev_queue_aggregate() cannot build a span above the
++	 * 128 KiB SPA_OLD_MAXBLOCKSIZE cap, so gt128k must remain 0.  A nonzero
++	 * gt128k alongside NONROTPROOF nonrot=1 is the exact failure a source
++	 * grep cannot see.
++	 */
++	osv_vdevio_bios++;
++	osv_vdevio_bytes += size;
++	if (size > SPA_OLD_MAXBLOCKSIZE)
++		osv_vdevio_gt128k++;
++	if (size > osv_vdevio_maxlen)
++		osv_vdevio_maxlen = size;
++	{
++		hrtime_t now = gethrtime();
++		if (now - osv_vdevio_last_report > OSV_VDEVIO_REPORT_NS) {
++			osv_vdevio_last_report = now;
++			printf("VDEVIO bios=%llu bytes_MB=%llu gt128k=%llu "
++			    "maxlen_KB=%llu\n",
++			    (unsigned long long)osv_vdevio_bios,
++			    (unsigned long long)(osv_vdevio_bytes >> 20),
++			    (unsigned long long)osv_vdevio_gt128k,
++			    (unsigned long long)(osv_vdevio_maxlen >> 10));
++		}
++	}
++
++	/*
+ 	 * Store the bio pointer in zio->io_bio so vdev_disk_io_done
+ 	 * can find the borrowed buffer data pointer for ABD return.
+ 	 * We store the data pointer in io_bio since the bio itself
