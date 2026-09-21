@@ -39,6 +39,11 @@
 
 #include <bsd/porting/netport.h>
 
+#include <osv/kernel_config_fork.h>
+#if CONF_fork
+#include <osv/fork_arena.hh>
+#endif
+
 #include <bsd/sys/sys/param.h>
 #include <bsd/sys/sys/priv.h>
 #include <bsd/sys/sys/socket.h>
@@ -1343,6 +1348,26 @@ in_lltable_new(const struct bsd_sockaddr *l3addr, u_int flags)
 {
 	struct in_llentry *lle;
 
+#if CONF_fork
+	/*
+	 * The ARP/link-layer entry is reachable from EVERY address space: it is
+	 * cached in the interface's lltable and dereferenced by whichever thread
+	 * next sends to that L3 address, plus by the callout that expires it.  A
+	 * forked backend's first send to an unresolved address allocates it, so
+	 * without this scope it lands in that child's COW-private fork arena and
+	 * every other address space (and the expiry callout in AS0) faults on a
+	 * VA that is not mapped for them.
+	 *
+	 * Same rule, and same fix, as the other cross-AS-referenced network
+	 * objects (socket, inpcb, net_channel, serial_timer_task, stdio FILE) and
+	 * as the wholesale uma_stub scoping: an object a non-allocating context
+	 * dereferences by raw pointer must live on the shared identity kernel
+	 * heap.  Measured: a page fault at a slot-97 overflow VA
+	 * (0x308580287000) inside in_lltable_lookup, reached from
+	 * send -> sosend_generic -> tcp_output.
+	 */
+	fork_arena::kernel_heap_scope kh;
+#endif
 	lle = (in_llentry *)malloc(sizeof(struct in_llentry));
 	if (lle == NULL)		/* NB: caller generates msg */
 		return NULL;
