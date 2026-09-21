@@ -986,8 +986,13 @@ objects += arch/$(arch)/interrupt.o
 objects += arch/$(arch)/clone.o
 ifeq ($(conf_fork),1)
 objects += arch/$(arch)/fork.o
-objects += core/fork_arena.o
 endif
+# core/fork_arena.o is linked in EVERY configuration, not just conf_fork=1: the
+# cross-AS coherence scopings call fork_kernel_heap_push/pop from ~8 BSD and libc
+# sites unconditionally, and the file provides no-op definitions of exactly those
+# two symbols when CONF_fork is 0 (the rest of it compiles to nothing).  Linking
+# it only under conf_fork=1 broke the DEFAULT build at link time.
+objects += core/fork_arena.o
 ifeq ($(conf_drivers_pci),1)
 objects += arch/$(arch)/pci.o
 objects += arch/$(arch)/msi.o

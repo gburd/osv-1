@@ -687,4 +687,22 @@ void leak_probe_stats(unsigned long *bump_used, unsigned long *as_slots)
 extern "C" void fork_kernel_heap_push(void) { ++fork_arena::force_kernel_heap; }
 extern "C" void fork_kernel_heap_pop(void)  { --fork_arena::force_kernel_heap; }
 
+#else // !CONF_fork
+
+// NON-FORK BUILD: the cross-address-space coherence scopings still CALL these
+// from ~8 BSD/libc sites (uipc_socket, uipc_syscalls, raw_ip, tcp_input,
+// tcp_timer, tcp_usrreq, udp_usrreq, __fdopen), and the Makefile only links
+// core/fork_arena.o when conf_fork=1, so a default (conf_fork=0) build failed
+// at LINK with ~17 "undefined reference to fork_kernel_heap_push" errors.
+//
+// Two ways to fix it: guard all ~8 call sites, or define the no-op once here.
+// One definition is the smaller and more durable diff -- a future scoping added
+// to a 9th site keeps building, whereas the guard approach silently breaks the
+// non-fork build again every time someone adds one (which is exactly how this
+// arrived).  With no fork there is no COW arena, so "force allocations onto the
+// identity heap" is already true unconditionally and the no-op is semantically
+// correct, not merely convenient.
+extern "C" void fork_kernel_heap_push(void) { }
+extern "C" void fork_kernel_heap_pop(void)  { }
+
 #endif // CONF_fork
