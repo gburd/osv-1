@@ -4041,9 +4041,17 @@ extern "C" bool is_linear_mapped(const void *addr)
 
 namespace mmu {
 
+#if CONF_fork
 // FOOTPRINT PROBE dumper: one FPROW line per live AS plus an FPTOT summary,
 // every OSV_FP_INTERVAL seconds from an AS0 kernel thread.  Started by
 // fp_probe_start() from loader.cc after fork_arena::init().
+//
+// CONF_fork GUARD IS LOAD-BEARING: this body names fp:: (defined only inside the
+// CONF_fork block above) and fork_arena:: (a CONF_fork-only header), so without
+// the guard a conf_fork=0 build -- which is the DEFAULT -- fails to compile with
+// "'fp' has not been declared" / "'fork_arena' has not been declared".  The
+// caller in loader.cc was already guarded; only the definition was not, so the
+// break was invisible to every conf_fork=1 build.
 void fp_dump_once()
 {
     // CONSOLE-RING BUDGET: EC2's serial console is a 64 KiB RING. One FPROW is
@@ -4152,4 +4160,10 @@ void fp_probe_start()
     }, sched::thread::attr().name("fp_probe").detached());
     t->start();
 }
+#else // !CONF_fork
+// No fork(), so there are no child address spaces to attribute and nothing to
+// probe.  Keep the symbol so a non-fork build still links if any caller loses
+// its own guard, and make the no-op explicit rather than implicit.
+void fp_probe_start() { }
+#endif // CONF_fork
 }
