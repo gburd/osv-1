@@ -35,6 +35,7 @@
 
 #include "drivers/random.hh"
 #include <assert.h>
+#include <stdio.h>
 
 #include <osv/device.h>
 #include <osv/uio.h>
@@ -293,6 +294,16 @@ void randomdev_init()
 {
     new random_device();
     debugf("random: <%s> initialized\n", random_adaptor->ident);
+    // LEVER PROOF (printf, not debugf: debugf is verbose-gated and silent).
+    // The native RNG blocker was "rdrand reported FALSE, no virtio-rng"; this
+    // line makes the RESOLVED capability auditable per arm from the console.
+#ifdef __x86_64__
+    printf("RNGPROOF rdrand=%d rdseed=%d hwsrc_empty=%d seeded=%d\n",
+        processor::features().rdrand ? 1 : 0,
+        processor::features().rdseed ? 1 : 0,
+        live_entropy_sources_empty() ? 1 : 0,
+        random_adaptor->seeded ? 1 : 0);
+#endif
 }
 
 }
