@@ -19,6 +19,8 @@
 #include "osv/trace.hh"
 #include <osv/percpu.hh>
 #include <osv/prio.hh>
+#include <osv/execinfo.hh>   // backtrace_safe_from_interrupt, for CPUPROF
+#include "exceptions.hh"     // current_interrupt_frame, for the CPUPROF ef_null proof
 #include <osv/elf.hh>
 #include <stdlib.h>
 #include <math.h>
@@ -2749,6 +2751,261 @@ void with_thread_by_id(unsigned id, std::function<void(thread *)> f) {
     }
 }
 
+
+
+// ---------------------------------------------------------------- CPUPROF
+// Sampling profiler printing a raw-PC histogram to the console, to attribute
+// the per-transaction CPU cost BY CALL SITE.  Symbolized off-box with addr2line.
+#define CPUPROF_SLOTS 8192
+#define CPUPROF_DEPTH 8
+
+struct cpuprof_table {
+    u64 pc[CPUPROF_SLOTS];       // leaf PC (pc[0]) histogram: self time
+    u32 hits[CPUPROF_SLOTS];
+    u64 apc[CPUPROF_SLOTS];      // any-frame histogram: inclusive time
+    u32 ahits[CPUPROF_SLOTS];
+    u64 samples;
+    u64 dropped;
+    u64 ef_null;                 // samples with no exception frame (should be ~0)
+    u64 idle_samples;            // landed on the idle thread: not workload cost
+    u64 busy_samples;            // landed on real work: the profile's denominator
+    u64 depth_sum;               // mean unwind depth, proves we get past frame 0
+    // SELFTEST: the OLD unwinder's pc[0], to demonstrate the difference.
+    u64 opc[64];
+    u32 ohits[64];
+};
+static cpuprof_table cpuprof_tab[max_cpus];
+
+static inline void cpuprof_bump(u64 *tabpc, u32 *tabhit, unsigned slots,
+                                u64 pc, u64 *dropped)
+{
+    u32 h = (u32)((pc >> 2) * 2654435761u) % slots;
+    for (unsigned i = 0; i < 32; i++) {
+        u32 s = (h + i) % slots;
+        if (tabpc[s] == pc) { tabhit[s]++; return; }
+        if (tabpc[s] == 0)  { tabpc[s] = pc; tabhit[s] = 1; return; }
+    }
+    if (dropped) (*dropped)++;
+}
+
+class cpuprof_sampler : public timer_base::client {
+public:
+    cpuprof_sampler() : _tmr(*this) {}
+    void start(u64 period_ns) { _period = period_ns; _on = true; rearm(); }
+    void stop() { _on = false; _tmr.cancel(); }
+    virtual void timer_fired() override {
+        if (!_on) return;
+        cpuprof_table *t = &cpuprof_tab[cpu::current()->id];
+        t->samples++;
+        if (!current_interrupt_frame) t->ef_null++;
+        // A sample landing on the idle thread is NOT workload cost.  Count it
+        // separately: pooling idle and busy samples makes every percentage a
+        // percentage of the wrong denominator, and on this workload ~44% of
+        // samples are the idle thread.  cpu_busy_pct falls straight out of the
+        // ratio, which cross-checks against the known per-CPU busy accounting.
+        bool on_idle = (thread::current() == cpu::current()->idle_thread);
+        if (on_idle) { t->idle_samples++; rearm(); return; }
+        t->busy_samples++;
+
+        // THE PROFILE: unwind the INTERRUPTED thread.
+        void *bt[CPUPROF_DEPTH];
+        int n = backtrace_safe_from_interrupt(bt, CPUPROF_DEPTH);
+        t->depth_sum += n;
+        if (n > 0 && bt[0]) {
+            // pc[0] is the instruction that was actually executing: SELF time.
+            cpuprof_bump(t->pc, t->hits, CPUPROF_SLOTS, (u64)bt[0], &t->dropped);
+            // every frame: INCLUSIVE time, so a cost spread across many leaves
+            // still shows up against its common caller.  That distinction is
+            // exactly the concentrated-vs-diffuse question.
+            for (int i = 0; i < n; i++) {
+                if (!bt[i]) break;
+                cpuprof_bump(t->apc, t->ahits, CPUPROF_SLOTS, (u64)bt[i], nullptr);
+            }
+        }
+
+        // SELFTEST: what the OLD unwinder would have said, same sample.
+        void *obt[2];
+        int on_ = backtrace_safe(obt, 2);
+        if (on_ > 0 && obt[0])
+            cpuprof_bump(t->opc, t->ohits, 64, (u64)obt[0], nullptr);
+
+        rearm();
+    }
+private:
+    // set_with_irq_disabled: we are in a timer callback with IRQs off, exactly
+    // as core/sampler.cc does on its rearm path.
+    void rearm() {
+        _tmr.set_with_irq_disabled(osv::clock::uptime::now()
+                                   + std::chrono::nanoseconds(_period));
+    }
+    timer_base _tmr;
+    u64 _period = 1000000;
+    bool _on = false;
+};
+
+static cpuprof_sampler cpuprof_smp[max_cpus];
+static void cpuprof_start_on_current(u64 period_ns)
+{
+    cpuprof_smp[cpu::current()->id].start(period_ns);
+}
+
+static void cpuprof_dump()
+{
+    static u64 mpc[CPUPROF_SLOTS * 2];  static u64 mhit[CPUPROF_SLOTS * 2];
+    static u64 apc[CPUPROF_SLOTS * 2];  static u64 ahit[CPUPROF_SLOTS * 2];
+    unsigned mn = 0, an = 0;
+    u64 tot = 0, drop = 0, efnull = 0, dsum = 0, idles = 0, busys = 0;
+    static u64 opc[64]; static u64 ohit[64]; unsigned on_ = 0;
+
+    for (unsigned c = 0; c < cpus.size(); c++) {
+        cpuprof_table *t = &cpuprof_tab[c];
+        tot += t->samples; drop += t->dropped;
+        efnull += t->ef_null; dsum += t->depth_sum;
+        idles += t->idle_samples; busys += t->busy_samples;
+        for (unsigned s = 0; s < CPUPROF_SLOTS; s++) {
+            if (t->pc[s]) {
+                unsigned j = 0; for (; j < mn; j++) if (mpc[j] == t->pc[s]) break;
+                if (j == mn && mn < CPUPROF_SLOTS*2) { mpc[mn]=t->pc[s]; mhit[mn]=0; mn++; }
+                if (j < CPUPROF_SLOTS*2) mhit[j] += t->hits[s];
+            }
+            if (t->apc[s]) {
+                unsigned j = 0; for (; j < an; j++) if (apc[j] == t->apc[s]) break;
+                if (j == an && an < CPUPROF_SLOTS*2) { apc[an]=t->apc[s]; ahit[an]=0; an++; }
+                if (j < CPUPROF_SLOTS*2) ahit[j] += t->ahits[s];
+            }
+        }
+        for (unsigned s = 0; s < 64; s++) {
+            if (!t->opc[s]) continue;
+            unsigned j = 0; for (; j < on_; j++) if (opc[j] == t->opc[s]) break;
+            if (j == on_ && on_ < 64) { opc[on_]=t->opc[s]; ohit[on_]=0; on_++; }
+            if (j < 64) ohit[j] += t->ohits[s];
+        }
+    }
+    u64 selftot = 0; for (unsigned j = 0; j < mn; j++) selftot += mhit[j];
+    u64 inctot  = 0; for (unsigned j = 0; j < an; j++) inctot  += ahit[j];
+
+    // THE ATTRIBUTION PROOF.  n_distinct_pc0_new vs _old is the whole argument:
+    // the old unwinder saw a handful of interrupt-entry PCs, the new one sees
+    // the workload.  ef_null must be ~0 or the mechanism is not as claimed.
+    // busy_pct is a cross-check: it must track the independently-measured
+    // per-CPU busy accounting, or the sampler is not seeing the real workload.
+    printf("CPUPROF_SELFTEST samples=%llu busy=%llu idle=%llu busy_pct=%llu.%llu "
+           "ef_null=%llu mean_depth=%llu.%02llu "
+           "n_distinct_pc0_new=%u n_distinct_pc0_old=%u dropped=%llu drop_pct=%llu.%llu\n",
+        (unsigned long long)tot, (unsigned long long)busys, (unsigned long long)idles,
+        (unsigned long long)(tot ? busys*100/tot : 0),
+        (unsigned long long)(tot ? (busys*1000/tot)%10 : 0),
+        (unsigned long long)efnull,
+        (unsigned long long)(tot ? dsum*100/busys/100 : 0),
+        (unsigned long long)(busys ? (dsum*100/busys)%100 : 0),
+        mn, on_, (unsigned long long)drop,
+        (unsigned long long)(busys ? drop*100/busys : 0),
+        (unsigned long long)(busys ? (drop*1000/busys)%10 : 0));
+    // A saturated table biases the histogram toward whatever arrived first, so
+    // say so loudly rather than leaving it to be read off a number.
+    if (busys && drop*100/busys > 2)
+        printf("CPUPROF_WARN table saturated: %llu%% of frame insertions dropped -- "
+               "raise CPUPROF_SLOTS before trusting the tail\n",
+            (unsigned long long)(drop*100/busys));
+    for (unsigned k = 0; k < 8 && k < on_; k++) {
+        unsigned best = k;
+        for (unsigned j = k+1; j < on_; j++) if (ohit[j] > ohit[best]) best = j;
+        u64 tp=opc[k]; opc[k]=opc[best]; opc[best]=tp;
+        u64 th=ohit[k]; ohit[k]=ohit[best]; ohit[best]=th;
+        if (!ohit[k]) break;
+        printf("CPUPROF_OLDUNWIND pc=0x%llx hits=%llu\n",
+            (unsigned long long)opc[k], (unsigned long long)ohit[k]);
+    }
+
+    printf("CPUPROF_SELF_BEGIN distinct=%u total=%llu busy_samples=%llu\n",
+        mn, (unsigned long long)selftot, (unsigned long long)busys);
+    for (unsigned k = 0; k < 100 && k < mn; k++) {
+        unsigned best = k;
+        for (unsigned j = k+1; j < mn; j++) if (mhit[j] > mhit[best]) best = j;
+        u64 tp=mpc[k]; mpc[k]=mpc[best]; mpc[best]=tp;
+        u64 th=mhit[k]; mhit[k]=mhit[best]; mhit[best]=th;
+        if (!mhit[k]) break;
+        printf("CPUPROF_SELF pc=0x%llx hits=%llu pct=%llu.%02llu\n",
+            (unsigned long long)mpc[k], (unsigned long long)mhit[k],
+            (unsigned long long)(busys ? mhit[k]*100/busys : 0),
+            (unsigned long long)(busys ? (mhit[k]*10000/busys)%100 : 0));
+    }
+    // THE CONCENTRATED-VS-DIFFUSE NUMBER: how much self time is NOT in the top
+    // rows.  A large tail over many PCs is a diffuse cost and must not be read
+    // as a hot spot just because the top row has the largest single number.
+    {
+        u64 shown = 0; unsigned nshown = mn < 100 ? mn : 100;
+        for (unsigned k = 0; k < nshown; k++) shown += mhit[k];
+        printf("CPUPROF_SELF_TAIL shown_rows=%u shown_hits=%llu tail_hits=%llu "
+               "tail_pct_of_busy=%llu.%llu tail_distinct=%u\n",
+            nshown, (unsigned long long)shown,
+            (unsigned long long)(selftot > shown ? selftot - shown : 0),
+            (unsigned long long)(busys ? (selftot-shown)*100/busys : 0),
+            (unsigned long long)(busys ? ((selftot-shown)*1000/busys)%10 : 0),
+            mn > nshown ? mn - nshown : 0);
+    }
+    printf("CPUPROF_SELF_END\n");
+
+    printf("CPUPROF_INCL_BEGIN distinct=%u total=%llu busy_samples=%llu\n",
+        an, (unsigned long long)inctot, (unsigned long long)busys);
+    for (unsigned k = 0; k < 100 && k < an; k++) {
+        unsigned best = k;
+        for (unsigned j = k+1; j < an; j++) if (ahit[j] > ahit[best]) best = j;
+        u64 tp=apc[k]; apc[k]=apc[best]; apc[best]=tp;
+        u64 th=ahit[k]; ahit[k]=ahit[best]; ahit[best]=th;
+        if (!ahit[k]) break;
+        // pct is of SAMPLES, not of frame hits: an inclusive percentage.
+        printf("CPUPROF_INCL pc=0x%llx hits=%llu pct=%llu.%02llu\n",
+            (unsigned long long)apc[k], (unsigned long long)ahit[k],
+            (unsigned long long)(busys ? ahit[k]*100/busys : 0),
+            (unsigned long long)(busys ? (ahit[k]*10000/busys)%100 : 0));
+    }
+    printf("CPUPROF_INCL_END\n");
+}
+
+static void cpuprof_reset()
+{
+    for (unsigned c = 0; c < max_cpus; c++) {
+        cpuprof_table *t = &cpuprof_tab[c];
+        for (unsigned s = 0; s < CPUPROF_SLOTS; s++) {
+            t->pc[s]=0; t->hits[s]=0; t->apc[s]=0; t->ahits[s]=0;
+        }
+        for (unsigned s = 0; s < 64; s++) { t->opc[s]=0; t->ohits[s]=0; }
+        t->samples=0; t->dropped=0; t->ef_null=0; t->depth_sum=0;
+        t->idle_samples=0; t->busy_samples=0;
+    }
+}
+
+// OSV_CPUPROF=<period_us> (0/unset = off).  OSV_CPUPROF_EVERY=<secs>.
+void cpuprof_start()
+{
+    const char *e = getenv("OSV_CPUPROF");
+    if (!e || !e[0] || e[0] == '0') { printf("CPUPROF off\n"); return; }
+    u64 period_ns = (u64)atoi(e) * 1000ull;
+    if (period_ns < 100000) period_ns = 100000;
+    const char *ev = getenv("OSV_CPUPROF_EVERY");
+    int every = (ev && ev[0]) ? atoi(ev) : 30;
+    if (every < 5) every = 5;
+    printf("CPUPROF_PROOF period_us=%llu dump_every_s=%d depth=%d slots=%d unwind=from_interrupt\n",
+        (unsigned long long)(period_ns/1000), every, CPUPROF_DEPTH, CPUPROF_SLOTS);
+
+    auto *starter = thread::make([period_ns, every] {
+        for (cpu *c : cpus) {
+            auto *s = thread::make([period_ns] { cpuprof_start_on_current(period_ns); },
+                thread::attr().pin(c).name("cpuprof_arm"));
+            s->start(); s->join();
+        }
+        printf("CPUPROF armed on %u cpus\n", (unsigned)cpus.size());
+        thread::sleep(std::chrono::seconds(2));
+        cpuprof_reset();
+        for (;;) {
+            thread::sleep(std::chrono::seconds(every));
+            cpuprof_dump();
+            cpuprof_reset();
+        }
+    }, thread::attr().name("cpuprof").detached());
+    starter->start();
+}
 
 }
 

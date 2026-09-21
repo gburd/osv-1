@@ -871,6 +871,7 @@ void main_cont(int loader_argc, char** loader_argv)
     // silently never ran.  Also after smp_launch(), so the dumper thread is
     // created with the full CPU set up.
     mmu::fp_probe_start();
+    sched::cpuprof_start();
 #endif
 
     auto end = osv::clock::uptime::now() + boot_delay;

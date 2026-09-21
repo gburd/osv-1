@@ -1047,6 +1047,9 @@ private:
 
 void init_detached_threads_reaper();
 
+// CPUPROF: console-printing sampling profiler (OSV_CPUPROF=<period_us>).
+void cpuprof_start();
+
 class timer_list {
 public:
     void fired();
