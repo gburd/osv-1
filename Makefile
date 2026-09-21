@@ -2254,12 +2254,18 @@ else
 # ZFS-enabled build therefore has to list it (and the tools that go with it) as a
 # prerequisite here, or mkbootfs runs before it exists: serially that is a hard
 # failure on the missing file, and under -j it is a race that shows up as an
-# intermittent build break.  Key on the ZFS build itself rather than on the root
-# filesystem choice.  A conf_zfs=openzfs image with, say, fs=ramfs and a runtime
-# data pool is a normal configuration and hits exactly this.
-ifdef conf_zfs_openzfs
+# intermittent build break.
+#
+# This is UNCONDITIONAL, not keyed on conf_zfs or on the root filesystem.  Both
+# narrower forms were tried and both leave the default configuration broken:
+# keying on `fs=zfs` misses every other root filesystem, and keying on
+# `conf_zfs_openzfs` misses conf_zfs=bsd, which also builds libsolaris.so.
+# scripts/build defaults fs=zfs, so the only routinely exercised path happens to
+# set the dependency and the omission stays invisible; a bare
+# `make build/release.x64/bootfs.bin` with fs unset reproduces the failure on an
+# unmodified tree.  The manifest names the library for every configuration, so
+# the prerequisite belongs in every configuration.
 bootfs_dep += $(tools:%=$(out)/%) $(out)/libsolaris.so
-endif
 ifeq ($(fs),ramfs)
 # For fs=ramfs, scripts/build passes $(out)/usr.manifest as the bootfs manifest,
 # and that manifest is generated from usr_ramfs.manifest.skel, which lists
