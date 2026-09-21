@@ -3855,6 +3855,18 @@ namespace mmu {
 // fp_probe_start() from loader.cc after fork_arena::init().
 void fp_dump_once()
 {
+    // CONSOLE-RING BUDGET: EC2's serial console is a 64 KiB RING. One FPROW is
+    // ~11 lines, so on a many-backend run the per-AS rows flood the window and
+    // push the BOOT HEADER (the lever-proof lines: RNGPROOF, WAKE_PULL,
+    // IDLE_SPIN_PROOF, the ZFS property readback) out of it -- i.e. a verbose
+    // probe DESTROYS the lever proof it is meant to sit alongside. Emit the
+    // FPTOT summary (which carries per_as_KB, the number the footprint result
+    // actually needs) always, and the per-AS FPROW detail only when explicitly
+    // asked for via OSV_FP_ROWS=1.
+    static const bool want_rows = []{
+        const char* e = getenv("OSV_FP_ROWS");
+        return e && strtoul(e, nullptr, 10) != 0;
+    }();
     u64 t_cow[fp::B_NBUCKET] = {0};
     u64 t_pt = 0, t_priv = 0, t_ovf = 0;
     unsigned live = 0;
@@ -3882,6 +3894,7 @@ void fp_dump_once()
         // which is why every debugf-based probe line here was invisible even
         // though the probe ran.  debug_early writes unconditionally -- the same
         // reason the FORKFLAG lines show up.
+        if (want_rows) {
         debug_early("FPROW as=");
         debug_early_u64("", (unsigned long long)(uintptr_t)o);
         debug_early_u64("  cowarena_KB=", (unsigned long long)(c[fp::B_ARENA] * 4));
@@ -3896,6 +3909,7 @@ void fp_dump_once()
             c[fp::B_OVF] + c[fp::B_ELF] + c[fp::B_MMAP] + c[fp::B_OTHER] +
             pt + pv + ov) * 4));
         debug_early("FPROWEND\n");
+        }
     }
     u64 acc = 0;
     for (unsigned b = 0; b < fp::B_NBUCKET; b++) acc += t_cow[b];

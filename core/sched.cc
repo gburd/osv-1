@@ -623,6 +623,20 @@ static bool idle_spin_adaptive()
     }();
     return a;
 }
+// LEVER PROOF.  An A/B is valid only if the lever's RESOLVED value is printed to
+// the console and verified PER ARM; never infer binding from the command line.
+// printf (not debugf: debugf is verbose-gated and silent by default).  Called
+// once from the first do_idle, i.e. on an idle thread started by smp_launch,
+// which is AFTER parse_options -- so getenv() here does see --env values.
+static void idle_spin_proof_once()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        printf("IDLE_SPIN_PROOF adaptive=%d cap=%u floor=%u shrink_after=%u\n",
+            idle_spin_adaptive() ? 1 : 0, idle_spin_max(),
+            idle_spin_floor, idle_shrink_after);
+    });
+}
 // Window floor: a genuinely-idle CPU decays to this many spin iterations before
 // halting -- small enough not to burn cycles, >0 so the idle_poll handshake
 // still has a chance to suppress a wake IPI.
@@ -638,6 +652,7 @@ void cpu::do_idle()
 {
     const unsigned cap = idle_spin_max();
     const bool adaptive = idle_spin_adaptive();
+    idle_spin_proof_once();
     // Per-CPU adaptive window persists across idle entries; seed at the cap so
     // the very first idle behaves like the historical fixed count until
     // history accumulates.
