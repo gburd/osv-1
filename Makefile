@@ -57,23 +57,72 @@ ifeq ($(conf_zfs),openzfs)
 # file makes this idempotent.
 #
 # Apply patches ONE AT A TIME in sorted order (each sees the previous patch's
-# result), with a --recount retry for hunks whose line numbers have drifted,
-# and FAIL LOUDLY on a patch that cannot apply -- a single `git apply <all>`
-# is atomic per-invocation and silently applies NOTHING if any dependent patch
+# result), with a --recount retry for hunks whose line numbers have drifted, and
+# FAIL THE BUILD on a patch that cannot apply -- a single `git apply <all>` is
+# atomic per-invocation and silently applies NOTHING if any dependent patch
 # fails its pre-flight check, which used to leave the ZFS sources unpatched
 # while the build appeared to succeed.
+#
+# The failure path is a recorded FILE, not an exit status, because $(shell ...)
+# runs during makefile parse and its exit status cannot abort a build.  The
+# earlier attempt at this did report a skip, but could never act on it: the
+# notice went to stderr only, the skipped list was echoed and never read, `ok`
+# was initialised to 1 and never set to 0 anywhere, so the INCOMPLETE branch was
+# unreachable dead code, and the stamp was touched unconditionally BEFORE the
+# check -- which also made the omission permanent, since the stamp is what makes
+# this idempotent.  A build missing a ZFS fix therefore reported SUCCESS and
+# then hid the omission from every rebuild.
 openzfs_patch_stamp := modules/open_zfs/openzfs/.osv-patches-applied
-$(shell if [ -d modules/open_zfs/openzfs/module ] && [ ! -f $(openzfs_patch_stamp) ]; then \
-	ok=1; skipped=; \
+openzfs_patch_failed := modules/open_zfs/openzfs/.osv-patches-failed
+openzfs_patch_log := modules/open_zfs/openzfs/.osv-patches-log
+# $(shell ...) CAPTURES stdout, so an echo in here is swallowed rather than
+# printed -- which is half of why the old skip notice was invisible.  Write the
+# human-readable record to a log file and print it from a real rule below.
+$(shell if [ -d modules/open_zfs/openzfs/module ] && [ ! -f $(openzfs_patch_stamp) ] && [ ! -f $(openzfs_patch_failed) ]; then \
+	rm -f $(openzfs_patch_log); \
+	skipped=; recounted=; \
 	for p in $(sort $(notdir $(wildcard modules/open_zfs/patches/*.patch))); do \
-		git -C modules/open_zfs/openzfs apply --whitespace=nowarn "../patches/$$p" 2>/dev/null \
-		|| git -C modules/open_zfs/openzfs apply --whitespace=nowarn --recount "../patches/$$p" 2>/dev/null \
-		|| { echo "OZFS-PATCH-SKIPPED (could not apply): $$p" 1>&2; skipped="$$skipped $$p"; }; \
+		if git -C modules/open_zfs/openzfs apply --whitespace=nowarn "../patches/$$p" 2>/dev/null; then \
+			: ; \
+		elif git -C modules/open_zfs/openzfs apply --whitespace=nowarn --recount "../patches/$$p" 2>/dev/null; then \
+			echo "OZFS-PATCH-RECOUNTED (wrong hunk counts, applied anyway): $$p" >> $(openzfs_patch_log); \
+			recounted="$$recounted $$p"; \
+		else \
+			echo "OZFS-PATCH-SKIPPED (could not apply): $$p" >> $(openzfs_patch_log); \
+			skipped="$$skipped $$p"; \
+		fi; \
 	done; \
-	[ -n "$$skipped" ] && echo "OZFS-PATCHES-SKIPPED:$$skipped" 1>&2; \
-	touch $(openzfs_patch_stamp); \
-	[ $$ok = 1 ] && touch $(openzfs_patch_stamp) || echo "OZFS-PATCH-SERIES-INCOMPLETE" 1>&2; \
+	if [ -n "$$skipped" ]; then \
+		echo "$$skipped" | tr -s ' ' '\n' | sed '/^$$/d' > $(openzfs_patch_failed); \
+	else \
+		touch $(openzfs_patch_stamp); \
+	fi; \
 fi)
+# Refuse to build from a partially patched tree.  Checked as a makefile
+# condition, not via the $(shell ...) exit status: $(shell) runs during parse and
+# its status cannot abort a build.
+#
+# The message deliberately carries NO colons and NO paths.  $(error) text is
+# re-scanned by make, so a "file.patch: ..." style message is parsed as a rule
+# and dies with "multiple target patterns" instead of printing the real reason --
+# a negative test caught exactly that in the first version of this check.
+ifneq ($(strip $(wildcard $(openzfs_patch_failed))),)
+$(info === OpenZFS OSv patch series is INCOMPLETE ===)
+$(info The following patches did NOT apply, so the ZFS sources are missing their)
+$(info changes and any image built now would silently lack them.)
+$(info )
+$(info $(shell sed 's/^/    /' $(openzfs_patch_failed)))
+$(info )
+$(info Fix or drop each patch listed above, then delete this file to retry)
+$(info $(shell echo '   ' $(openzfs_patch_failed)))
+$(error refusing to build ZFS from an incompletely patched tree)
+endif
+# Report a --recount rescue loudly.  A patch that only applies with --recount has
+# wrong hunk counts and is one context drift away from being skipped outright,
+# which is how the vdev_nonrot patch nearly went missing from a benchmark image.
+ifneq ($(strip $(wildcard $(openzfs_patch_log))),)
+$(info $(shell cat $(openzfs_patch_log)))
+endif
 # The OpenZFS object lists + conf_zfs=openzfs flags are included further
 # below (after bsd_zfs defines the shared `solaris` list), from
 # modules/open_zfs/open_zfs_sources.mk.
