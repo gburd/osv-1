@@ -13,5 +13,19 @@
 // contexts, but requires -fno-omit-frame-pointer
 int backtrace_safe(void** pc, int nr);
 
+// Like backtrace_safe(), but when called from an interrupt handler it unwinds
+// the INTERRUPTED thread rather than the handler itself: pc[0] is the saved rip
+// from the exception frame and the rest of the walk follows the interrupted
+// frame-pointer chain.
+//
+// Use this from anything that samples (a profiler, a periodic tracepoint).
+// backtrace_safe() cannot see past the interrupt entry stub, because the stub
+// pushes an exception_frame and not a frame record, so an fp walk started in
+// the handler terminates in the entry frames and attributes every sample to
+// them instead of to the code that was running.
+//
+// Outside interrupt context this is exactly backtrace_safe().
+int backtrace_safe_from_interrupt(void** pc, int nr);
+
 
 #endif /* EXECINFO_HH_ */

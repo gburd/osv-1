@@ -365,7 +365,11 @@ void tracepoint_base::do_log_backtrace(trace_record* tr, u8*& buffer)
 {
     assert(tr->backtrace);
     auto bt = reinterpret_cast<void**>(buffer);
-    auto done = backtrace_safe(bt, backtrace_len);
+    // A tracepoint hit from an interrupt handler -- which is what the sampling
+    // profiler in core/sampler.cc is -- must be attributed to the interrupted
+    // code, not to the interrupt entry stub.  Outside interrupt context this is
+    // identical to backtrace_safe().
+    auto done = backtrace_safe_from_interrupt(bt, backtrace_len);
     fill(bt + done, bt + backtrace_len, nullptr);
     buffer += backtrace_len * sizeof(void*);
 }
