@@ -75,16 +75,17 @@ diff --git a/module/zfs/arc.c b/module/zfs/arc.c
  /*
   * Determine if the system is under memory pressure and is asking
   * to reclaim memory. A return value of B_TRUE indicates that the system
-diff --git a/module/os/osv/zfs/zfs_initialize_osv.c b/module/os/osv/zfs/zfs_initialize_osv.c
 --- a/module/os/osv/zfs/zfs_initialize_osv.c
 +++ b/module/os/osv/zfs/zfs_initialize_osv.c
-@@ -1,4 +1,5 @@
+@@ -48,6 +48,7 @@
+  * pipeline during TXG sync.
+  */
  extern uint64_t arc_reduce_target_size_noshrink(uint64_t to_free);
 +extern uint64_t arc_reduce_target_size_shrink_sync(uint64_t to_free);
- extern uint64_t arc_all_memory(void);
- 
- /* Called by the shrinker in "hard" mode (evict aggressively). */
-@@ -8,5 +9,9 @@ osv_arc_lowmem(void *arg, int howto)
+ /*
+  * Use arc_all_memory() (a function call via PLT within libsolaris.so) rather
+  * than referencing arc_c directly.  arc_c is compiled with -fvisibility=hidden
+@@ -66,7 +67,11 @@
  	uint64_t to_free = arc_all_memory() / 4;
  	if (to_free < (16UL << 20))
  		to_free = 16UL << 20;
@@ -95,3 +96,5 @@ diff --git a/module/os/osv/zfs/zfs_initialize_osv.c b/module/os/osv/zfs/zfs_init
 +	 */
 +	return ((size_t)arc_reduce_target_size_shrink_sync(to_free));
  }
+ 
+ /* Called by the shrinker in "soft" mode (reclaim a specific amount). */
