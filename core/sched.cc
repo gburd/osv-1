@@ -640,14 +640,24 @@ static constexpr unsigned idle_shrink_after = 4;
 // once from the first do_idle, i.e. on an idle thread started by smp_launch,
 // which is AFTER parse_options -- so getenv() here does see --env values.
 // Defined after idle_spin_floor/idle_shrink_after so it can name them.
+//
+// NOT std::call_once: pthread_once takes a lock and do_idle runs in a
+// non-preemptable context, so call_once here trips
+// assert(preemptable()) in sched.hh do_wait_until and PANICS the boot (measured:
+// "assertion failed: preemptable() ... sched::cpu::do_idle+103 <- pthread_once").
+// A relaxed test-and-set is enough -- a duplicate line would be harmless anyway.
+static std::atomic<bool> idle_spin_proof_done{false};
 static void idle_spin_proof_once()
 {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        printf("IDLE_SPIN_PROOF adaptive=%d cap=%u floor=%u shrink_after=%u\n",
-            idle_spin_adaptive() ? 1 : 0, idle_spin_max(),
-            idle_spin_floor, idle_shrink_after);
-    });
+    if (idle_spin_proof_done.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (idle_spin_proof_done.exchange(true, std::memory_order_relaxed)) {
+        return;
+    }
+    printf("IDLE_SPIN_PROOF adaptive=%d cap=%u floor=%u shrink_after=%u\n",
+        idle_spin_adaptive() ? 1 : 0, idle_spin_max(),
+        idle_spin_floor, idle_shrink_after);
 }
 
 void cpu::do_idle()
