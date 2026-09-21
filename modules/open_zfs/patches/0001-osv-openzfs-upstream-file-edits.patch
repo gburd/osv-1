@@ -203,7 +203,7 @@ index 133217f..72d60cd 100644
  static int
  fletcher_4_param_get(char *buffer, zfs_kernel_param_t *unused)
 diff --git a/module/zfs/arc.c b/module/zfs/arc.c
-index 22f9be7..29044e1 100644
+index 22f9be7..62d8863 100644
 --- a/module/zfs/arc.c
 +++ b/module/zfs/arc.c
 @@ -4097,6 +4097,24 @@ arc_evict_task(void *arg)
@@ -281,7 +281,71 @@ index 22f9be7..29044e1 100644
  /*
   * Determine if the system is under memory pressure and is asking
   * to reclaim memory. A return value of B_TRUE indicates that the system
-@@ -7982,6 +8043,18 @@ arc_set_limits(uint64_t allmem)
+@@ -5176,9 +5237,24 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+ 	case ARC_OVF_SEVERE:
+ 	default:
+ 	{
+-		arc_evict_waiter_t aw;
+-		list_link_init(&aw.aew_node);
+-		cv_init(&aw.aew_cv, NULL, CV_DEFAULT, NULL);
++		/*
++		 * OSv fork COW-coherence: the waiter must NOT live on this
++		 * thread's stack.  Under CONF_fork a PostgreSQL backend runs in
++		 * its own copy-on-write address space, so a stack object is
++		 * physically private to that AS.  The ARC eviction thread runs
++		 * in AS0 and signals aew_cv / walks aew_node cross-AS from
++		 * arc_evict_cb(); a COW-private stack copy makes those touch a
++		 * different physical page than the waiter, so the embedded
++		 * condvar's internal mutex is incoherent and cv_signal ->
++		 * condvar_wake_one -> mutex::lock either NULL-derefs (page fault
++		 * via taskqueue_thread_loop) or drops the wakeup (all vCPUs idle,
++		 * the DB wedges under VU>=4).  kmem_zalloc routes to the identity
++		 * kernel heap (mapped verbatim in every AS) under fork, so the
++		 * waiter is coherent for both the backend and the AS0 evictor.
++		 */
++		arc_evict_waiter_t *aw = kmem_zalloc(sizeof (*aw), KM_SLEEP);
++		list_link_init(&aw->aew_node);
++		cv_init(&aw->aew_cv, NULL, CV_DEFAULT, NULL);
+ 
+ 		uint64_t last_count = 0;
+ 		mutex_enter(&arc_evict_lock);
+@@ -5195,16 +5271,16 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+ 		 * case arc_evict_state_impl() may have deferred
+ 		 * wakeups (but still incremented arc_evict_count).
+ 		 */
+-		aw.aew_count = MAX(last_count, arc_evict_count) + amount;
++		aw->aew_count = MAX(last_count, arc_evict_count) + amount;
+ 
+-		list_insert_tail(&arc_evict_waiters, &aw);
++		list_insert_tail(&arc_evict_waiters, aw);
+ 
+ 		arc_set_need_free();
+ 
+ 		DTRACE_PROBE3(arc__wait__for__eviction,
+ 		    uint64_t, amount,
+ 		    uint64_t, arc_evict_count,
+-		    uint64_t, aw.aew_count);
++		    uint64_t, aw->aew_count);
+ 
+ 		/*
+ 		 * We will be woken up either when arc_evict_count reaches
+@@ -5213,11 +5289,12 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+ 		 * In case of "false" wakeup, we will still be on the list.
+ 		 */
+ 		do {
+-			cv_wait(&aw.aew_cv, &arc_evict_lock);
+-		} while (list_link_active(&aw.aew_node));
++			cv_wait(&aw->aew_cv, &arc_evict_lock);
++		} while (list_link_active(&aw->aew_node));
+ 		mutex_exit(&arc_evict_lock);
+ 
+-		cv_destroy(&aw.aew_cv);
++		cv_destroy(&aw->aew_cv);
++		kmem_free(aw, sizeof (*aw));
+ 	}
+ 	}
+ }
+@@ -7982,6 +8059,18 @@ arc_set_limits(uint64_t allmem)
  	/* Set min cache to 1/32 of all memory, or 32MB, whichever is more. */
  	arc_c_min = MAX(allmem / 32, 2ULL << SPA_MAXBLOCKSHIFT);
  
