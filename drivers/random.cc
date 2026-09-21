@@ -74,6 +74,8 @@ static random_device_priv *to_priv(device *dev)
 // Defined below; forward-declared so random_read() can use it for the
 // not-yet-seeded fast path.
 static int hw_rng_fill(void *buf, int size);
+#endif
+
 #if CONF_core_reseed_on_resume
 // Low-latency, read-path half of the hypervisor-resume CSPRNG reseed described
 // at reseed_on_resume() below. The problem it solves: a full-VM snapshot
