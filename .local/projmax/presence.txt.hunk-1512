@@ -1,0 +1,8 @@
+  REV  scripts/bench/zfs-bench.c hunk1 @@ -28,7 +28,7 @@
+  REV  scripts/bench/zfs-bench.c hunk2 @@ -43,6 +43,7 @@ extern void zfsdev_init(void);
+  REV  scripts/bench/zfs-bench.c hunk3 @@ -86,6 +87,8 @@ typedef struct {
+  REV  scripts/bench/zfs-bench.c hunk4 @@ -118,6 +121,8 @@ static void parse_opts(Opts *o, int star
+  REV  scripts/bench/zfs-bench.c hunk5 @@ -360,6 +365,123 @@ static double wl_fsync(const char *ds,
+  MISS scripts/bench/zfs-bench.c hunk6 @@ -465,6 +587,30 @@ int main(int ac, char **av) {
+HUNKS_TOTAL 6
+HUNKS_REVERSE 5

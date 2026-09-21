@@ -1,0 +1,57 @@
+  MISS Makefile hunk1 @@ -1057,6 +1057,9 @@ objects += arch/$(arch)/firmware.o
+  REV  Makefile hunk2 @@ -1660,11 +1663,20 @@ musl += prng/srand48.o
+  REV  arch/aarch64/fork.cc hunk1 @@ -0,0 +1,92 @@
+  MISS arch/x64/arch-switch.hh hunk1 @@ -13,6 +13,7 @@
+  REV  arch/x64/arch-switch.hh hunk2 @@ -93,6 +94,26 @@ void thread::switch_to()
+  MISS arch/x64/arch-switch.hh hunk3 @@ -108,6 +129,34 @@ void thread::switch_to()
+  MISS arch/x64/fork.cc hunk1 @@ -0,0 +1,126 @@
+  REV  arch/x64/mmu.cc hunk1 @@ -120,15 +120,40 @@ void flush_tlb_all()
+  REV  conf/Makefile hunk1 @@ -56,7 +56,7 @@ CONF_FILES := conf/base.mk conf/$(mode).mk
+  REV  conf/Makefile hunk2 @@ -64,7 +64,7 @@ $(out)/.config.yes: $(CONF_FILES) $(out)/k
+  REV  conf/kconfig/threads hunk1 @@ -6,6 +6,18 @@ config lazy_stack
+  REV  core/condvar.cc hunk1 @@ -13,6 +13,7 @@
+  REV  core/condvar.cc hunk2 @@ -22,7 +23,15 @@ int condvar::wait(mutex* user_mutex, sche
+  REV  core/lfmutex.cc hunk1 @@ -10,6 +10,38 @@
+  REV  core/lfmutex.cc hunk2 @@ -51,7 +83,15 @@ void mutex::lock()
+  REV  core/mmu.cc hunk1 @@ -7,6 +7,7 @@
+  REV  core/mmu.cc hunk2 @@ -29,6 +30,7 @@
+  MISS core/mmu.cc hunk3 @@ -122,6 +124,568 @@ vma_list_type vma_list;
+  REV  core/mmu.cc hunk4 @@ -937,8 +1501,8 @@ public:
+  MISS core/mmu.cc hunk5 @@ -947,10 +1511,15 @@ find_intersecting_vma(uintptr_t addr)
+  MISS core/mmu.cc hunk6 @@ -1481,6 +2050,55 @@ static void vm_sigbus(uintptr_t addr,
+  MISS core/mmu.cc hunk7 @@ -1498,6 +2116,41 @@ void vm_fault(uintptr_t addr, excepti
+  REV  core/mmu.cc hunk8 @@ -1508,6 +2161,7 @@ void vm_fault(uintptr_t addr, exceptio
+  REV  core/sched.cc hunk1 @@ -6,6 +6,7 @@
+  REV  core/sched.cc hunk2 @@ -1087,6 +1088,12 @@ thread::thread(std::function<void ()>
+  REV  documentation/fork.md hunk1 @@ -0,0 +1,111 @@
+  MISS include/osv/fork.hh hunk1 @@ -0,0 +1,86 @@
+  REV  include/osv/mmu-defs.hh hunk1 @@ -96,6 +96,10 @@ enum {
+  REV  include/osv/mmu.hh hunk1 @@ -22,6 +22,7 @@
+  MISS include/osv/mmu.hh hunk2 @@ -372,6 +373,40 @@ error  advise(void* addr, size_t size, 
+  MISS include/osv/sched.hh hunk1 @@ -29,6 +29,7 @@
+  REV  include/osv/sched.hh hunk2 @@ -68,6 +69,10 @@ namespace elf {
+  MISS include/osv/sched.hh hunk3 @@ -836,8 +841,19 @@ private:
+  MISS include/osv/wait_record.hh hunk1 @@ -9,6 +9,10 @@
+  MISS include/osv/wait_record.hh hunk2 @@ -92,4 +96,53 @@ struct wait_record : public waiter {
+  MISS libc/process/execve.cc hunk1 @@ -1,9 +1,185 @@
+  MISS libc/process/fork.cc hunk1 @@ -0,0 +1,261 @@
+  REV  libc/process/waitpid.cc hunk1 @@ -1,8 +1,44 @@
+  MISS libc/pthread.cc hunk1 @@ -276,9 +276,48 @@ int pthread_atfork(void (*prepare)(void
+  MISS libc/signal.cc hunk1 @@ -413,6 +413,13 @@ int kill(pid_t pid, int sig)
+  REV  linux.cc hunk1 @@ -63,6 +63,7 @@
+  REV  linux.cc hunk2 @@ -483,6 +484,7 @@ static long sys_set_tid_address(int *tid
+  REV  linux.cc hunk3 @@ -492,11 +494,27 @@ int sys_clone(unsigned long flags, voi
+  MISS modules/tests/Makefile hunk1 @@ -130,6 +130,8 @@ tests := tst-pthread.so misc-ramdisk.so 
+  REV  runtime.cc hunk1 @@ -7,6 +7,8 @@
+  REV  runtime.cc hunk2 @@ -67,6 +69,17 @@
+  REV  runtime.cc hunk3 @@ -208,20 +221,6 @@ int getpagesize()
+  REV  runtime.cc hunk4 @@ -464,6 +463,18 @@ int pclose(FILE *stream)
+  REV  runtime.cc hunk5 @@ -692,14 +703,6 @@ pid_t wait3(int *status, int options, s
+  REV  tests/payload-exit7.cc hunk1 @@ -0,0 +1,16 @@
+  REV  tests/tst-execve.cc hunk1 @@ -0,0 +1,56 @@
+  REV  tests/tst-fork-cow.cc hunk1 @@ -0,0 +1,90 @@
+  REV  tests/tst-fork-deep.cc hunk1 @@ -0,0 +1,98 @@
+  REV  tests/tst-fork-file-mmap.cc hunk1 @@ -0,0 +1,130 @@
+  REV  tests/tst-fork.cc hunk1 @@ -0,0 +1,108 @@
+HUNKS_TOTAL 55
+HUNKS_REVERSE 36

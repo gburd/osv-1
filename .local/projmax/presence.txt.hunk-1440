@@ -1,0 +1,13 @@
+  MISS fs/vfs/vfs.h hunk1 @@ -113,6 +113,9 @@ int	 sys_link(char *oldpath, char *newpa
+  MISS fs/vfs/vfs_syscalls.cc hunk1 @@ -41,6 +41,7 @@
+  MISS fs/vfs/vfs_syscalls.cc hunk2 @@ -49,6 +50,7 @@
+  MISS fs/vfs/vfs_syscalls.cc hunk3 @@ -141,6 +143,7 @@ sys_open(char *path, int flags, mode_t m
+  MISS fs/vfs/vfs_syscalls.cc hunk4 @@ -582,6 +585,9 @@ sys_mkdir(char *path, mode_t mode)
+  MISS fs/vfs/vfs_syscalls.cc hunk5 @@ -623,6 +629,9 @@ sys_rmdir(char *path)
+  MISS fs/vfs/vfs_syscalls.cc hunk6 @@ -838,6 +847,26 @@ sys_rename(char *src, char *dest)
+  MISS fs/vfs/vfs_syscalls.cc hunk7 @@ -1030,6 +1059,9 @@ sys_unlink(char *path)
+  MISS libc/inotify.cc hunk1 @@ -1,38 +1,346 @@
+  MISS modules/tests/Makefile hunk1 @@ -193,6 +193,8 @@ endif
+  MISS tests/tst-inotify.cc hunk1 @@ -0,0 +1,126 @@
+HUNKS_TOTAL 11
+HUNKS_REVERSE 0

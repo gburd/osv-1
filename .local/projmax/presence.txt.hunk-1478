@@ -1,0 +1,11 @@
+  MISS bsd/porting/netport1.cc hunk1 @@ -90,3 +90,36 @@ int openzfs_cv_timedwait(kcondvar_t *cv, 
+  MISS bsd/sys/cddl/compat/opensolaris/sys/kcondvar.h hunk1 @@ -50,6 +50,12 @@ typedef enum {
+  REV  loader.cc hunk1 @@ -63,6 +63,8 @@
+  REV  loader.cc hunk2 @@ -480,8 +482,15 @@ static void stop_all_remaining_app_thre
+  REV  loader.cc hunk3 @@ -552,6 +561,40 @@ void* do_main_thread(void *_main_args)
+  REV  loader.cc hunk4 @@ -605,13 +648,7 @@ void* do_main_thread(void *_main_args)
+  REV  modules/open_zfs/module.py hunk1 @@ -1,4 +1,5 @@
+  MISS modules/open_zfs/module.py hunk2 @@ -7,7 +8,18 @@ from osv.modules import api
+  MISS modules/open_zfs/osv/include/os/osv/spl/sys/condvar.h hunk1 @@ -50,16 +50,19 @@ static inline int
+HUNKS_TOTAL 9
+HUNKS_REVERSE 5

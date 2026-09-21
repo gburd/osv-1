@@ -1,0 +1,5 @@
+  MISS drivers/nvme-queue.cc hunk1 @@ -342,10 +342,27 @@ void io_queue_pair::req_done()
+  MISS drivers/virtio-vring.cc hunk1 @@ -233,11 +233,23 @@ namespace virtio {
+  MISS drivers/virtio-vring.cc hunk2 @@ -257,24 +269,41 @@ namespace virtio {
+HUNKS_TOTAL 3
+HUNKS_REVERSE 0

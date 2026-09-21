@@ -1,0 +1,9 @@
+  REV  drivers/virtio-blk.cc hunk1 @@ -19,6 +19,7 @@
+  MISS drivers/virtio-blk.cc hunk2 @@ -153,10 +154,46 @@ blk::blk(virtio_device& virtio_dev)
+  REV  drivers/virtio-blk.cc hunk3 @@ -168,12 +205,16 @@ blk::blk(virtio_device& virtio_dev)
+  REV  drivers/virtio-blk.cc hunk4 @@ -187,28 +228,46 @@ blk::blk(virtio_device& virtio_dev)
+  MISS drivers/virtio-blk.cc hunk5 @@ -366,29 +425,65 @@ void blk::req_done()
+  REV  drivers/virtio-blk.hh hunk1 @@ -151,6 +151,11 @@ public:
+  REV  drivers/virtio-blk.hh hunk2 @@ -167,6 +172,8 @@ private:
+HUNKS_TOTAL 7
+HUNKS_REVERSE 5

@@ -1,0 +1,10 @@
+  MISS arch/aarch64/arm-clock.cc hunk1 @@ -42,9 +42,12 @@ private:
+  MISS libc/arch/aarch64/atomic.h hunk1 @@ -9,8 +9,19 @@
+  MISS libc/arch/aarch64/atomic.h hunk2 @@ -26,7 +37,12 @@ static inline int a_ctz_l(unsigned long x
+  MISS modules/open_zfs/open_zfs_sources.mk hunk1 @@ -271,13 +271,21 @@ openzfs-icp += $(OPENZFS)/module/icp/a
+  MISS modules/open_zfs/open_zfs_sources.mk hunk2 @@ -285,6 +293,13 @@ openzfs-icp-asm += $(OPENZFS)/module/ic
+  MISS modules/open_zfs/osv/include/os/osv/spl/sys/isa_defs.h hunk1 @@ -1,7 +1,7 @@
+  MISS modules/open_zfs/osv/include/os/osv/spl/sys/isa_defs.h hunk2 @@ -27,8 +27,15 @@ extern "C" {
+  MISS modules/open_zfs/osv/include/os/osv/spl/sys/simd.h hunk1 @@ -170,6 +170,7 @@ zfs_movbe_available(void)
+HUNKS_TOTAL 8
+HUNKS_REVERSE 0

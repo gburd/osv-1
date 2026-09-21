@@ -1,0 +1,12 @@
+  MISS .gitmodules hunk1 @@ -24,5 +24,5 @@
+  REV  modules/open_zfs/openzfs hunk1 @@ -1 +1 @@
+  MISS modules/open_zfs/osv/include/os/osv/zfs/sys/zfs_context_os.h hunk1 @@ -248,6 +248,14 @@ zfs_uio_init(zfs_uio_t *uio, struct uio
+  MISS modules/open_zfs/osv/include/os/osv/zfs/sys/zfs_vfsops_os.h hunk1 @@ -57,6 +57,7 @@ struct zfsvfs {
+  MISS modules/open_zfs/osv/include/os/osv/zfs/sys/zfs_vfsops_os.h hunk2 @@ -174,7 +175,7 @@ extern int zfs_suspend_fs(zfsvfs_t *zfsv
+  MISS modules/open_zfs/osv/lib/libspl/include/os/osv/sys/zfs_context_os.h hunk1 @@ -3,7 +3,7 @@
+  MISS modules/open_zfs/osv/module/os/osv/zfs/vdev_disk.c hunk1 @@ -41,8 +41,9 @@ vdev_disk_rele(vdev_t *vd)
+  MISS modules/open_zfs/osv/module/os/osv/zfs/zfs_file_os.c hunk1 @@ -20,9 +20,10 @@
+  MISS modules/open_zfs/osv/module/os/osv/zfs/zfs_vfsops.c hunk1 @@ -104,6 +104,48 @@ zfsvfs_create(const char *osname, boole
+  MISS modules/open_zfs/osv/module/zfs/zfs_gitrev.h hunk1 @@ -2,6 +2,6 @@
+HUNKS_TOTAL 10
+HUNKS_REVERSE 1

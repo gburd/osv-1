@@ -1,0 +1,7 @@
+  MISS modules/open_zfs/osv/module/os/osv/zfs/arc_os.c hunk1 @@ -106,6 +106,18 @@ arc_default_max(uint64_t min, uint64_t 
+  MISS modules/open_zfs/osv/module/os/osv/zfs/zfs_initialize_osv.c hunk1 @@ -48,6 +48,7 @@ __thread void *zfs_fsyncer_key;
+  MISS modules/open_zfs/osv/module/os/osv/zfs/zfs_initialize_osv.c hunk2 @@ -59,14 +60,23 @@ extern uint64_t arc_reduce_target_size_n
+  MISS modules/open_zfs/patches/0001-osv-openzfs-upstream-file-edits.patch hunk1 @@ -231,7 +231,7 @@ index 22f9be7..29044e1 100644
+  MISS modules/open_zfs/patches/0001-osv-openzfs-upstream-file-edits.patch hunk2 @@ -277,10 +277,34 @@ index 22f9be7..29044e1 100644
+HUNKS_TOTAL 5
+HUNKS_REVERSE 0

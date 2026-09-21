@@ -1,0 +1,353 @@
+  REV  .gitignore hunk1 @@ -53,3 +53,4 @@ modules/dl_tests/usr.manifest
+  REV  .gitmodules hunk1 @@ -21,3 +21,8 @@
+  MISS Makefile hunk1 @@ -41,6 +41,36 @@ endif
+  REV  Makefile hunk2 @@ -105,11 +135,18 @@ out = build/$(mode).$(arch)
+  REV  Makefile hunk3 @@ -738,155 +775,19 @@ xdr += bsd/sys/xdr/xdr.o
+  REV  Makefile hunk4 @@ -1057,6 +958,10 @@ objects += arch/$(arch)/firmware.o
+  REV  Makefile hunk5 @@ -1660,11 +1565,20 @@ musl += prng/srand48.o
+  REV  Makefile hunk6 @@ -2354,7 +2268,12 @@ else
+  REV  Makefile hunk7 @@ -2435,6 +2354,383 @@ $(out)/gen-ctype-data: gen-ctype-dat
+  REV  Makefile hunk8 @@ -2599,3 +2895,4 @@ $(zfs-cmd-objects): CFLAGS += -Wno-swi
+  REV  apps hunk1 @@ -1 +1 @@
+  REV  arch/aarch64/fork.cc hunk1 @@ -0,0 +1,92 @@
+  REV  arch/x64/arch-switch.hh hunk1 @@ -13,6 +13,10 @@
+  REV  arch/x64/arch-switch.hh hunk2 @@ -93,6 +97,26 @@ void thread::switch_to()
+  REV  arch/x64/arch-switch.hh hunk3 @@ -108,6 +132,69 @@ void thread::switch_to()
+  REV  arch/x64/arch-switch.hh hunk4 @@ -123,8 +210,12 @@ void thread::switch_to()
+  REV  arch/x64/arch-switch.hh hunk5 @@ -161,6 +252,18 @@ void thread::init_stack()
+  REV  arch/x64/arch-switch.hh hunk6 @@ -181,8 +284,15 @@ void thread::init_stack()
+  REV  arch/x64/arch-switch.hh hunk7 @@ -262,7 +372,18 @@ void thread::setup_tcb()
+  REV  arch/x64/arch-switch.hh hunk8 @@ -296,8 +417,15 @@ void thread::setup_large_syscall_stack(
+  MISS arch/x64/fork.cc hunk1 @@ -0,0 +1,127 @@
+  REV  arch/x64/mmu.cc hunk1 @@ -120,15 +120,40 @@ void flush_tlb_all()
+  REV  bsd/porting/cpu.cc hunk1 @@ -16,6 +16,11 @@ extern "C" OSV_LIBSOLARIS_API int get_cpu
+  REV  bsd/porting/kthread.cc hunk1 @@ -33,7 +33,7 @@ kthread_add(void (*func)(void *), void *ar
+  REV  bsd/porting/kthread.cc hunk2 @@ -50,7 +50,7 @@ int kproc_create(void (*func)(void *), voi
+  MISS bsd/porting/netport1.cc hunk1 @@ -62,9 +62,31 @@ size_t get_physmem(void)
+  REV  bsd/porting/shrinker.cc hunk1 @@ -8,8 +8,10 @@
+  REV  bsd/porting/shrinker.cc hunk2 @@ -57,10 +59,11 @@ size_t arc_shrinker::request_memory(size
+  REV  bsd/porting/shrinker.cc hunk3 @@ -76,6 +79,8 @@ size_t arc_shrinker::request_memory(size_t
+  REV  bsd/porting/shrinker.cc hunk4 @@ -87,6 +92,11 @@ void bsd_shrinker_init(void)
+  REV  bsd/porting/shrinker.cc hunk5 @@ -111,4 +121,8 @@ extern "C" OSV_LIBSOLARIS_API void regis
+  REV  bsd/porting/uma_stub.cc hunk1 @@ -15,6 +15,7 @@
+  REV  bsd/porting/uma_stub.cc hunk2 @@ -53,6 +54,20 @@ void * uma_zalloc_arg(uma_zone_t zone, vo
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c hunk1 @@ -37,10 +37,56 @@
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c hunk2 @@ -98,6 +144,9 @@ void *
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.c hunk3 @@ -108,6 +157,9 @@ kmem_cache_alloc(kmem_cache_t *cache, in
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_misc.c hunk1 @@ -35,17 +35,22 @@
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c hunk1 @@ -36,18 +36,23 @@
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c hunk2 @@ -56,6 +61,7 @@ system_taskq_fini(void *arg)
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c hunk3 @@ -100,6 +106,26 @@ taskq_member(taskq_t *tq, kthread_t *th
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c hunk4 @@ -155,7 +181,7 @@ taskq_dispatch_safe(taskq_t *tq, task_fu
+  REV  bsd/sys/cddl/compat/opensolaris/kern/opensolaris_taskq.c hunk5 @@ -169,3 +195,135 @@ taskq_dispatch_safe(taskq_t *tq, task_
+  REV  bsd/sys/cddl/compat/opensolaris/openzfs_osv_compat.c hunk1 @@ -0,0 +1,347 @@
+  MISS bsd/sys/cddl/compat/opensolaris/sys/kcondvar.h hunk1 @@ -48,6 +48,8 @@ typedef enum {
+  REV  bsd/sys/dev/random/random_harvestq.cc hunk1 @@ -63,6 +63,9 @@ __FBSDID("$FreeBSD$");
+  REV  bsd/sys/dev/random/random_harvestq.cc hunk2 @@ -125,7 +128,27 @@ random_kthread(void *arg)
+  REV  bsd/sys/kern/subr_taskqueue.c hunk1 @@ -40,6 +40,32 @@
+  REV  bsd/sys/kern/subr_taskqueue.c hunk2 @@ -100,7 +126,9 @@ _taskqueue_create(const char *name, int 
+  REV  bsd/sys/kern/subr_taskqueue.c hunk3 @@ -303,6 +331,39 @@ taskqueue_run_locked(struct taskqueue *
+  REV  bsd/sys/kern/subr_taskqueue.c hunk4 @@ -417,7 +478,9 @@ taskqueue_start_threads(struct taskqueue
+  REV  bsd/sys/sys/taskqueue.h hunk1 @@ -79,6 +79,7 @@ int	taskqueue_cancel_timeout(struct taskqu
+  REV  conf/Makefile hunk1 @@ -56,7 +56,7 @@ CONF_FILES := conf/base.mk conf/$(mode).mk
+  REV  conf/Makefile hunk2 @@ -64,7 +64,7 @@ $(out)/.config.yes: $(CONF_FILES) $(out)/k
+  REV  conf/kconfig/threads hunk1 @@ -6,6 +6,18 @@ config lazy_stack
+  REV  core/app.cc hunk1 @@ -21,6 +21,10 @@
+  REV  core/app.cc hunk2 @@ -155,6 +159,20 @@ shared_app_t application::run_and_join(
+  REV  core/app.cc hunk3 @@ -164,7 +182,22 @@ application::application(const std::str
+  REV  core/async.cc hunk1 @@ -20,6 +20,10 @@
+  REV  core/async.cc hunk2 @@ -148,11 +152,20 @@ public:
+  REV  core/condvar.cc hunk1 @@ -13,6 +13,7 @@
+  REV  core/condvar.cc hunk2 @@ -22,7 +23,15 @@ int condvar::wait(mutex* user_mutex, sche
+  REV  core/elf.cc hunk1 @@ -8,6 +8,10 @@
+  REV  core/elf.cc hunk2 @@ -419,7 +423,25 @@ void file::load_segment(const Elf64_Phd
+  MISS core/elf.cc hunk3 @@ -428,6 +450,24 @@ void file::load_segment(const Elf64_Phd
+  REV  core/elf.cc hunk4 @@ -842,6 +882,31 @@ void object::relocate_pltgot()
+  REV  core/elf.cc hunk5 @@ -893,6 +958,19 @@ void* object::resolve_pltgot(unsigned i
+  REV  core/epoll.cc hunk1 @@ -24,6 +24,7 @@
+  REV  core/epoll.cc hunk2 @@ -59,6 +60,26 @@ inline uint32_t events_poll_to_epoll(uint
+  REV  core/epoll.cc hunk3 @@ -95,6 +116,7 @@ public:
+  REV  core/epoll.cc hunk4 @@ -155,12 +177,17 @@ public:
+  REV  core/epoll.cc hunk5 @@ -216,6 +243,7 @@ public:
+  REV  core/epoll.cc hunk6 @@ -237,6 +265,7 @@ public:
+  MISS core/fork_arena.cc hunk1 @@ -0,0 +1,337 @@
+  REV  core/lfmutex.cc hunk1 @@ -10,6 +10,38 @@
+  REV  core/lfmutex.cc hunk2 @@ -51,7 +83,15 @@ void mutex::lock()
+  REV  core/mempool.cc hunk1 @@ -36,6 +36,11 @@
+  REV  core/mempool.cc hunk2 @@ -166,6 +171,17 @@ void pool::collect_garbage()
+  REV  core/mempool.cc hunk3 @@ -253,6 +269,14 @@ void* pool::alloc()
+  REV  core/mempool.cc hunk4 @@ -316,6 +340,36 @@ void pool::free_same_cpu(free_object* o
+  REV  core/mempool.cc hunk5 @@ -338,6 +392,35 @@ void pool::free_same_cpu(free_object* o
+  REV  core/mempool.cc hunk6 @@ -390,6 +473,17 @@ private:
+  REV  core/mempool.cc hunk7 @@ -901,6 +995,23 @@ static void* mapped_malloc_large(size_t
+  REV  core/mempool.cc hunk8 @@ -923,9 +1034,38 @@ static void* malloc_large(size_t size,
+  REV  core/mempool.cc hunk9 @@ -946,7 +1086,11 @@ static void* malloc_large(size_t size,
+  REV  core/mempool.cc hunk10 @@ -1059,6 +1203,42 @@ void reclaimer_waiters::wait(size_t b
+  REV  core/mempool.cc hunk11 @@ -1798,8 +1978,68 @@ static inline void untracked_free_pag
+  REV  core/mempool.cc hunk12 @@ -1880,6 +2120,30 @@ static inline void* std_malloc(size_t
+  REV  core/mempool.cc hunk13 @@ -1926,6 +2190,11 @@ void* calloc(size_t nmemb, size_t siz
+  REV  core/mempool.cc hunk14 @@ -1984,6 +2253,15 @@ void free(void* object)
+  REV  core/mmu.cc hunk1 @@ -7,6 +7,7 @@
+  REV  core/mmu.cc hunk2 @@ -25,15 +26,23 @@
+  MISS core/mmu.cc hunk3 @@ -64,8 +73,9 @@ struct vma_range_compare {
+  REV  core/mmu.cc hunk4 @@ -99,7 +109,12 @@ typedef boost::intrusive::set<vma,
+  REV  core/mmu.cc hunk5 @@ -107,9 +122,9 @@ struct vma_list_type : vma_list_base {
+  MISS core/mmu.cc hunk6 @@ -122,6 +137,656 @@ vma_list_type vma_list;
+  REV  core/mmu.cc hunk7 @@ -612,6 +1277,21 @@ public:
+  REV  core/mmu.cc hunk8 @@ -937,8 +1617,8 @@ public:
+  REV  core/mmu.cc hunk9 @@ -947,10 +1627,15 @@ find_intersecting_vma(uintptr_t addr)
+  REV  core/mmu.cc hunk10 @@ -959,10 +1644,11 @@ find_intersecting_vma(uintptr_t addr)
+  REV  core/mmu.cc hunk11 @@ -974,11 +1660,11 @@ find_intersecting_vmas(const addr_ran
+  REV  core/mmu.cc hunk12 @@ -1024,10 +1710,11 @@ uintptr_t find_hole(uintptr_t start,
+  REV  core/mmu.cc hunk13 @@ -1073,9 +1760,10 @@ ulong evacuate(uintptr_t start, uintp
+  REV  core/mmu.cc hunk14 @@ -1155,6 +1843,188 @@ private:
+  REV  core/mmu.cc hunk15 @@ -1232,9 +2102,9 @@ uintptr_t allocate(vma *v, uintptr_t s
+  REV  core/mmu.cc hunk16 @@ -1319,7 +2189,7 @@ static void hugepage(void* addr, size_
+  REV  core/mmu.cc hunk17 @@ -1360,10 +2230,31 @@ void* map_anon(const void* addr, siz
+  REV  core/mmu.cc hunk18 @@ -1395,10 +2286,16 @@ void* map_file(const void* addr, siz
+  MISS core/mmu.cc hunk19 @@ -1481,8 +2378,116 @@ static void vm_sigbus(uintptr_t addr
+  MISS core/mmu.cc hunk20 @@ -1498,6 +2503,51 @@ void vm_fault(uintptr_t addr, excepti
+  REV  core/mmu.cc hunk21 @@ -1508,6 +2558,7 @@ void vm_fault(uintptr_t addr, exceptio
+  REV  core/mmu.cc hunk22 @@ -1565,13 +2616,13 @@ unsigned vma::flags() const
+  REV  core/mmu.cc hunk23 @@ -1640,8 +2691,38 @@ anon_vma::anon_vma(addr_range range, 
+  MISS core/mmu.cc hunk24 @@ -1649,9 +2730,9 @@ void anon_vma::split(uintptr_t edge)
+  REV  core/mmu.cc hunk25 @@ -1930,9 +3011,9 @@ void file_vma::split(uintptr_t edge)
+  REV  core/mmu.cc hunk26 @@ -2007,6 +3088,17 @@ void* shm_file::page(uintptr_t hp_off
+  REV  core/mmu.cc hunk27 @@ -2127,7 +3219,7 @@ void free_initial_memory_range(uintptr
+  REV  core/mmu.cc hunk28 @@ -2139,7 +3231,7 @@ error mprotect(const void *addr, size_
+  REV  core/mmu.cc hunk29 @@ -2152,7 +3244,7 @@ error munmap(const void *addr, size_t 
+  REV  core/mmu.cc hunk30 @@ -2164,7 +3256,7 @@ error mincore(const void *addr, size_t
+  REV  core/net_channel.cc hunk1 @@ -21,6 +21,24 @@
+  REV  core/net_channel.cc hunk2 @@ -58,6 +76,7 @@ void net_channel::wake_pollers()
+  REV  core/net_channel.cc hunk3 @@ -72,6 +91,7 @@ void net_channel::add_poller(pollreq& pr)
+  REV  core/net_channel.cc hunk4 @@ -87,6 +107,7 @@ void net_channel::add_epoll(const epoll_p
+  REV  core/net_channel.cc hunk5 @@ -98,6 +119,7 @@ void net_channel::del_epoll(const epoll_p
+  REV  core/net_channel.cc hunk6 @@ -113,6 +135,7 @@ classifier::classifier()
+  MISS core/pagecache.cc hunk1 @@ -545,6 +545,70 @@ extern "C" void osv_free_page(void *p)
+  REV  core/rcu.cc hunk1 @@ -17,6 +17,7 @@
+  REV  core/rcu.cc hunk2 @@ -212,9 +213,26 @@ void rcu_defer(std::function<void ()>&&
+  REV  core/rwlock.cc hunk1 @@ -11,6 +11,16 @@
+  REV  core/rwlock.cc hunk2 @@ -130,6 +140,27 @@ void rwlock::rlock()
+  REV  core/sched.cc hunk1 @@ -6,6 +6,7 @@
+  MISS core/sched.cc hunk2 @@ -24,6 +25,10 @@
+  MISS core/sched.cc hunk3 @@ -133,6 +138,19 @@ std::list<cpu::notifier*> cpu::notifier
+  REV  core/sched.cc hunk4 @@ -140,7 +158,11 @@ public:
+  REV  core/sched.cc hunk5 @@ -408,7 +430,31 @@ void cpu::reschedule_from_interrupt(boo
+  REV  core/sched.cc hunk6 @@ -549,7 +595,19 @@ void cpu::handle_incoming_wakeups()
+  REV  core/sched.cc hunk7 @@ -711,6 +769,12 @@ void thread::pin(thread *t, cpu *target
+  REV  core/sched.cc hunk8 @@ -727,6 +791,9 @@ void thread::pin(thread *t, cpu *target_
+  MISS core/sched.cc hunk9 @@ -827,6 +894,13 @@ void cpu::load_balance()
+  REV  core/sched.cc hunk10 @@ -1087,6 +1161,12 @@ thread::thread(std::function<void ()>
+  REV  core/sched.cc hunk11 @@ -1455,6 +1535,26 @@ void thread::stop_wait()
+  REV  core/sched.cc hunk12 @@ -1548,6 +1648,141 @@ void timer_base::client::resume_time
+  REV  core/sched.cc hunk13 @@ -1859,7 +2094,7 @@ void thread::reaper::reap()
+  MISS core/sched.cc hunk14 @@ -1872,7 +2107,11 @@ void thread::reaper::add_zombie(threa
+  REV  core/semaphore.cc hunk1 @@ -6,6 +6,10 @@
+  REV  core/semaphore.cc hunk2 @@ -29,33 +33,69 @@ void semaphore::post_unlocked(unsigned u
+  REV  core/waitqueue.cc hunk1 @@ -18,26 +18,28 @@ namespace sched {
+  REV  docs/pg-osv-kvm-walls.md hunk1 @@ -0,0 +1,105 @@
+  REV  docs/zfs-performance.md hunk1 @@ -0,0 +1,170 @@
+  REV  documentation/fork.md hunk1 @@ -0,0 +1,111 @@
+  REV  drivers/console-multiplexer.cc hunk1 @@ -8,6 +8,10 @@
+  REV  drivers/console-multiplexer.cc hunk2 @@ -75,6 +79,23 @@ void console_multiplexer::write_ll(const 
+  MISS drivers/random.cc hunk1 @@ -56,6 +56,10 @@ static random_device_priv *to_priv(device
+  MISS drivers/random.cc hunk2 @@ -64,6 +68,32 @@ random_read(struct device *dev, struct ui
+  REV  drivers/virtio-balloon.cc hunk1 @@ -219,7 +219,7 @@ void balloon::worker()
+  REV  drivers/virtio-blk.cc hunk1 @@ -16,6 +16,10 @@
+  REV  drivers/virtio-blk.cc hunk2 @@ -43,6 +47,10 @@ TRACEPOINT(trace_virtio_blk_make_request_
+  MISS drivers/virtio-blk.cc hunk3 @@ -149,9 +157,13 @@ blk::blk(virtio_device& virtio_dev)
+  REV  drivers/virtio-blk.cc hunk4 @@ -295,6 +307,8 @@ int blk::drain_queue(vring* queue)
+  REV  drivers/virtio-blk.cc hunk5 @@ -450,7 +464,14 @@ int blk::make_request(struct bio* bio)
+  REV  drivers/virtio-blk.cc hunk6 @@ -475,6 +496,8 @@ int blk::make_request(struct bio* bio)
+  REV  drivers/virtio-net.cc hunk1 @@ -14,6 +14,10 @@
+  REV  drivers/virtio-net.cc hunk2 @@ -664,6 +668,16 @@ inline int net::txq::try_xmit_one_locke
+  REV  exported_symbols/osv_libsolaris.so.symbols hunk1 @@ -1,3 +1,7 @@
+  REV  exported_symbols/osv_libsolaris.so.symbols hunk2 @@ -20,6 +24,8 @@ file_dentry
+  REV  exported_symbols/osv_libsolaris.so.symbols hunk3 @@ -34,8 +40,14 @@ lockfree_mutex_try_lock
+  REV  exported_symbols/osv_libsolaris.so.symbols hunk4 @@ -45,8 +57,6 @@ register_pagecache_arc_funs
+  REV  exported_symbols/osv_libsolaris.so.symbols hunk5 @@ -55,13 +65,12 @@ rw_try_wlock
+  REV  exported_symbols/osv_libsolaris.so.symbols hunk6 @@ -90,6 +99,6 @@ vm_throttling_needed
+  REV  fs/devfs/device.cc hunk1 @@ -140,6 +140,7 @@ void read_partition_table(struct device 
+  REV  fs/devfs/device.cc hunk2 @@ -218,6 +219,7 @@ device_create(struct driver *drv, const 
+  REV  fs/fs.hh hunk1 @@ -13,6 +13,7 @@
+  REV  fs/fs.hh hunk2 @@ -48,6 +49,18 @@ template <class file_type, typename... ar
+  REV  fs/ramfs/ramfs_vnops.cc hunk1 @@ -45,6 +45,9 @@
+  REV  fs/ramfs/ramfs_vnops.cc hunk2 @@ -72,6 +75,14 @@ ramfs_allocate_node(const char *name, int
+  REV  fs/ramfs/ramfs_vnops.cc hunk3 @@ -362,9 +373,37 @@ ramfs_enlarge_data_buffer(struct ramfs_
+  REV  fs/vfs/kern_descrip.cc hunk1 @@ -18,6 +18,10 @@
+  MISS fs/vfs/kern_descrip.cc hunk2 @@ -82,10 +86,39 @@ int fdalloc(struct file *fp, int *newfd)
+  REV  fs/vfs/kern_descrip.cc hunk3 @@ -93,7 +126,20 @@ int fdclose(int fd)
+  REV  fs/vfs/kern_descrip.cc hunk4 @@ -101,6 +147,46 @@ int fdclose(int fd)
+  REV  fs/vfs/kern_descrip.cc hunk5 @@ -249,6 +335,21 @@ void file::epoll_add(epoll_ptr ep)
+  REV  fs/vfs/kern_physio.cc hunk1 @@ -19,10 +19,32 @@
+  REV  fs/vfs/main.cc hunk1 @@ -2611,7 +2611,7 @@ static void mount_fs(mntent *m)
+  REV  fs/vfs/vfs_dentry.cc hunk1 @@ -40,6 +40,7 @@
+  REV  fs/vfs/vfs_dentry.cc hunk2 @@ -70,6 +71,12 @@ struct dentry *
+  MISS fs/vfs/vfs_dentry.cc hunk3 @@ -157,8 +164,20 @@ dentry_move(struct dentry *dp, struct d
+  REV  fs/vfs/vfs_vnode.cc hunk1 @@ -42,6 +42,7 @@
+  REV  fs/vfs/vfs_vnode.cc hunk2 @@ -187,6 +188,15 @@ vget(struct mount *mp, uint64_t ino, st
+  REV  images/zfs-test.py hunk1 @@ -0,0 +1,14 @@
+  REV  include/osv/device.h hunk1 @@ -128,6 +128,7 @@ struct device {
+  REV  include/osv/elf.hh hunk1 @@ -19,6 +19,7 @@
+  MISS include/osv/fork.hh hunk1 @@ -0,0 +1,102 @@
+  MISS include/osv/fork_arena.hh hunk1 @@ -0,0 +1,111 @@
+  REV  include/osv/mempool.hh hunk1 @@ -24,6 +24,7 @@
+  REV  include/osv/mempool.hh hunk2 @@ -70,6 +71,26 @@ private:
+  REV  include/osv/mmu-defs.hh hunk1 @@ -96,6 +96,10 @@ enum {
+  REV  include/osv/mmu.hh hunk1 @@ -22,6 +22,7 @@
+  REV  include/osv/mmu.hh hunk2 @@ -131,6 +132,13 @@ public:
+  MISS include/osv/mmu.hh hunk3 @@ -372,6 +380,52 @@ error  advise(void* addr, size_t size, 
+  MISS include/osv/pagecache.hh hunk1 @@ -85,6 +85,31 @@ extern "C" {
+  MISS include/osv/sched.hh hunk1 @@ -29,6 +29,10 @@
+  REV  include/osv/sched.hh hunk2 @@ -68,6 +72,10 @@ namespace elf {
+  REV  include/osv/sched.hh hunk3 @@ -82,6 +90,12 @@ namespace sched {
+  REV  include/osv/sched.hh hunk4 @@ -198,6 +212,17 @@ public:
+  REV  include/osv/sched.hh hunk5 @@ -469,7 +494,26 @@ public:
+  REV  include/osv/sched.hh hunk6 @@ -836,8 +880,43 @@ private:
+  REV  include/osv/sched.hh hunk7 @@ -862,6 +941,14 @@ private:
+  MISS include/osv/sched.hh hunk8 @@ -1012,6 +1099,35 @@ struct cpu : private timer_base::clie
+  REV  include/osv/vnode.h hunk1 @@ -126,6 +126,7 @@ struct vattr {
+  REV  include/osv/wait_record.hh hunk1 @@ -9,6 +9,11 @@
+  REV  include/osv/wait_record.hh hunk2 @@ -92,4 +97,61 @@ struct wait_record : public waiter {
+  REV  include/osv/waitqueue.hh hunk1 @@ -94,6 +94,28 @@ namespace sched {
+  REV  include/osv/waitqueue.hh hunk2 @@ -103,6 +125,8 @@ private:
+  REV  libc/cxa_thread_atexit.cc hunk1 @@ -26,6 +26,10 @@
+  REV  libc/cxa_thread_atexit.cc hunk2 @@ -55,6 +59,14 @@ static __thread linked_destructor *thread
+  REV  libc/pipe.cc hunk1 @@ -6,6 +6,8 @@
+  REV  libc/pipe.cc hunk2 @@ -92,6 +94,14 @@ int pipe2(int pipefd[2], int flags) {
+  REV  libc/process/execve.cc hunk1 @@ -1,9 +1,197 @@
+  MISS libc/process/fork.cc hunk1 @@ -0,0 +1,648 @@
+  REV  libc/process/waitpid.cc hunk1 @@ -1,8 +1,44 @@
+  REV  libc/pthread.cc hunk1 @@ -30,6 +30,9 @@
+  REV  libc/pthread.cc hunk2 @@ -276,9 +279,72 @@ int pthread_atfork(void (*prepare)(void
+  REV  libc/sem.cc hunk1 @@ -12,6 +12,10 @@
+  REV  libc/sem.cc hunk2 @@ -55,6 +59,22 @@ OSV_LIBC_API
+  REV  libc/shm.cc hunk1 @@ -14,9 +14,43 @@
+  REV  libc/shm.cc hunk2 @@ -29,6 +63,13 @@ static std::unordered_map<const void*, in
+  REV  libc/shm.cc hunk3 @@ -48,6 +89,7 @@ void *shmat(int shmid, const void *shmaddr
+  REV  libc/shm.cc hunk4 @@ -56,6 +98,9 @@ void *shmat(int shmid, const void *shmaddr
+  REV  libc/shm.cc hunk5 @@ -63,6 +108,9 @@ int shmctl(int shmid, int cmd, struct shm
+  REV  libc/shm.cc hunk6 @@ -108,6 +156,7 @@ int shmget(key_t key, size_t size, int s
+  REV  libc/shm.cc hunk7 @@ -151,6 +200,7 @@ int shm_open(const char *name, int oflag
+  REV  libc/signal.cc hunk1 @@ -22,6 +22,12 @@
+  REV  libc/signal.cc hunk2 @@ -37,8 +43,66 @@ __thread __attribute__((aligned(sizeof(si
+  REV  libc/signal.cc hunk3 @@ -80,26 +144,52 @@ mutex waiters_mutex;
+  REV  libc/signal.cc hunk4 @@ -135,11 +225,11 @@ void generate_signal(siginfo_t &siginf
+  REV  libc/signal.cc hunk5 @@ -257,11 +347,12 @@ int sigaction(int signum, const struct
+  REV  libc/signal.cc hunk6 @@ -318,8 +409,25 @@ int sigignore(int signum)
+  REV  libc/signal.cc hunk7 @@ -345,6 +453,17 @@ int osv_sigtimedwait(const sigset_t *se
+  REV  libc/signal.cc hunk8 @@ -358,6 +477,14 @@ int osv_sigtimedwait(const sigset_t *se
+  REV  libc/signal.cc hunk9 @@ -395,6 +522,76 @@ int osv_sigtimedwait(const sigset_t *se
+  REV  libc/signal.cc hunk10 @@ -402,6 +599,7 @@ int kill(pid_t pid, int sig)
+  REV  libc/signal.cc hunk11 @@ -412,12 +610,32 @@ int kill(pid_t pid, int sig)
+  REV  libc/signal.cc hunk12 @@ -425,6 +643,16 @@ int kill(pid_t pid, int sig)
+  REV  libc/signal.cc hunk13 @@ -437,11 +665,33 @@ int kill(pid_t pid, int sig)
+  REV  libc/signal.cc hunk14 @@ -451,6 +701,22 @@ int kill(pid_t pid, int sig)
+  REV  linux.cc hunk1 @@ -63,6 +63,7 @@
+  REV  linux.cc hunk2 @@ -483,6 +484,7 @@ static long sys_set_tid_address(int *tid
+  REV  linux.cc hunk3 @@ -492,11 +494,27 @@ int sys_clone(unsigned long flags, voi
+  REV  loader.cc hunk1 @@ -26,6 +26,9 @@
+  REV  loader.cc hunk2 @@ -499,7 +502,7 @@ static int load_zfs_library_and_mount_zf
+  REV  loader.cc hunk3 @@ -747,6 +750,15 @@ void* do_main_thread(void *_main_args)
+  REV  modules/bsd_zfs/bsd_zfs_sources.mk hunk1 @@ -0,0 +1,171 @@
+  REV  modules/bsd_zfs/module.py hunk1 @@ -0,0 +1,9 @@
+  REV  modules/open_zfs/FINDINGS-osv-openzfs.md hunk1 @@ -0,0 +1,119 @@
+  REV  modules/open_zfs/PERF-osv-openzfs.md hunk1 @@ -0,0 +1,168 @@
+  MISS modules/open_zfs/module.py hunk1 @@ -0,0 +1,12 @@
+  REV  modules/open_zfs/open_zfs_sources.mk hunk1 @@ -0,0 +1,451 @@
+  REV  modules/open_zfs/openzfs hunk1 @@ -0,0 +1 @@
+  MISS modules/open_zfs/patches/0001-OSv-Add-complete-platform-layer-with-SPL-for-OpenZFS.patch hunk1 @@ -0,0 +1,5797 @@
+  REV  modules/open_zfs/patches/0002-feat-zfs-Add-OSv-OS-layer-implementation-with-auto-u.patch hunk1 @@ -0,0 +1,1393 @@
+  REV  modules/open_zfs/patches/0003-OSv-Update-platform-layer-for-OpenZFS-2.4.1-compatib.patch hunk1 @@ -0,0 +1,1052 @@
+  REV  modules/open_zfs/patches/0004-zfs-implement-complete-OSv-platform-layer-for-OpenZF.patch hunk1 @@ -0,0 +1,6052 @@
+  REV  modules/open_zfs/patches/0005-zfs-add-vop_cache-zfs_freesp-and-pagecache-bridge-fo.patch hunk1 @@ -0,0 +1,414 @@
+  REV  modules/open_zfs/patches/0006-zfs-add-comment-explaining-fvisibility-hidden-and-de.patch hunk1 @@ -0,0 +1,27 @@
+  REV  modules/open_zfs/patches/0007-zfs-fix-symlink-vnode-type-by-storing-file-type-bits.patch hunk1 @@ -0,0 +1,49 @@
+  REV  modules/open_zfs/patches/0008-zfs-implement-ZFS-encryption-AES-256-GCM-key-managem.patch hunk1 @@ -0,0 +1,2853 @@
+  REV  modules/open_zfs/patches/0009-zfs-fix-ARC-sizing-memory-pressure-and-OSv-platform-.patch hunk1 @@ -0,0 +1,531 @@
+  REV  modules/open_zfs/patches/0010-zfs-clarify-that-zio_crypt_os.c-is-superseded-by-zio.patch hunk1 @@ -0,0 +1,58 @@
+  REV  modules/open_zfs/patches/0011-zfs-implement-ZIO_TYPE_TRIM-in-vdev_disk_io_start-fo.patch hunk1 @@ -0,0 +1,64 @@
+  REV  modules/open_zfs/patches/0012-zfs-fix-vdev_disk_bio_done-to-map-BIO_DISCARD-errors.patch hunk1 @@ -0,0 +1,50 @@
+  REV  modules/open_zfs/patches/0013-zfs-add-zfs_mount_setattr-stub-for-OSv-required-by-2.patch hunk1 @@ -0,0 +1,41 @@
+  REV  modules/open_zfs/patches/0014-zfs-skip-.1-partition-append-for-OSv-Crucible-volume.patch hunk1 @@ -0,0 +1,73 @@
+  REV  modules/open_zfs/patches/0015-zfs-fix-zfs_uioskip-to-advance-the-iov-pointer.patch hunk1 @@ -0,0 +1,84 @@
+  REV  modules/open_zfs/patches/0016-zfs-derive-vdev-ashift-from-device-block-size-fix-mu.patch hunk1 @@ -0,0 +1,96 @@
+  REV  modules/open_zfs/patches/0017-zfs-flush-root-znode-in-zfs_osv_unmount-before-disow.patch hunk1 @@ -0,0 +1,62 @@
+  REV  modules/open_zfs/patches/0018-zfs-embed-caller-owned-ostask-in-taskq_ent_t-to-fix-.patch hunk1 @@ -0,0 +1,104 @@
+  REV  modules/open_zfs/patches/0019-zfs-share-decompressed-ARC-pages-into-mmap-page-cach.patch hunk1 @@ -0,0 +1,152 @@
+  REV  modules/open_zfs/patches/0020-zfs-back-getmntent-getmntany-with-live-OSv-VFS-mount-table.patch hunk1 @@ -0,0 +1,166 @@
+  REV  modules/open_zfs/patches/0021-zfs-run-libtpool-jobs-inline-on-OSv.patch hunk1 @@ -0,0 +1,57 @@
+  REV  modules/open_zfs/patches/0022-zfs-force-serial-dataset-mounting-on-OSv.patch hunk1 @@ -0,0 +1,44 @@
+  REV  modules/open_zfs/patches/0023-zfs-use-whole-raw-disk-on-OSv-when-no-.1-partition.patch hunk1 @@ -0,0 +1,63 @@
+  REV  modules/open_zfs/patches/0024-zfs-drain-all-live-znodes-in-zfs_osv_unmount.patch hunk1 @@ -0,0 +1,70 @@
+  REV  modules/open_zfs/patches/0025-zfs-guard-NULL-column-header-in-zpool-list.patch hunk1 @@ -0,0 +1,32 @@
+  REV  modules/open_zfs/patches/0026-zfs-enforce-the-readonly-property-on-OSv.patch hunk1 @@ -0,0 +1,152 @@
+  REV  modules/open_zfs/patches/0027-zfs-advertise-TRIM-support-on-OSv-vdev_disk.patch hunk1 @@ -0,0 +1,44 @@
+  REV  modules/open_zfs/patches/0028-zfs-refresh-osv-vnode-v_size-after-write.patch hunk1 @@ -0,0 +1,57 @@
+  REV  modules/open_zfs/patches/0029-zfs-implement-zfs_write_simple-and-zfs_space-for-ZIL-replay.patch hunk1 @@ -0,0 +1,161 @@
+  REV  modules/open_zfs/perf-results/results.tsv hunk1 @@ -0,0 +1,49 @@
+  MISS modules/tests/Makefile hunk1 @@ -72,6 +72,14 @@ $(out)/tests/tst-reloc.so: $(src)/tests/t
+  REV  modules/tests/Makefile hunk2 @@ -108,8 +116,33 @@ $(out)/tests/tst-commands.so: $(out)/te
+  MISS modules/tests/Makefile hunk3 @@ -130,6 +163,26 @@ tests := tst-pthread.so misc-ramdisk.so
+  REV  modules/tests/Makefile hunk4 @@ -162,12 +215,19 @@ tests := tst-pthread.so misc-ramdisk.s
+  REV  modules/tests/Makefile hunk5 @@ -352,6 +412,7 @@ usr.manifest: build_all_tests $(lastword
+  REV  modules/tests/module.py hunk1 @@ -1,11 +1,15 @@
+  REV  modules/zfs-tools/module.py hunk1 @@ -0,0 +1,16 @@
+  REV  modules/zfs-tools/usr.manifest hunk1 @@ -1,5 +0,0 @@
+  REV  modules/zfs/module.py hunk1 @@ -0,0 +1,13 @@
+  REV  runtime.cc hunk1 @@ -7,6 +7,8 @@
+  REV  runtime.cc hunk2 @@ -67,6 +69,17 @@
+  REV  runtime.cc hunk3 @@ -208,25 +221,15 @@ int getpagesize()
+  REV  runtime.cc hunk4 @@ -309,7 +312,21 @@ LFS64(posix_fallocate) __attribute__((n
+  REV  runtime.cc hunk5 @@ -464,6 +481,18 @@ int pclose(FILE *stream)
+  REV  runtime.cc hunk6 @@ -692,14 +721,6 @@ pid_t wait3(int *status, int options, s
+  REV  scripts/bench/rebuild-bench.sh hunk1 @@ -0,0 +1,38 @@
+  REV  scripts/bench/run-all.sh hunk1 @@ -0,0 +1,118 @@
+  REV  scripts/bench/run-bench.sh hunk1 @@ -0,0 +1,55 @@
+  REV  scripts/bench/run-matrix.sh hunk1 @@ -0,0 +1,102 @@
+  MISS scripts/bench/zfs-bench.c hunk1 @@ -0,0 +1,514 @@
+  REV  scripts/build hunk1 @@ -383,7 +383,7 @@ create_zfs_filesystem() {
+  REV  scripts/upload_manifest.py hunk1 @@ -20,15 +20,25 @@ def upload(osv, manifest, depends, port)
+  REV  scripts/upload_manifest.py hunk2 @@ -164,11 +174,41 @@ def main():
+  REV  tests/libforksym.cc hunk1 @@ -0,0 +1,67 @@
+  REV  tests/misc-zfs-mmap-bench.cc hunk1 @@ -0,0 +1,330 @@
+  REV  tests/payload-exit7.cc hunk1 @@ -0,0 +1,16 @@
+  REV  tests/tst-arena-selfcheck.cc hunk1 @@ -0,0 +1,60 @@
+  REV  tests/tst-execve.cc hunk1 @@ -0,0 +1,56 @@
+  REV  tests/tst-fork-arena-freelist.cc hunk1 @@ -0,0 +1,146 @@
+  REV  tests/tst-fork-child-mmap.cc hunk1 @@ -0,0 +1,70 @@
+  REV  tests/tst-fork-conn-socket.cc hunk1 @@ -0,0 +1,183 @@
+  REV  tests/tst-fork-cow.cc hunk1 @@ -0,0 +1,90 @@
+  REV  tests/tst-fork-deep.cc hunk1 @@ -0,0 +1,98 @@
+  REV  tests/tst-fork-file-mmap.cc hunk1 @@ -0,0 +1,130 @@
+  REV  tests/tst-fork-irq-cow.cc hunk1 @@ -0,0 +1,115 @@
+  REV  tests/tst-fork-pltgot.cc hunk1 @@ -0,0 +1,167 @@
+  REV  tests/tst-fork-posix-shm.cc hunk1 @@ -0,0 +1,179 @@
+  REV  tests/tst-fork-preempt.cc hunk1 @@ -0,0 +1,149 @@
+  REV  tests/tst-fork-serial.cc hunk1 @@ -0,0 +1,203 @@
+  REV  tests/tst-fork-shared-catalog.cc hunk1 @@ -0,0 +1,215 @@
+  REV  tests/tst-fork-shared-race.cc hunk1 @@ -0,0 +1,159 @@
+  REV  tests/tst-fork-shared-write.cc hunk1 @@ -0,0 +1,173 @@
+  REV  tests/tst-fork-sigchld-latch.cc hunk1 @@ -0,0 +1,166 @@
+  REV  tests/tst-fork-socket.cc hunk1 @@ -0,0 +1,156 @@
+  REV  tests/tst-fork-symlookup.cc hunk1 @@ -0,0 +1,174 @@
+  REV  tests/tst-fork-timer-park-stress.cc hunk1 @@ -0,0 +1,151 @@
+  REV  tests/tst-fork-urandom.cc hunk1 @@ -0,0 +1,60 @@
+  REV  tests/tst-fork-vislookup.cc hunk1 @@ -0,0 +1,95 @@
+  REV  tests/tst-fork-zfs-write.cc hunk1 @@ -0,0 +1,151 @@
+  REV  tests/tst-fork.cc hunk1 @@ -0,0 +1,108 @@
+  REV  tests/tst-fs-bench.cc hunk1 @@ -0,0 +1,415 @@
+  REV  tests/tst-pgfork.c hunk1 @@ -0,0 +1,117 @@
+  REV  tests/tst-zfs-crucible-stress.cc hunk1 @@ -0,0 +1,389 @@
+  REV  tests/tst-zfs-db-sim.cc hunk1 @@ -0,0 +1,622 @@
+  REV  tests/tst-zfs-direct-io.cc hunk1 @@ -0,0 +1,410 @@
+  REV  tests/tst-zfs-encryption.cc hunk1 @@ -0,0 +1,472 @@
+  REV  tests/tst-zfs-multirec.cc hunk1 @@ -0,0 +1,61 @@
+  REV  tests/tst-zfs-recordsize.cc hunk1 @@ -0,0 +1,259 @@
+  REV  tests/tst-zfs-trim.cc hunk1 @@ -0,0 +1,411 @@
+  REV  tools/cpiod/cpiod.cc hunk1 @@ -189,7 +189,15 @@ int main(int ac, char** av)
+  REV  tools/mkfs/mkfs.cc hunk1 @@ -21,6 +21,12 @@ static void run_cmd(const char *cmdpath, 
+  REV  tools/mkfs/mkfs.cc hunk2 @@ -63,17 +69,35 @@ static void mkfs(int ac, char** av)
+  REV  zfs_builder_bootfs.manifest.skel hunk1 @@ -1,9 +1,14 @@
+HUNKS_TOTAL 351
+HUNKS_REVERSE 318

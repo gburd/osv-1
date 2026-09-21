@@ -1,0 +1,16 @@
+  REV  fs/vfs/vfs.h hunk1 @@ -159,6 +159,14 @@ void dref(struct dentry *dp);
+  MISS fs/vfs/vfs_dentry.cc hunk1 @@ -37,16 +37,182 @@
+  MISS fs/vfs/vfs_dentry.cc hunk2 @@ -95,9 +261,11 @@ dentry_alloc(struct dentry *parent_dp, s
+  MISS fs/vfs/vfs_dentry.cc hunk3 @@ -106,15 +274,16 @@ dentry_lookup(struct mount *mp, char *
+  MISS fs/vfs/vfs_dentry.cc hunk4 @@ -128,14 +297,18 @@ static void dentry_children_remove(str
+  MISS fs/vfs/vfs_dentry.cc hunk5 @@ -152,18 +325,21 @@ dentry_move(struct dentry *dp, struct 
+  MISS fs/vfs/vfs_dentry.cc hunk6 @@ -175,11 +351,24 @@ dentry_move(struct dentry *dp, struct 
+  MISS fs/vfs/vfs_dentry.cc hunk7 @@ -188,9 +377,9 @@ dref(struct dentry *dp)
+  MISS fs/vfs/vfs_dentry.cc hunk8 @@ -199,15 +388,27 @@ drele(struct dentry *dp)
+  MISS fs/vfs/vfs_dentry.cc hunk9 @@ -228,7 +429,7 @@ dentry_init(void)
+  REV  fs/vfs/vfs_vnode.cc hunk1 @@ -143,6 +143,16 @@ vn_lock(struct vnode *vp)
+  MISS include/osv/dentry.h hunk1 @@ -24,6 +24,13 @@ struct dentry {
+  MISS modules/tests/Makefile hunk1 @@ -148,6 +148,7 @@ tests := tst-iovcnt-guard.so tst-pthread
+  REV  tests/tst-dentry-lock.cc hunk1 @@ -0,0 +1,190 @@
+HUNKS_TOTAL 14
+HUNKS_REVERSE 3

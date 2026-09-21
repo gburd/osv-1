@@ -1,0 +1,13 @@
+  MISS conf/kconfig/threads hunk1 @@ -10,6 +10,22 @@ config lazy_stack_invariant
+  REV  core/sched.cc hunk1 @@ -30,6 +30,7 @@
+  MISS core/sched.cc hunk2 @@ -72,6 +73,18 @@ TRACEPOINT(trace_thread_create, "thread=%
+  REV  core/sched.cc hunk3 @@ -82,6 +95,15 @@ elf::tls_data tls;
+  MISS core/sched.cc hunk4 @@ -470,6 +492,14 @@ void cpu::send_wakeup_ipi()
+  MISS core/sched.cc hunk5 @@ -844,6 +874,105 @@ void cpu::load_balance()
+  MISS core/sched.cc hunk6 @@ -1882,6 +2011,21 @@ thread::reaper *thread::_s_reaper;
+  REV  include/osv/interrupt.hh hunk1 @@ -54,6 +54,7 @@ enum ipi_id {
+  MISS include/osv/sched.hh hunk1 @@ -29,6 +29,7 @@
+  MISS include/osv/sched.hh hunk2 @@ -1012,6 +1013,17 @@ struct cpu : private timer_base::clie
+  REV  include/osv/sched.hh hunk3 @@ -1023,6 +1035,14 @@ struct cpu : private timer_base::clie
+HUNKS_TOTAL 11
+HUNKS_REVERSE 4

@@ -1,0 +1,19 @@
+  MISS drivers/ahci.cc hunk1 @@ -65,14 +65,38 @@ port::port(u32 pnr, hba *hba)
+  MISS drivers/ahci.cc hunk2 @@ -123,7 +147,10 @@ void port::setup()
+  MISS drivers/ahci.cc hunk3 @@ -145,24 +172,36 @@ void port::enable_irq()
+  MISS drivers/ahci.cc hunk4 @@ -207,33 +246,66 @@ int port::send_cmd(u8 slot, int iswrit
+  MISS drivers/ahci.cc hunk5 @@ -309,8 +381,8 @@ int port::make_request(struct bio* bio)
+  MISS drivers/ahci.cc hunk6 @@ -365,7 +437,7 @@ void port::disk_flush(struct bio *bio)
+  MISS drivers/ahci.cc hunk7 @@ -378,7 +450,10 @@ void port::disk_identify()
+  MISS drivers/ahci.cc hunk8 @@ -395,6 +470,7 @@ void port::disk_identify()
+  MISS drivers/ahci.cc hunk9 @@ -459,7 +535,9 @@ hba::hba(pci::device& pci_dev)
+  MISS drivers/ahci.cc hunk10 @@ -473,7 +551,7 @@ hba::~hba()
+  MISS drivers/ahci.cc hunk11 @@ -488,12 +566,17 @@ void hba::reset()
+  MISS drivers/ahci.cc hunk12 @@ -518,7 +601,7 @@ void hba::scan()
+  MISS drivers/ahci.hh hunk1 @@ -102,7 +102,9 @@ enum port_reg_ie_bits {
+  MISS drivers/ahci.hh hunk2 @@ -112,6 +114,24 @@ enum port_reg_ssts_bits {
+  MISS drivers/ahci.hh hunk3 @@ -202,7 +222,7 @@ public:
+  MISS drivers/ahci.hh hunk4 @@ -233,18 +253,24 @@ public:
+  MISS drivers/ahci.hh hunk5 @@ -284,6 +310,7 @@ public:
+HUNKS_TOTAL 17
+HUNKS_REVERSE 0

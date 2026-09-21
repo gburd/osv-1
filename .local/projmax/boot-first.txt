@@ -1,0 +1,322 @@
+OSv v0.57.0-555-gd8016a03
+IDLE_SPIN_PROOF adaptive=1 cap=100000 floor=256 shrink_after=4
+FPPROBE started interval_s=000000000000001e
+WAKE_PULL ON
+WAKE_LOCAL off
+RNGPROOF rdrand=1 rdseed=1 hwsrc_empty=0 seeded=0
+ARCPROBE arc_size_MB=0 arc_c_MB=0 arc_c_max_MB=0 zfs_arc_max_MB=0 dirty_max_MB=0 free_MB=127982 physmem_MB=128211
+ARCPROBE: started (default-on measurement probe)
+ZFS: OpenZFS 5000 initialized
+eth0: 172.31.11.139
+Booted up in 1957.41 ms
+Cmdline:  /zpool.so create -f -o ashift=12 -O recordsize=8k -O compression=off -O atime=off -O sync=standard -O logbias=latency -O primarycache=all -O mountpoint=/data pgdata /dev/vblk1 ; /zpool.so get ashift pgdata ; /zfs.so get recordsize,sync,compression,atime,logbias,primarycache pgdata ; /usr/bin/seed_copy /data-seed /data/pg ; /usr/bin/postgres -D /data/pg -c listen_addresses=* -c max_connections=400 -c shared_buffers=16GB -c effective_cache_size=48GB -c max_wal_size=32GB -c min_wal_size=2GB -c checkpoint_timeout=15min -c checkpoint_completion_target=0.9 -c fsync=on -c synchronous_commit=on -c autovacuum=on -c io_method=sync -c max_files_per_process=200
+OSV_ZIO_INTR_THREADS: z_null-INTERRUPT taskq count=1
+OSV_ZIO_INTR_THREADS: z_flush-INTERRUPT taskq count=1
+NONROTPROOF nonrot=1 default=1 agg_cap_nonrot_KB=128 agg_cap_rot_KB=1024 vdev=/dev/vblk1
+VDEVIO bios=1 bytes_MB=0 gt128k=0 maxlen_KB=8
+OSV_ZIL_FLUSH_INLINE: inline flush completion=0 (0=dispatch to INTERRUPT taskq)
+[ZFS] Pool 'pgdata' is up-to-date at version 5000
+ZFS: root mounted ok, z_root=34
+NAME    PROPERTY  VALUE   SOURCE
+pgdata  ashift    12      local
+NAME    PROPERTY      VALUE           SOURCE
+pgdata  recordsize    8K              local
+pgdata  sync          standard        local
+pgdata  compression   off             local
+pgdata  atime         off             local
+pgdata  logbias       latency         local
+pgdata  primarycache  all             local
+OSV_ZIL_COMMIT_TIMEOUT_PCT: commit window pct=0 (0=default 10)
+OSV_ZIL_WAKE_UNLOCKED: zil wake fan-out mode=under-zl_lock (baseline)
+2026-09-21 11:52:57.916 UTC [2] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (GCC) 13.3.1 20240913 (Red Hat 13.3.1-3), 64-bit
+2026-09-21 11:52:57.919 UTC [2] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+FORKFLAG OSV_FORK_TIMING unset, default 0
+FORKFLAG OSV_FORK_RANGE_BS unset, default 1
+FORKFLAG OSV_FORK_LARGE_SHARE unset, default 1
+2026-09-21 11:52:57.938 UTC [2375] LOG:  database system was shut down at 2026-09-21 11:47:53 UTC
+2026-09-21 11:52:57.953 UTC [2] LOG:  database system is ready to accept connections
+ARCPROBE arc_size_MB=112 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110129 physmem_MB=128211
+VDEVIO bios=922 bytes_MB=56 gt128k=0 maxlen_KB=128
+ARCPROBE arc_size_MB=112 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110128 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000007
+ reaps=0000000000000002
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=0000000000000870
+ arena_bump_MB=000000000000000b
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae30
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=114 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110128 physmem_MB=128211
+VDEVIO bios=1059 bytes_MB=59 gt128k=0 maxlen_KB=128
+ARCPROBE arc_size_MB=114 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110127 physmem_MB=128211
+VDEVIO bios=1104 bytes_MB=59 gt128k=0 maxlen_KB=128
+ARCPROBE arc_size_MB=114 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110112 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000008
+ reaps=0000000000000003
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=0000000000000876
+ arena_bump_MB=000000000000000e
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae20
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=114 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110112 physmem_MB=128211
+VDEVIO bios=1204 bytes_MB=60 gt128k=0 maxlen_KB=128
+ARCPROBE arc_size_MB=115 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110112 physmem_MB=128211
+ARCPROBE arc_size_MB=115 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110112 physmem_MB=128211
+VDEVIO bios=1255 bytes_MB=61 gt128k=0 maxlen_KB=128
+FPTOT live_as=0000000000000006
+ forks=000000000000000a
+ reaps=0000000000000005
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=0000000000000882
+ arena_bump_MB=0000000000000015
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1f
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=116 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110111 physmem_MB=128211
+ARCPROBE arc_size_MB=116 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110111 physmem_MB=128211
+VDEVIO bios=1311 bytes_MB=62 gt128k=0 maxlen_KB=128
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110111 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=000000000000000b
+ reaps=0000000000000006
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=0000000000000888
+ arena_bump_MB=0000000000000018
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1f
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110111 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110111 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110111 physmem_MB=128211
+VDEVIO bios=1358 bytes_MB=62 gt128k=0 maxlen_KB=128
+FPTOT live_as=0000000000000006
+ forks=000000000000000d
+ reaps=0000000000000008
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=0000000000000895
+ arena_bump_MB=000000000000001d
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1e
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=000000000000000e
+ reaps=0000000000000009
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=000000000000089b
+ arena_bump_MB=000000000000001f
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1e
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000010
+ reaps=000000000000000b
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000c
+ per_as_KB=00000000000008a8
+ arena_bump_MB=0000000000000024
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1e
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000011
+ reaps=000000000000000c
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000d
+ per_as_KB=00000000000008ae
+ arena_bump_MB=0000000000000026
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1e
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000013
+ reaps=000000000000000e
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000d
+ per_as_KB=00000000000008ba
+ arena_bump_MB=000000000000002a
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1e
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000014
+ reaps=000000000000000f
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000d
+ per_as_KB=00000000000008c0
+ arena_bump_MB=000000000000002c
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae1e
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110110 physmem_MB=128211
+VDEVIO bios=1410 bytes_MB=63 gt128k=0 maxlen_KB=128
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110096 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110096 physmem_MB=128211
+FPTOT live_as=0000000000000006
+ forks=0000000000000016
+ reaps=0000000000000011
+ cowarena_MB=0000000000000001
+ cowovf_MB=0000000000000000
+ cowelf_MB=0000000000000000
+ cowmmap_MB=0000000000000000
+ cowoth_MB=0000000000000000
+ pt_MB=0000000000000005
+ priv_MB=0000000000000005
+ ovf_MB=0000000000000000
+ acct_MB=000000000000000d
+ per_as_KB=00000000000008cd
+ arena_bump_MB=0000000000000031
+ arena_slots=0000000000000006
+ ovfcommit_MB=0000000000000000
+ ovfrecycled_MB=0000000000000000
+ ovflive_MB=0000000000000000
+ ovfforeign=0000000000000000
+ memfree_MB=000000000001ae10
+ memtotal_MB=000000000001f45a
+FPTOTEND
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110096 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110096 physmem_MB=128211
+ARCPROBE arc_size_MB=117 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=110096 physmem_MB=128211

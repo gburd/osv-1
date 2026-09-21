@@ -1,0 +1,6 @@
+  MISS modules/libext/ext_vnops.cc hunk1 @@ -635,6 +635,13 @@ ext_readdir(struct vnode *dvp, struct f
+  MISS modules/libext/ext_vnops.cc hunk2 @@ -1341,7 +1348,24 @@ ext_readlink(vnode_t *vp, uio_t *uio)
+  MISS modules/tests/Makefile hunk1 @@ -112,6 +112,7 @@ zfs-only-tests := tst-readdir.so tst-fal
+  MISS tests/tst-ext-readlink.cc hunk1 @@ -0,0 +1,141 @@
+HUNKS_TOTAL 4
+HUNKS_REVERSE 0

@@ -1,0 +1,4 @@
+  MISS arch/aarch64/gic-v3.hh hunk1 @@ -49,6 +49,7 @@
+  MISS arch/aarch64/gic-v3.hh hunk2 @@ -279,7 +280,12 @@ private:
+HUNKS_TOTAL 2
+HUNKS_REVERSE 0

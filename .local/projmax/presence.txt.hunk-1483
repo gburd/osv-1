@@ -1,0 +1,7 @@
+  MISS core/pagecache.cc hunk1 @@ -957,7 +957,15 @@ bool release(vfs_file* fp, void *addr, 
+  REV  core/pagecache.cc hunk2 @@ -989,20 +997,23 @@ void sync(vfs_file* fp, off_t start, o
+  MISS fs/vfs/vfs_fops.cc hunk1 @@ -177,7 +177,10 @@ bool vfs_file::put_page(void *addr, uin
+  REV  include/osv/file.h hunk1 @@ -168,7 +168,7 @@ struct file {
+  MISS include/osv/pagecache.hh hunk1 @@ -39,7 +39,7 @@ bool release(vfs_file* fp, void *addr, off
+HUNKS_TOTAL 5
+HUNKS_REVERSE 2

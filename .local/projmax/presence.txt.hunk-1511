@@ -1,0 +1,5 @@
+  MISS core/sched.cc hunk1 @@ -467,16 +467,101 @@ void cpu::send_wakeup_ipi()
+  REV  core/sched.cc hunk2 @@ -487,8 +572,26 @@ void cpu::do_idle()
+  REV  include/osv/sched.hh hunk1 @@ -998,6 +998,14 @@ struct cpu : private timer_base::client
+HUNKS_TOTAL 3
+HUNKS_REVERSE 2

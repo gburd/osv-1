@@ -1,0 +1,3 @@
+  MISS Makefile hunk1 @@ -59,9 +59,32 @@ ifeq ($(conf_zfs),openzfs)
+HUNKS_TOTAL 1
+HUNKS_REVERSE 0

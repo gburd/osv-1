@@ -1,0 +1,9 @@
+  MISS conf/kconfig/core hunk1 @@ -49,6 +49,11 @@ config core_syscall
+  MISS drivers/kvmclock.cc hunk1 @@ -19,6 +19,10 @@
+  MISS drivers/kvmclock.cc hunk2 @@ -65,9 +69,51 @@ kvmclock::kvmclock()
+  MISS drivers/random.cc hunk1 @@ -39,14 +39,26 @@
+  MISS drivers/random.cc hunk2 @@ -56,12 +68,60 @@ static random_device_priv *to_priv(devic
+  MISS drivers/random.cc hunk3 @@ -206,6 +266,74 @@ void randomdev_init()
+  MISS drivers/random.hh hunk1 @@ -37,6 +37,12 @@ public:
+HUNKS_TOTAL 7
+HUNKS_REVERSE 0

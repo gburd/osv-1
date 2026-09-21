@@ -1,0 +1,12 @@
+  MISS modules/libext/Makefile hunk1 @@ -3,7 +3,7 @@ include ../common.gmk
+  MISS modules/libext/ext_vnops.cc hunk1 @@ -40,6 +40,7 @@ extern "C" {
+  MISS modules/libext/ext_vnops.cc hunk2 @@ -57,6 +58,7 @@ void free_contiguous_aligned(void* p);
+  MISS modules/libext/ext_vnops.cc hunk3 @@ -94,13 +96,138 @@ struct auto_inode_ref {
+  MISS modules/libext/ext_vnops.cc hunk4 @@ -334,6 +461,190 @@ Finish:
+  MISS modules/libext/ext_vnops.cc hunk5 @@ -363,14 +674,102 @@ ext_read(vnode_t *vp, struct file *fp
+  MISS modules/libext/ext_vnops.cc hunk6 @@ -591,18 +990,45 @@ ext_write(vnode_t *vp, uio_t *uio, int
+  MISS modules/libext/ext_vnops.cc hunk7 @@ -1320,6 +1746,16 @@ ext_truncate(struct vnode *vp, off_t 
+  MISS modules/tests/Makefile hunk1 @@ -137,6 +137,7 @@ endif
+  MISS tests/tst-ext4-bench.cc hunk1 @@ -0,0 +1,140 @@
+HUNKS_TOTAL 10
+HUNKS_REVERSE 0

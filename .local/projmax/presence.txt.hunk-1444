@@ -1,0 +1,235 @@
+  MISS .travis.yml hunk1 @@ -23,7 +23,7 @@ before_install:
+  MISS Makefile hunk1 @@ -361,7 +361,7 @@ COMMON = $(autodepend) -g -Wall -Wno-poi
+  MISS Makefile hunk2 @@ -398,6 +398,11 @@ $(out)/bsd/%.o: INCLUDES += -isystem bs
+  MISS Makefile hunk3 @@ -688,6 +693,41 @@ bsd += bsd/sys/netinet/cc/cc_cubic.o
+  MISS Makefile hunk4 @@ -1156,6 +1196,11 @@ objects += core/percpu-worker.o
+  MISS bsd/net.cc hunk1 @@ -24,6 +24,11 @@
+  MISS bsd/net.cc hunk2 @@ -31,6 +36,10 @@ void ip_initid(void);
+  MISS bsd/net.cc hunk3 @@ -55,12 +64,20 @@ void net_init(void)
+  MISS bsd/net.cc hunk4 @@ -68,9 +85,13 @@ void net_init(void)
+  MISS bsd/porting/dhcp6.cc hunk1 @@ -0,0 +1,553 @@
+  MISS bsd/porting/netport.h hunk1 @@ -163,6 +163,10 @@ extern int tick;
+  MISS bsd/porting/networking.cc hunk1 @@ -6,6 +6,7 @@
+  MISS bsd/porting/networking.cc hunk2 @@ -17,6 +18,15 @@
+  MISS bsd/porting/networking.cc hunk3 @@ -60,6 +70,18 @@ int if_set_mtu(std::string if_name, u16 m
+  MISS bsd/porting/networking.cc hunk4 @@ -99,7 +121,9 @@ int start_if(std::string if_name, std::st
+  MISS bsd/porting/networking.cc hunk5 @@ -117,7 +141,7 @@ out:
+  MISS bsd/porting/networking.cc hunk6 @@ -155,6 +179,260 @@ out:
+  MISS bsd/porting/networking.cc hunk7 @@ -194,4 +472,6 @@ std::string if_ip(std::string if_name) {
+  MISS bsd/porting/networking.hh hunk1 @@ -22,6 +22,19 @@ namespace osv {
+  MISS bsd/porting/route.cc hunk1 @@ -41,6 +41,10 @@
+  MISS bsd/porting/route.cc hunk2 @@ -170,6 +174,59 @@ static struct mbuf*  osv_route_arp_rtms
+  MISS bsd/porting/route.cc hunk3 @@ -183,10 +240,10 @@ static struct mbuf*  osv_route_rtmsg(i
+  MISS bsd/porting/route.cc hunk4 @@ -213,9 +270,7 @@ static struct mbuf*  osv_route_rtmsg(int
+  MISS bsd/porting/route.cc hunk5 @@ -232,15 +287,20 @@ static struct mbuf*  osv_route_rtmsg(i
+  MISS bsd/sys/compat/linux/linux.h hunk1 @@ -57,7 +57,8 @@ typedef l_longlong	l_loff_t;
+  MISS bsd/sys/compat/linux/linux.h hunk2 @@ -76,6 +77,8 @@ typedef struct {
+  MISS bsd/sys/compat/linux/linux.h hunk3 @@ -109,12 +112,6 @@ struct l_sockaddr {
+  MISS bsd/sys/compat/linux/linux.h hunk4 @@ -143,6 +140,7 @@ struct l_ifreq {
+  MISS bsd/sys/compat/linux/linux_ioctl.cc hunk1 @@ -43,8 +43,8 @@
+  MISS bsd/sys/compat/linux/linux_ioctl.cc hunk2 @@ -199,6 +199,18 @@ linux_gifhwaddr(struct ifnet *ifp, stru
+  MISS bsd/sys/compat/linux/linux_ioctl.cc hunk3 @@ -305,7 +317,9 @@ linux_ioctl_socket(socket_file *fp, u_lo
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk1 @@ -40,12 +40,14 @@
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk2 @@ -188,8 +190,8 @@ linux_getsockaddr(struct bsd_sockaddr **
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk3 @@ -289,6 +291,26 @@ bsd_to_linux_domain(int domain)
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk4 @@ -316,6 +338,106 @@ linux_to_bsd_ip_sockopt(int opt)
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk5 @@ -411,7 +533,7 @@ bsd_to_linux_sockaddr(struct bsd_sockadd
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk6 @@ -442,47 +564,114 @@ linux_sa_put(struct bsd_osockaddr *os
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk7 @@ -523,8 +712,11 @@ linux_sendit(int s, struct msghdr *mp, 
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk8 @@ -641,13 +833,13 @@ linux_socket(int domain, int type, int
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk9 @@ -901,7 +1093,7 @@ linux_recvfrom(int s, void* buf, size_t
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk10 @@ -913,18 +1105,20 @@ linux_recvfrom(int s, void* buf, size
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk11 @@ -934,106 +1128,128 @@ linux_sendmsg(int s, struct msghdr*
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk12 @@ -1043,159 +1259,241 @@ struct linux_recvmsg_args {
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk13 @@ -1230,6 +1528,35 @@ int linux_to_bsd_tcp_sockopt(int name
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk14 @@ -1240,8 +1567,16 @@ linux_setsockopt(int s, int level, in
+  MISS bsd/sys/compat/linux/linux_socket.cc hunk15 @@ -1276,8 +1611,16 @@ linux_getsockopt(int s, int level, in
+  MISS bsd/sys/compat/linux/linux_socket.h hunk1 @@ -6,7 +6,7 @@
+  MISS bsd/sys/compat/linux/linux_socket.h hunk2 @@ -54,6 +54,29 @@
+  MISS bsd/sys/compat/linux/linux_socket.h hunk3 @@ -68,13 +91,13 @@
+  MISS bsd/sys/compat/linux/linux_socket.h hunk4 @@ -92,7 +115,8 @@
+  MISS bsd/sys/compat/linux/linux_socket.h hunk5 @@ -117,11 +141,25 @@ struct l_ucred {
+  MISS bsd/sys/compat/linux/linux_socket.h hunk6 @@ -129,4 +167,61 @@ struct l_ucred {
+  MISS bsd/sys/contrib/ena_com/ena_plat.h hunk1 @@ -78,7 +78,7 @@ __FBSDID("$FreeBSD$");
+  MISS bsd/sys/dev/ena/ena.cc hunk1 @@ -68,7 +68,7 @@ __FBSDID("$FreeBSD$");
+  MISS bsd/sys/dev/ena/ena_datapath.cc hunk1 @@ -38,13 +38,14 @@ __FBSDID("$FreeBSD$");
+  MISS bsd/sys/dev/ena/ena_datapath.cc hunk2 @@ -575,7 +576,7 @@ ena_rx_cleanup(struct ena_ring *rx_ring)
+  MISS bsd/sys/dev/xen/netfront/netfront.cc hunk1 @@ -62,6 +62,10 @@ __FBSDID("$FreeBSD$");
+  MISS bsd/sys/kern/sys_socket.cc hunk1 @@ -39,6 +39,7 @@
+  MISS bsd/sys/kern/uipc_sockbuf.cc hunk1 @@ -34,6 +34,7 @@
+  MISS bsd/sys/kern/uipc_socket.cc hunk1 @@ -127,6 +127,7 @@
+  MISS bsd/sys/kern/uipc_syscalls.cc hunk1 @@ -443,7 +443,7 @@ sys_socketpair(int domain, int type, int
+  MISS bsd/sys/kern/uipc_syscalls.cc hunk2 @@ -480,7 +480,7 @@ kern_sendit(int s,
+  MISS bsd/sys/kern/uipc_syscalls.cc hunk3 @@ -488,16 +488,17 @@ kern_sendit(int s,
+  MISS bsd/sys/kern/uipc_syscalls.cc hunk4 @@ -513,6 +514,7 @@ kern_sendit(int s,
+  MISS bsd/sys/kern/uipc_syscalls.cc hunk5 @@ -531,7 +533,10 @@ kern_sendit(int s,
+  MISS bsd/sys/kern/uipc_syscalls_wrap.cc hunk1 @@ -191,7 +191,7 @@ ssize_t recv(int fd, void *buf, size_t l
+  MISS bsd/sys/kern/uipc_syscalls_wrap.cc hunk2 @@ -247,14 +247,14 @@ ssize_t send(int fd, const void *buf, 
+  MISS bsd/sys/net/if.cc hunk1 @@ -74,6 +74,8 @@
+  MISS bsd/sys/net/if.cc hunk2 @@ -366,9 +368,12 @@ if_alloc(u_char type)
+  MISS bsd/sys/net/if.cc hunk3 @@ -396,6 +401,8 @@ if_alloc(u_char type)
+  MISS bsd/sys/net/if.cc hunk4 @@ -407,6 +414,7 @@ if_alloc(u_char type)
+  MISS bsd/sys/net/if.cc hunk5 @@ -3146,3 +3154,10 @@ if_deregister_com_alloc(u_char type)
+  MISS bsd/sys/net/if_ethersubr.cc hunk1 @@ -1140,8 +1140,7 @@ ether_resolvemulti(struct ifnet *ifp, 
+  MISS bsd/sys/net/if_ethersubr.cc hunk2 @@ -1149,7 +1148,7 @@ ether_resolvemulti(struct ifnet *ifp, 
+  MISS bsd/sys/net/if_var.h hunk1 @@ -33,7 +33,6 @@
+  MISS bsd/sys/net/if_var.h hunk2 @@ -88,8 +87,11 @@ struct	vnet;
+  MISS bsd/sys/net/if_var.h hunk3 @@ -177,7 +179,8 @@ struct ifnet {
+  MISS bsd/sys/net/if_var.h hunk4 @@ -214,9 +217,6 @@ struct ifnet {
+  MISS bsd/sys/net/if_var.h hunk5 @@ -771,6 +771,8 @@ typedef	void if_com_free_t(void *com, u_
+  MISS bsd/sys/net/routecache.hh hunk1 @@ -46,6 +46,8 @@
+  MISS bsd/sys/netinet/icmp6.h hunk1 @@ -0,0 +1,767 @@
+  MISS bsd/sys/netinet/in.cc hunk1 @@ -1673,3 +1673,13 @@ in_domifdetach(struct ifnet *ifp, voi
+  MISS bsd/sys/netinet/in.h hunk1 @@ -470,6 +470,7 @@ const char *inet_ntoa_r(struct in_addr i
+  MISS bsd/sys/netinet/ip6.h hunk1 @@ -0,0 +1,269 @@
+  MISS bsd/sys/netinet/tcp_input.cc hunk1 @@ -77,6 +77,15 @@
+  MISS bsd/sys/netinet/tcp_input.cc hunk2 @@ -91,6 +100,7 @@
+  MISS bsd/sys/netinet/tcp_input.cc hunk3 @@ -260,6 +270,9 @@ cc_conn_init(struct tcpcb *tp)
+  MISS bsd/sys/netinet/tcp_input.cc hunk4 @@ -322,8 +335,18 @@ cc_conn_init(struct tcpcb *tp)
+  MISS bsd/sys/netinet/tcp_input.cc hunk5 @@ -409,9 +432,6 @@ tcp_fields_to_host(struct tcphdr *th)
+  MISS bsd/sys/netinet/tcp_input.cc hunk6 @@ -426,24 +446,73 @@ tcp_fields_to_host(struct tcphdr *th)
+  MISS bsd/sys/netinet/tcp_input.cc hunk7 @@ -460,10 +529,63 @@ tcp_input(struct mbuf *m, int off0)
+  MISS bsd/sys/netinet/tcp_input.cc hunk8 @@ -514,8 +636,19 @@ tcp_input(struct mbuf *m, int off0)
+  MISS bsd/sys/netinet/tcp_input.cc hunk9 @@ -528,16 +661,30 @@ tcp_input(struct mbuf *m, int off0)
+  MISS bsd/sys/netinet/tcp_input.cc hunk10 @@ -575,10 +722,21 @@ findpcb:
+  MISS bsd/sys/netinet/tcp_input.cc hunk11 @@ -617,10 +775,29 @@ findpcb:
+  MISS bsd/sys/netinet/tcp_input.cc hunk12 @@ -669,6 +846,7 @@ relocked:
+  MISS bsd/sys/netinet/tcp_input.cc hunk13 @@ -719,6 +897,11 @@ relocked:
+  MISS bsd/sys/netinet/tcp_input.cc hunk14 @@ -738,6 +921,13 @@ relocked:
+  MISS bsd/sys/netinet/tcp_input.cc hunk15 @@ -891,6 +1081,56 @@ relocked:
+  MISS bsd/sys/netinet/tcp_input.cc hunk16 @@ -909,25 +1149,52 @@ relocked:
+  MISS bsd/sys/netinet/tcp_input.cc hunk17 @@ -945,9 +1212,17 @@ relocked:
+  MISS bsd/sys/netinet/tcp_input.cc hunk18 @@ -1049,7 +1324,9 @@ tcp_do_segment(struct mbuf *m, struct 
+  MISS bsd/sys/netinet/tcp_input.cc hunk19 @@ -1188,7 +1465,7 @@ tcp_do_segment(struct mbuf *m, struct 
+  MISS bsd/sys/netinet/tcp_input.cc hunk20 @@ -1263,7 +1540,7 @@ tcp_do_segment(struct mbuf *m, struct 
+  MISS bsd/sys/netinet/tcp_input.cc hunk21 @@ -1511,7 +1788,7 @@ tcp_do_segment(struct mbuf *m, struct 
+  MISS bsd/sys/netinet/tcp_input.cc hunk22 @@ -1848,14 +2125,14 @@ tcp_do_segment(struct mbuf *m, struc
+  MISS bsd/sys/netinet/tcp_input.cc hunk23 @@ -1971,13 +2248,15 @@ tcp_do_segment(struct mbuf *m, struc
+  MISS bsd/sys/netinet/tcp_input.cc hunk24 @@ -2009,10 +2288,10 @@ tcp_do_segment(struct mbuf *m, struc
+  MISS bsd/sys/netinet/tcp_input.cc hunk25 @@ -2616,7 +2895,12 @@ static void
+  MISS bsd/sys/netinet/tcp_input.cc hunk26 @@ -2625,6 +2909,19 @@ tcp_dropwithreset(struct mbuf *m, str
+  MISS bsd/sys/netinet/tcp_input.cc hunk27 @@ -2633,6 +2930,7 @@ tcp_dropwithreset(struct mbuf *m, stru
+  MISS bsd/sys/netinet/tcp_input.cc hunk28 @@ -3054,7 +3352,7 @@ tcp_mss(struct tcpcb *tp, int offer)
+  MISS bsd/sys/netinet/tcp_input.cc hunk29 @@ -3187,8 +3485,17 @@ tcp_newreno_partial_ack(struct tcpcb 
+  MISS bsd/sys/netinet/tcp_input.cc hunk30 @@ -3243,26 +3550,121 @@ tcp_net_channel_packet(tcpcb* tp, m
+  MISS bsd/sys/netinet/tcp_input.cc hunk31 @@ -3279,10 +3681,23 @@ tcp_setup_net_channel(tcpcb* tp, str
+  MISS bsd/sys/netinet/tcp_input.cc hunk32 @@ -3301,9 +3716,6 @@ tcp_free_net_channel(tcpcb* tp)
+  MISS bsd/sys/netinet/tcp_lro.cc hunk1 @@ -44,7 +44,7 @@
+  MISS bsd/sys/netinet/tcp_lro.cc hunk2 @@ -53,7 +53,7 @@
+  MISS bsd/sys/netinet/tcp_lro.h hunk1 @@ -39,18 +39,21 @@ struct lro_entry
+  MISS bsd/sys/netinet/tcp_reass.cc hunk1 @@ -52,7 +52,7 @@
+  MISS bsd/sys/netinet/tcp_reass.cc hunk2 @@ -64,7 +64,7 @@
+  MISS bsd/sys/netinet/tcp_subr.cc hunk1 @@ -122,6 +122,7 @@ SYSCTL_VNET_PROC(_net_inet_tcp, TCPCTL_M
+  MISS bsd/sys/netinet/tcp_subr.cc hunk2 @@ -144,6 +145,7 @@ SYSCTL_VNET_PROC(_net_inet_tcp, TCPCTL_V
+  MISS bsd/sys/netinet/tcp_subr.cc hunk3 @@ -466,7 +468,7 @@ tcp_respond(struct tcpcb *tp, void *ipge
+  MISS bsd/sys/netinet/tcp_subr.cc hunk4 @@ -1733,7 +1735,7 @@ tcp_maxmtu6(struct in_conninfo *inc, i
+  MISS bsd/sys/netinet/tcp_subr.cc hunk5 @@ -2253,11 +2255,11 @@ tcp_log_addr(struct in_conninfo *inc
+  MISS bsd/sys/netinet/tcp_syncache.cc hunk1 @@ -692,8 +692,7 @@ syncache_socket(struct syncache *sc, str
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk1 @@ -70,6 +70,7 @@
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk2 @@ -83,6 +84,7 @@
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk3 @@ -296,6 +298,7 @@ tcp6_usr_bind(struct socket *so, struct 
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk4 @@ -312,6 +315,7 @@ tcp6_usr_bind(struct socket *so, struct 
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk5 @@ -327,14 +331,13 @@ tcp6_usr_bind(struct socket *so, struc
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk6 @@ -408,7 +411,7 @@ tcp6_usr_listen(struct socket *so, int b
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk7 @@ -517,23 +520,18 @@ tcp6_usr_connect(struct socket *so, st
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk8 @@ -642,7 +640,6 @@ tcp6_usr_accept(struct socket *so, struc
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk9 @@ -668,7 +665,6 @@ tcp6_usr_accept(struct socket *so, struc
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk10 @@ -1029,25 +1025,25 @@ struct pr_usrreqs tcp_usrreqs = init
+  MISS bsd/sys/netinet/tcp_usrreq.cc hunk11 @@ -1136,7 +1132,7 @@ tcp6_connect(struct tcpcb *tp, struct 
+  MISS bsd/sys/netinet/udp_usrreq.cc hunk1 @@ -58,7 +58,7 @@
+  MISS bsd/sys/netinet6/dest6.cc hunk1 @@ -0,0 +1,123 @@
+  MISS bsd/sys/netinet6/frag6.cc hunk1 @@ -0,0 +1,793 @@
+  MISS bsd/sys/netinet6/icmp6.cc hunk1 @@ -0,0 +1,2942 @@
+  MISS bsd/sys/netinet6/in6.cc hunk1 @@ -0,0 +1,2791 @@
+  MISS bsd/sys/netinet6/in6.h hunk1 @@ -154,7 +154,7 @@ extern const struct in6_addr in6mask128;
+  MISS bsd/sys/netinet6/in6.h hunk2 @@ -163,7 +163,7 @@ extern const struct in6_addr in6mask128;
+  MISS bsd/sys/netinet6/in6.h hunk3 @@ -355,13 +355,20 @@ extern const struct in6_addr in6addr_l
+  MISS bsd/sys/netinet6/in6.h hunk4 @@ -378,104 +385,19 @@ struct route_in6 {
+  MISS bsd/sys/netinet6/in6.h hunk5 @@ -670,6 +592,9 @@ typedef	__socklen_t	socklen_t;
+  MISS bsd/sys/netinet6/in6_cksum.cc hunk1 @@ -0,0 +1,359 @@
+  MISS bsd/sys/netinet6/in6_ifattach.cc hunk1 @@ -0,0 +1,968 @@
+  MISS bsd/sys/netinet6/in6_ifattach.h hunk1 @@ -0,0 +1,45 @@
+  MISS bsd/sys/netinet6/in6_mcast.cc hunk1 @@ -0,0 +1,2833 @@
+  MISS bsd/sys/netinet6/in6_pcb.cc hunk1 @@ -0,0 +1,1153 @@
+  MISS bsd/sys/netinet6/in6_pcb.h hunk1 @@ -0,0 +1,124 @@
+  MISS bsd/sys/netinet6/in6_proto.cc hunk1 @@ -0,0 +1,627 @@
+  MISS bsd/sys/netinet6/in6_rmx.cc hunk1 @@ -0,0 +1,338 @@
+  MISS bsd/sys/netinet6/in6_src.cc hunk1 @@ -0,0 +1,1154 @@
+  MISS bsd/sys/netinet6/in6_var.h hunk1 @@ -0,0 +1,898 @@
+  MISS bsd/sys/netinet6/ip6_forward.cc hunk1 @@ -0,0 +1,681 @@
+  MISS bsd/sys/netinet6/ip6_id.cc hunk1 @@ -0,0 +1,273 @@
+  MISS bsd/sys/netinet6/ip6_input.cc hunk1 @@ -0,0 +1,1891 @@
+  MISS bsd/sys/netinet6/ip6_ipsec.cc hunk1 @@ -0,0 +1,391 @@
+  MISS bsd/sys/netinet6/ip6_ipsec.h hunk1 @@ -0,0 +1,43 @@
+  MISS bsd/sys/netinet6/ip6_mroute.cc hunk1 @@ -0,0 +1,2064 @@
+  MISS bsd/sys/netinet6/ip6_mroute.h hunk1 @@ -0,0 +1,270 @@
+  MISS bsd/sys/netinet6/ip6_output.cc hunk1 @@ -0,0 +1,3077 @@
+  MISS bsd/sys/netinet6/ip6_var.h hunk1 @@ -0,0 +1,456 @@
+  MISS bsd/sys/netinet6/ip6protosw.h hunk1 @@ -0,0 +1,148 @@
+  MISS bsd/sys/netinet6/mld6.cc hunk1 @@ -0,0 +1,3325 @@
+  MISS bsd/sys/netinet6/mld6.h hunk1 @@ -0,0 +1,120 @@
+  MISS bsd/sys/netinet6/mld6_var.h hunk1 @@ -0,0 +1,164 @@
+  MISS bsd/sys/netinet6/nd6.cc hunk1 @@ -0,0 +1,2408 @@
+  MISS bsd/sys/netinet6/nd6.h hunk1 @@ -0,0 +1,458 @@
+  MISS bsd/sys/netinet6/nd6_nbr.cc hunk1 @@ -0,0 +1,1708 @@
+  MISS bsd/sys/netinet6/nd6_rtr.cc hunk1 @@ -0,0 +1,2221 @@
+  MISS bsd/sys/netinet6/pim6.h hunk1 @@ -0,0 +1,69 @@
+  MISS bsd/sys/netinet6/pim6_var.h hunk1 @@ -0,0 +1,68 @@
+  MISS bsd/sys/netinet6/raw_ip6.cc hunk1 @@ -0,0 +1,924 @@
+  MISS bsd/sys/netinet6/raw_ip6.h hunk1 @@ -0,0 +1,55 @@
+  MISS bsd/sys/netinet6/route6.cc hunk1 @@ -0,0 +1,110 @@
+  MISS bsd/sys/netinet6/scope6.cc hunk1 @@ -0,0 +1,506 @@
+  MISS bsd/sys/netinet6/scope6_var.h hunk1 @@ -0,0 +1,60 @@
+  MISS bsd/sys/netinet6/send.cc hunk1 @@ -0,0 +1,367 @@
+  MISS bsd/sys/netinet6/send.h hunk1 @@ -0,0 +1,45 @@
+  MISS bsd/sys/netinet6/tcp6_var.h hunk1 @@ -0,0 +1,83 @@
+  MISS bsd/sys/netinet6/udp6_usrreq.cc hunk1 @@ -0,0 +1,1180 @@
+  MISS bsd/sys/netinet6/udp6_var.h hunk1 @@ -0,0 +1,75 @@
+  MISS bsd/sys/sys/socketvar.h hunk1 @@ -42,10 +42,11 @@
+  MISS bsd/uipc_syscalls.h hunk1 @@ -56,10 +56,10 @@ int linux_listen(int s, int backlog);
+  MISS conf/base.mk hunk1 @@ -5,10 +5,13 @@ conf_debug_memory=0
+  MISS conf/kconfig/networking hunk1 @@ -9,3 +9,9 @@ config networking_dhcp
+  MISS core/net_channel.cc hunk1 @@ -8,9 +8,17 @@
+  MISS core/net_channel.cc hunk2 @@ -110,30 +118,51 @@ classifier::classifier()
+  MISS core/net_channel.cc hunk3 @@ -147,20 +176,33 @@ bool classifier::post_packet(mbuf* m)
+  MISS core/net_channel.cc hunk4 @@ -169,20 +211,111 @@ net_channel* classifier::classify_ipv
+  MISS docker/Dockerfile.builder hunk1 @@ -0,0 +1,54 @@
+  MISS documentation/ipv6.md hunk1 @@ -0,0 +1,43 @@
+  MISS drivers/ena.cc hunk1 @@ -11,6 +11,7 @@
+  MISS drivers/virtio-net.cc hunk1 @@ -36,6 +36,7 @@
+  MISS drivers/virtio-net.cc hunk2 @@ -283,15 +284,22 @@ net::net(virtio_device& dev)
+  MISS drivers/virtio-net.cc hunk3 @@ -382,18 +390,21 @@ void net::read_config()
+  MISS drivers/virtio-net.cc hunk4 @@ -431,8 +442,9 @@ bool net::bad_rx_csum(struct mbuf* m, st
+  MISS drivers/virtio-net.cc hunk5 @@ -539,7 +551,7 @@ void net::receiver()
+  MISS drivers/virtio-net.cc hunk6 @@ -829,6 +841,23 @@ mbuf* net::txq::offload(mbuf* m, net_hd
+  MISS drivers/virtio-net.cc hunk7 @@ -914,8 +943,10 @@ u64 net::get_driver_features()
+  MISS drivers/virtio-net.hh hunk1 @@ -273,6 +273,8 @@ private:
+  MISS drivers/vmxnet3.cc hunk1 @@ -924,7 +924,7 @@ void vmxnet3_rxqueue::input(vmxnet3_rx_c
+  MISS include/api/netinet/__icmp6.h hunk1 @@ -0,0 +1,11 @@
+  MISS include/api/netinet/in.h hunk1 @@ -158,62 +158,16 @@ struct ip6_mtuinfo
+  MISS include/api/netinet6/__in6.h hunk1 @@ -0,0 +1,70 @@
+  MISS include/osv/dhcp6.hh hunk1 @@ -0,0 +1,145 @@
+  MISS include/osv/net_channel.hh hunk1 @@ -22,6 +22,10 @@
+  MISS include/osv/net_channel.hh hunk2 @@ -85,9 +89,6 @@ public:
+  MISS include/osv/net_channel.hh hunk3 @@ -105,6 +106,32 @@ struct ipv4_tcp_conn_id {
+  MISS include/osv/net_channel.hh hunk4 @@ -112,35 +139,61 @@ struct hash<ipv4_tcp_conn_id> {
+  MISS libc/network/__dns.cc hunk1 @@ -56,6 +56,23 @@ namespace osv {
+  MISS loader.cc hunk1 @@ -6,6 +6,7 @@
+  MISS loader.cc hunk2 @@ -38,6 +39,7 @@
+  MISS loader.cc hunk3 @@ -167,8 +169,11 @@ static bool opt_verbose = false;
+  MISS loader.cc hunk4 @@ -219,6 +224,10 @@ static void usage()
+  MISS loader.cc hunk5 @@ -385,13 +394,24 @@ static void parse_options(int loader_a
+  MISS loader.cc hunk6 @@ -613,48 +633,120 @@ void* do_main_thread(void *_main_args
+  MISS modules/tests/Makefile hunk1 @@ -1,6 +1,7 @@
+  MISS modules/tests/Makefile hunk2 @@ -9,8 +10,15 @@ include ../common.gmk
+  MISS modules/tests/Makefile hunk3 @@ -154,7 +162,7 @@ tests := tst-pthread.so misc-ramdisk.so 
+  MISS modules/tests/Makefile hunk4 @@ -164,7 +172,9 @@ tests := tst-pthread.so misc-ramdisk.so 
+  MISS modules/tests/Makefile hunk5 @@ -276,7 +286,7 @@ common-boost-tests := tst-vfs.so tst-lib
+  MISS tests/tst-ifaddr-dump.cc hunk1 @@ -0,0 +1,45 @@
+  MISS tests/tst-ipv6-internet.cc hunk1 @@ -0,0 +1,111 @@
+  MISS tests/tst-pktinfo.cc hunk1 @@ -0,0 +1,245 @@
+  MISS tests/tst-socket-timestamp.cc hunk1 @@ -0,0 +1,162 @@
+  MISS tests/tst-tcp-v6-smoke.cc hunk1 @@ -0,0 +1,212 @@
+  MISS tests/tst-tcp-v6.cc hunk1 @@ -5,38 +5,242 @@
+HUNKS_TOTAL 233
+HUNKS_REVERSE 0

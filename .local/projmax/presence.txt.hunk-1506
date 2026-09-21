@@ -1,0 +1,4 @@
+  MISS modules/open_zfs/osv/module/os/osv/zfs/arc_os.c hunk1 @@ -22,7 +22,8 @@
+  MISS modules/open_zfs/osv/module/os/osv/zfs/arc_os.c hunk2 @@ -92,11 +93,54 @@ arc_available_memory(void)
+HUNKS_TOTAL 2
+HUNKS_REVERSE 0

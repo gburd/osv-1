@@ -1,0 +1,58 @@
+1424 cdb02c91220c42c930aee31c26b801d9d4bb6c8e MERGEABLE RDY pr/crucible-draft drivers: add Crucible distributed block storage driver
+1438 af644a572bb78ac98d55283865b5ffd512225ff6 CONFLICTING RDY pr/numa-mempolicy numa: report real topology from getcpu and get_mempolicy
+1439 ac1e4c56092a48d7727f921ff596ff7defd8987e MERGEABLE RDY pr/signalfd signal: implement signalfd(2)
+1440 e18e81cc284c7e8a1751629a907bbca9ae19b9a4 CONFLICTING RDY pr/inotify fs: implement inotify(2)
+1441 0667c34bec2352493fb1fdce5fde40172f109094 CONFLICTING RDY pr/numa-alloc mm: add node-preferring page allocation (alloc_page_on_node)
+1442 b06d3df948191f82716766df0132bef89e5f4bca MERGEABLE RDY pr/ipv6-forward-port net: forward-port FreeBSD IPv6 stack with SLAAC and DHCPv6 autoconfiguration
+1444 eea48c6ccad55f9227829bacbb0774b2838aaef5 MERGEABLE DRAFT pr/virtio-net-ipv6-offload [STACKED on #1442] virtio-net: enable IPv6 checksum and TSO offload
+1445 cd3348fd9317509bd1cf0d2c97175fd716d2acc3 CONFLICTING DRAFT pr/numa-per-node-pools [STACKED on #1441] mm: per-NUMA-node L2 page pools
+1449 ba63c5725cb8db48114b25c137659a57bf9c4803 CONFLICTING RDY pr/sec-ext4-readlink libext: fix heap overflow in ext_readlink and ext_readdir from a crafted ext4 image
+1450 68078e50d8d426650b9181c380454d4a73ab3cfe MERGEABLE RDY pr/sec-driver-backend drivers: validate device-supplied completion ids (virtio used-ring _id, NVMe cid)
+1455 dce0d32fd59a1f98c58ab3fa2c452e692538da6d MERGEABLE DRAFT wip/feat-fork process: implement thread-backed fork()/vfork()/execve()/waitpid() (opt-in, off by default)
+1456 e9a31b1ab63ce6a34dae748a02c63bbfdf2a03b5 CONFLICTING RDY wip/fork-stage2-pr mm: per-child copy-on-write address space for fork() (opt-in, stacked on #1455)
+1458 d3e9e973dc3a6ef84dd17733b051b099b59724a5 CONFLICTING DRAFT integ/pg-fork-zfs [DRAFT / tracking - DO NOT MERGE as one unit] PostgreSQL-on-OSv fork+ZFS integration (will split into S1..S6 on #1455/#1456/#1457 + #1423)
+1459 03b5735736e8130afbd67cfe227b8ebdf5a1199b MERGEABLE RDY pr/openzfs-aarch64 zfs(openzfs): enable OpenZFS on aarch64 (follow-on to #1423)
+1461 38603a7bc148b1bc9a85ca110d94bc3248223ccd MERGEABLE RDY pr/rng-reseed-on-resume random: reseed the CSPRNG on hypervisor resume so snapshot clones diverge
+1463 1454fd42f3871bb1cb1c2dde97edc4e19e0e48c3 MERGEABLE RDY pr/virtio-net-multiqueue virtio-net: implement multiqueue (VIRTIO_NET_F_MQ)
+1464 512b2b2ec5459b1c2a2d04ecfe443a2365363510 MERGEABLE RDY pr/sched-load-balance sched: disperse threads faster in the load balancer
+1465 dfe6b67b4c7aaf18d5a1f6d815afa36da1ae8e86 MERGEABLE RDY pr/msix-vector-budget drivers: bound MSI-X vector use so many-queue guests still boot
+1467 c85ac13ede3f5e86a6d42076ca3c622da73702a3 MERGEABLE RDY pr/net-batch-wakeup net: batch per-connection wakeups in the virtio-net receiver
+1470 0b78df3b4632b629625f5bd52f0f87578a1bf52b MERGEABLE RDY pr/virtio-net-rss virtio-net: implement RSS (VIRTIO_NET_F_RSS) receive flow steering
+1471 c3c0bcde42d307f91929258f5910e59d59b87388 MERGEABLE RDY pr/nitro-inbound-tcp drivers/ena, drivers/nvme: fix inbound TCP on AWS Nitro (RSS indirection + NVMe MSI-X budget)
+1472 4dc03bbc95158751876dd159db74c576a8f2c312 MERGEABLE RDY pr/sched-idle-pull sched: idle-CPU pull work-stealing to disperse woken threads under concurrency
+1475 0b72ee0c6581b653d5024cc7e55942c7536b4aed CONFLICTING DRAFT pr/fork-cow-nested-lockfree mm: resolve fork COW write faults lock-free when nested (fork-stack follow-on to #1456)
+1477 151811305212bb07dc1bad65179426f0e0041375 MERGEABLE RDY pr/setlocale-fix libc: setlocale must reject unavailable locales and return a name newlocale accepts
+1478 25bde6b9622e98d12a9fad7d347ad8be98944ca6 MERGEABLE RDY pr/openzfs-runtime-datapool zfs(openzfs): enable a runtime ZFS data pool on a non-ZFS-root image (follow-on to #1423)
+1479 648f7b336f4c2bfa6d564975df058a33be63430a MERGEABLE RDY pr/nvme-queue-depth drivers/nvme: deepen the IO queue and PRP-list cache for concurrent load
+1480 d9fea9f604b50fc41c04d71563f59b2e71cef4a1 MERGEABLE RDY pr/condvar-wake-lock sched: take the lock before checking the wait queue in condvar wake_one/wake_all
+1481 609076dc11ec260a9ee50095dbb4815ed3898ced MERGEABLE RDY pr/nvme-int-coalescing drivers/nvme: make interrupt coalescing opt-in, default off for low latency
+1482 144d016fea080825744f1dc0550f678ca058547c MERGEABLE RDY pr/numa-harden numa: bound SRAT/SLIT parsing against untrusted ACPI table lengths
+1483 9f06b5f9da889b2e2237aeec54cc3947d35c863d MERGEABLE RDY pr/pagecache-munmap-sync-nothrow pagecache: report page-writeback errors from sync() by return value
+1484 0635717f84557a25bbe5dd33b99b8bbc9d5733e7 MERGEABLE RDY pr/wake-null-guard sched: skip waking a null or invalid thread pointer
+1485 0347a7d04e064d5f26e22e0fd356119c6c0928d0 MERGEABLE RDY pr/fd-limit-highvu fs: raise default max file descriptors from 16384 to 65536
+1486 dd500ab9bc665023bc721f5e85d523aad96de678 MERGEABLE RDY pr/callout-null-guard bsd/callout: treat a null callout in callout_reset_on as a no-op
+1487 ec5c557a9ab0f4dacfdfce93e1e19264fd30d34b MERGEABLE DRAFT pr/zfs-arc-halfram-cap zfs(openzfs): cap the default ARC at half of RAM for app coexistence
+1488 cb23ebdf39e96f014a460d77d0d15f6f7cbfb05c MERGEABLE RDY pr/openzfs-2.4.4 open_zfs: bump vendored OpenZFS to 2.4.4 and adapt the OSv platform layer
+1490 471ed7f223653a8e12dffa352c279c8db8fc7ce3 MERGEABLE RDY pr/aarch64-phys-map-4gb aarch64: cover all of physical memory in the temporary phys map
+1491 1c4f506f851d49d3921fa169562655b026afb6fd MERGEABLE RDY pr/aarch64-gicv3-sgi-cpus aarch64: do not cap GICv3 SGI targets at 16 CPUs
+1492 4279b1809ff1d9df45047c66cbcad9becdffd7fa MERGEABLE RDY pr/random-rdrand-early-read random: satisfy early /dev/random reads from RDRAND instead of blocking
+1493 07e533df364ee1cd76863bd8e2cd9df5c09886ac MERGEABLE RDY pr/aarch64-rndr-early-read aarch64: satisfy early /dev/random reads from RNDR (FEAT_RNG)
+1494 bc334f024d77e0d3e3eb75e3100ba88b5383b312 MERGEABLE RDY pr/bootfs-zfs-dep build: make bootfs depend on the ZFS library for any ZFS build, not only fs=zfs
+1495 7c306295f8594a598d4f26d14d1c422c68edf022 MERGEABLE RDY pr/openzfs-patch-apply-errors build: fail the build when the OpenZFS patch series does not apply
+1496 ed3df44a882170036d24a1c852843e6529d61445 MERGEABLE RDY pr/ramfs-bootfs-tools-dep build: order the mount tools before bootfs for fs=ramfs
+1497 c462b0cab2db8eaa2c88a5fa63c9c1e13dc83c03 MERGEABLE RDY pr/zfs-provider-manifest zfs: let each ZFS provider carry the libsolaris.so manifest entry
+1498 34bcf8c93350303e02a5ef8a881c5b8e60ee02ac MERGEABLE RDY pr/ahci-atapi-hang drivers/ahci: fix boot hang when an AHCI port presents an ATAPI device (breaks all q35 boots)
+1499 ebf381e7ac29886e19f2d5912d975fc8211f21e6 MERGEABLE RDY pr/blk-device-naming drivers: allocate block device names from one shared namespace
+1500 da1a54a298cf1a6db828c96f216363b9998ca798 MERGEABLE RDY pr/pin-lwext4 lwext4: pin the checkout to an exact commit
+1502 18c9cc67574304e7f3c5044751ec6b8347a3bc59 MERGEABLE RDY pr/vfs-dentry-lock-order vfs: fix AB-BA deadlock between dentry_hash_lock and the vnode lock
+1503 eb2605abf7059db26925ea8e6572707f7dff54ae MERGEABLE RDY pr/vfs-dentry-perchain vfs: split the global dentry hash lock into per-chain locks
+1504 2f77155a73a17f5da85a853e44f200a3c230dd7b MERGEABLE RDY pr/tcb-psabi-guards x64: cover the psABI stack and pointer guards in the thread control block
+1505 6ccffce8245bff00cdfcda1f5b9d6795322e742c MERGEABLE RDY pr/zfs-spl-hires-timeout zfs: honour sub-tick timeouts in the SPL cv_timedwait_hires
+1506 98b5e58c45b13ccf081889292e49dcac3bb669c8 MERGEABLE RDY pr/zfs-arc-max-env zfs: allow an explicit ARC ceiling via OSV_ZFS_ARC_MAX
+1507 9fb78af4b75f53c922aeaeeec7263df76ff6bba4 MERGEABLE RDY pr/fsync-writeback-guard pagecache: skip the whole-file writeback scan on fsync when nothing is dirty
+1508 75bb43bf690629b01e3e5717f02f94585d256237 MERGEABLE RDY pr/physio-per-iovec vfs: issue one bio per iovec in physio(), with the correct length
+1509 c4ce6d0c265d81e2e765130ac3366b100a134b2d MERGEABLE RDY pr/virtio-blk-mq-complete virtio-blk: optional per-queue completion threads (OSV_BLK_MQ_COMPLETE)
+1510 8f95be01e2ecf9192b279aacf0370fd2e1157379 MERGEABLE DRAFT pr/ext4-perf-v2 libext: ext4 sequential-read performance (read-ahead + async prefetch)
+1511 2be3701f010096169da63393776b49ee0bd34d78 MERGEABLE RDY pr/sched-adaptive-idle-spin-master sched: adaptive per-CPU idle-spin window (guest-side halt-polling)
+1512 1cdbe3541415450ddd72098c4006436ea73bcef3 MERGEABLE RDY bench/syncwrite-mt bench: durable-write latency isolate with concurrent writers in zfs-bench
+1513 18194d2532b45b6055daa6ede572cd05c7fdaf1b MERGEABLE RDY pr/zfs-vdev-nonrot zfs(openzfs): report vdevs as solid state (vdev_nonrot)

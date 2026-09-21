@@ -1,0 +1,4 @@
+  MISS drivers/random.cc hunk1 @@ -56,6 +56,10 @@ static random_device_priv *to_priv(device
+  MISS drivers/random.cc hunk2 @@ -64,6 +68,32 @@ random_read(struct device *dev, struct ui
+HUNKS_TOTAL 2
+HUNKS_REVERSE 0

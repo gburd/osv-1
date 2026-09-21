@@ -1,0 +1,3 @@
+  MISS fs/vfs/vfs_bdev.cc hunk1 @@ -181,46 +181,13 @@ bdev_write(struct device *dev, struct 
+HUNKS_TOTAL 1
+HUNKS_REVERSE 0

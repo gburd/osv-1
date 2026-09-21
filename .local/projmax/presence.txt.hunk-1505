@@ -1,0 +1,6 @@
+  MISS bsd/porting/netport1.cc hunk1 @@ -90,3 +90,19 @@ int openzfs_cv_timedwait(kcondvar_t *cv, 
+  MISS bsd/sys/cddl/compat/opensolaris/sys/kcondvar.h hunk1 @@ -50,6 +50,9 @@ typedef enum {
+  MISS exported_symbols/osv_libsolaris.so.symbols hunk1 @@ -9,6 +9,7 @@ copyinstr
+  MISS modules/open_zfs/osv/include/os/osv/spl/sys/condvar.h hunk1 @@ -50,16 +50,30 @@ static inline int
+HUNKS_TOTAL 4
+HUNKS_REVERSE 0

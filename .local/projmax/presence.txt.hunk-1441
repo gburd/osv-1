@@ -1,0 +1,20 @@
+  MISS Makefile hunk1 @@ -1133,6 +1133,7 @@ endif
+  MISS core/mempool.cc hunk1 @@ -23,6 +23,7 @@
+  MISS core/mempool.cc hunk2 @@ -597,6 +598,11 @@ public:
+  MISS core/mempool.cc hunk3 @@ -796,6 +802,38 @@ page_range* page_range_allocator::alloc
+  MISS core/mempool.cc hunk4 @@ -1789,6 +1827,40 @@ void* alloc_page()
+  MISS core/numa.cc hunk1 @@ -0,0 +1,188 @@
+  MISS include/osv/numa.hh hunk1 @@ -0,0 +1,67 @@
+  MISS include/osv/pagealloc.hh hunk1 @@ -13,6 +13,10 @@
+  MISS linux.cc hunk1 @@ -10,6 +10,8 @@
+  MISS linux.cc hunk2 @@ -183,23 +185,44 @@ int futex(int *uaddr, int op, int val,
+  MISS linux.cc hunk3 @@ -209,9 +232,11 @@ static long get_mempolicy(int *policy, 
+  MISS linux.cc hunk4 @@ -459,12 +484,13 @@ static long sys_getcwd(char *buf, unsi
+  MISS loader.cc hunk1 @@ -26,6 +26,7 @@
+  MISS loader.cc hunk2 @@ -824,6 +825,7 @@ void main_cont(int loader_argc, char** l
+  MISS modules/tests/Makefile hunk1 @@ -193,6 +193,12 @@ endif
+  MISS tests/tst-numa-alloc.cc hunk1 @@ -0,0 +1,88 @@
+  MISS tests/tst-numa-mempolicy.cc hunk1 @@ -0,0 +1,85 @@
+  MISS tests/tst-numa.cc hunk1 @@ -0,0 +1,55 @@
+HUNKS_TOTAL 18
+HUNKS_REVERSE 0

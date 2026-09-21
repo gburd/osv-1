@@ -1,0 +1,4 @@
+  MISS core/sched.cc hunk1 @@ -1309,6 +1309,14 @@ void thread::destroy()
+  MISS include/osv/wait_record.hh hunk1 @@ -35,7 +35,21 @@ public:
+HUNKS_TOTAL 2
+HUNKS_REVERSE 0

@@ -1,0 +1,3 @@
+  MISS modules/open_zfs/osv/module/os/osv/zfs/vdev_disk.c hunk1 @@ -105,6 +105,22 @@ vdev_disk_open(vdev_t *vd, uint64_t *ps
+HUNKS_TOTAL 1
+HUNKS_REVERSE 0

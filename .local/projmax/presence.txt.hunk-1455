@@ -1,0 +1,26 @@
+  MISS Makefile hunk1 @@ -1057,6 +1057,9 @@ objects += arch/$(arch)/firmware.o
+  REV  Makefile hunk2 @@ -1660,11 +1663,20 @@ musl += prng/srand48.o
+  MISS arch/aarch64/fork.cc hunk1 @@ -0,0 +1,91 @@
+  MISS arch/x64/fork.cc hunk1 @@ -0,0 +1,115 @@
+  MISS conf/kconfig/threads hunk1 @@ -6,6 +6,21 @@ config lazy_stack
+  MISS documentation/fork.md hunk1 @@ -0,0 +1,128 @@
+  MISS include/osv/fork.hh hunk1 @@ -0,0 +1,71 @@
+  MISS libc/process/execve.cc hunk1 @@ -1,9 +1,102 @@
+  MISS libc/process/fork.cc hunk1 @@ -0,0 +1,230 @@
+  REV  libc/process/waitpid.cc hunk1 @@ -1,8 +1,44 @@
+  MISS libc/pthread.cc hunk1 @@ -276,9 +276,48 @@ int pthread_atfork(void (*prepare)(void
+  MISS libc/signal.cc hunk1 @@ -418,7 +418,8 @@ int kill(pid_t pid, int sig)
+  REV  linux.cc hunk1 @@ -63,6 +63,7 @@
+  REV  linux.cc hunk2 @@ -484,6 +485,7 @@ static long sys_set_tid_address(int *tid
+  REV  linux.cc hunk3 @@ -493,11 +495,27 @@ int sys_clone(unsigned long flags, voi
+  MISS modules/tests/Makefile hunk1 @@ -132,7 +132,7 @@ tests := tst-iovcnt-guard.so tst-pthread
+  REV  runtime.cc hunk1 @@ -7,6 +7,8 @@
+  REV  runtime.cc hunk2 @@ -69,6 +71,17 @@
+  REV  runtime.cc hunk3 @@ -210,20 +223,6 @@ int getpagesize()
+  REV  runtime.cc hunk4 @@ -514,6 +513,18 @@ int pclose(FILE *stream)
+  REV  runtime.cc hunk5 @@ -742,14 +753,6 @@ pid_t wait3(int *status, int options, s
+  REV  tests/payload-exit7.cc hunk1 @@ -0,0 +1,16 @@
+  MISS tests/tst-execve.cc hunk1 @@ -0,0 +1,71 @@
+  MISS tests/tst-fork.cc hunk1 @@ -0,0 +1,124 @@
+HUNKS_TOTAL 24
+HUNKS_REVERSE 11

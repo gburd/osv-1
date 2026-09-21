@@ -1,0 +1,42 @@
+  MISS Makefile hunk1 @@ -895,6 +895,13 @@ drivers += drivers/xenclock.o
+  MISS conf/profiles/x64/base.mk hunk1 @@ -82,3 +82,5 @@ export conf_drivers_virtio?=0
+  MISS conf/profiles/x64/crucible.mk hunk1 @@ -0,0 +1,4 @@
+  MISS docs/crucible-usage.md hunk1 @@ -0,0 +1,268 @@
+  MISS drivers/crucible-bincode.hh hunk1 @@ -0,0 +1,348 @@
+  MISS drivers/crucible-blk.cc hunk1 @@ -0,0 +1,495 @@
+  MISS drivers/crucible-blk.hh hunk1 @@ -0,0 +1,55 @@
+  MISS drivers/crucible-client.cc hunk1 @@ -0,0 +1,1143 @@
+  MISS drivers/crucible-client.hh hunk1 @@ -0,0 +1,389 @@
+  MISS drivers/crucible-connection.cc hunk1 @@ -0,0 +1,293 @@
+  MISS drivers/crucible-connection.hh hunk1 @@ -0,0 +1,177 @@
+  MISS drivers/crucible-hash.cc hunk1 @@ -0,0 +1,86 @@
+  MISS drivers/crucible-hash.hh hunk1 @@ -0,0 +1,75 @@
+  MISS drivers/crucible-messages.hh hunk1 @@ -0,0 +1,700 @@
+  MISS drivers/crucible-request.cc hunk1 @@ -0,0 +1,164 @@
+  MISS drivers/crucible-request.hh hunk1 @@ -0,0 +1,217 @@
+  MISS drivers/crucible-types.hh hunk1 @@ -0,0 +1,262 @@
+  MISS fs/vfs/vfs_bdev.cc hunk1 @@ -188,12 +188,25 @@ physio(struct device *dev, struct uio 
+  MISS fs/vfs/vfs_bdev.cc hunk2 @@ -207,7 +220,7 @@ physio(struct device *dev, struct uio *u
+  MISS fs/vfs/vfs_bdev.cc hunk3 @@ -216,10 +229,10 @@ physio(struct device *dev, struct uio 
+  MISS loader.cc hunk1 @@ -59,6 +59,7 @@
+  MISS loader.cc hunk2 @@ -145,7 +146,13 @@ int main(int loader_argc, char **loader
+  MISS loader.cc hunk3 @@ -177,6 +184,18 @@ bool opt_maxnic = false;
+  MISS loader.cc hunk4 @@ -226,8 +245,32 @@ static void usage()
+  MISS loader.cc hunk5 @@ -268,6 +311,12 @@ static void parse_options(int loader_ar
+  MISS loader.cc hunk6 @@ -407,6 +456,38 @@ static void parse_options(int loader_ar
+  MISS loader.cc hunk7 @@ -550,6 +631,7 @@ void* do_main_thread(void *_main_args)
+  MISS loader.cc hunk8 @@ -670,6 +752,31 @@ void* do_main_thread(void *_main_args)
+  MISS modules/tests/Makefile hunk1 @@ -172,6 +172,9 @@ tests := tst-iovcnt-guard.so tst-pthread
+  MISS scripts/run.py hunk1 @@ -90,6 +90,29 @@ def set_imgargs(options):
+  MISS scripts/run.py hunk2 @@ -659,9 +682,24 @@ if __name__ == "__main__":
+  MISS tests/crucible-boot-test.sh hunk1 @@ -0,0 +1,40 @@
+  MISS tests/crucible-discard-test.sh hunk1 @@ -0,0 +1,108 @@
+  MISS tests/crucible-pipeline-test.sh hunk1 @@ -0,0 +1,192 @@
+  MISS tests/crucible-scenarios.sh hunk1 @@ -0,0 +1,260 @@
+  MISS tests/crucible-snapshot-test.sh hunk1 @@ -0,0 +1,109 @@
+  MISS tests/tst-crucible-bench.cc hunk1 @@ -0,0 +1,322 @@
+  MISS tests/tst-crucible-blk.cc hunk1 @@ -0,0 +1,350 @@
+  MISS tests/tst-crucible-zfs.cc hunk1 @@ -0,0 +1,470 @@
+  MISS tests/zfs-crucible-raidz-l2arc.sh hunk1 @@ -0,0 +1,173 @@
+HUNKS_TOTAL 40
+HUNKS_REVERSE 0

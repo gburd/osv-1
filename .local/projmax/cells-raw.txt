@@ -1,0 +1,16 @@
+REP osv ro vu32 r1 tps=155975.426257 lat_ms=0.205 lat_sd=0.510 xact=9334834 failed=(0.000%) rc=0 drv_cpu_pct=6.8 drv_cores=2.46/36 drv_rx_MBps=18.3 drv_tx_MBps=20.2
+REP osv ro vu32 r2 tps=170375.297049 lat_ms=0.188 lat_sd=0.093 xact=10196876 failed=(0.000%) rc=0 drv_cpu_pct=7.4 drv_cores=2.67/36 drv_rx_MBps=20.0 drv_tx_MBps=22.1
+REP osv ro vu32 r3 tps=171491.347301 lat_ms=0.186 lat_sd=0.094 xact=10263776 failed=(0.000%) rc=0 drv_cpu_pct=7.5 drv_cores=2.70/36 drv_rx_MBps=20.2 drv_tx_MBps=22.2
+CELL_DONE osv ro vu32
+REP lin ro vu32 r1 tps=194041.218212 lat_ms=0.165 lat_sd=0.039 xact=11639617 failed=(0.000%) rc=0 drv_cpu_pct=9.6 drv_cores=3.45/36 drv_rx_MBps=22.9 drv_tx_MBps=25.2
+REP lin ro vu32 r2 tps=190953.585411 lat_ms=0.167 lat_sd=0.044 xact=11453832 failed=(0.000%) rc=0 drv_cpu_pct=9.1 drv_cores=3.28/36 drv_rx_MBps=22.5 drv_tx_MBps=24.8
+REP lin ro vu32 r3 tps=192931.995495 lat_ms=0.166 lat_sd=0.040 xact=11573008 failed=(0.000%) rc=0 drv_cpu_pct=9.9 drv_cores=3.58/36 drv_rx_MBps=22.7 drv_tx_MBps=25.0
+CELL_DONE lin ro vu32
+REP osv rw vu32 r1 tps=1582.620878 lat_ms=20.213 lat_sd=16.269 xact=94550 failed=(0.000%) rc=0 drv_cpu_pct=0.8 drv_cores=0.29/36 drv_rx_MBps=0.9 drv_tx_MBps=1.4
+REP osv rw vu32 r2 tps=1923.050526 lat_ms=16.635 lat_sd=12.225 xact=115159 failed=(0.000%) rc=0 drv_cpu_pct=0.8 drv_cores=0.29/36 drv_rx_MBps=1.1 drv_tx_MBps=1.7
+REP osv rw vu32 r3 tps=2339.743854 lat_ms=13.673 lat_sd=10.487 xact=140104 failed=(0.000%) rc=0 drv_cpu_pct=1.0 drv_cores=0.38/36 drv_rx_MBps=1.3 drv_tx_MBps=2.1
+CELL_DONE osv rw vu32
+REP lin rw vu32 r1 tps=19840.530786 lat_ms=1.613 lat_sd=0.957 xact=1190164 failed=(0.000%) rc=0 drv_cpu_pct=6.0 drv_cores=2.16/36 drv_rx_MBps=10.9 drv_tx_MBps=17.8
+REP lin rw vu32 r2 tps=20647.509854 lat_ms=1.550 lat_sd=0.890 xact=1238576 failed=(0.000%) rc=0 drv_cpu_pct=6.4 drv_cores=2.31/36 drv_rx_MBps=11.3 drv_tx_MBps=18.5
+REP lin rw vu32 r3 tps=20541.314091 lat_ms=1.557 lat_sd=0.882 xact=1232276 failed=(0.000%) rc=0 drv_cpu_pct=6.3 drv_cores=2.27/36 drv_rx_MBps=11.3 drv_tx_MBps=18.4
+CELL_DONE lin rw vu32

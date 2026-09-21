@@ -1,0 +1,14 @@
+  MISS core/net_channel.cc hunk1 @@ -138,7 +138,6 @@ bool classifier::post_packet(mbuf* m)
+  MISS core/net_channel.cc hunk2 @@ -146,6 +145,24 @@ bool classifier::post_packet(mbuf* m)
+  MISS drivers/virtio-net.cc hunk1 @@ -18,6 +18,7 @@
+  MISS drivers/virtio-net.cc hunk2 @@ -459,6 +460,16 @@ bool net::bad_rx_csum(struct mbuf* m, s
+  MISS drivers/virtio-net.cc hunk3 @@ -466,6 +477,17 @@ void net::receiver()
+  MISS drivers/virtio-net.cc hunk4 @@ -485,6 +507,15 @@ void net::receiver()
+  MISS drivers/virtio-net.cc hunk5 @@ -539,9 +570,17 @@ void net::receiver()
+  MISS drivers/virtio-net.cc hunk6 @@ -552,6 +591,20 @@ void net::receiver()
+  MISS drivers/virtio-net.hh hunk1 @@ -221,6 +221,11 @@ public:
+  MISS include/osv/net_channel.hh hunk1 @@ -15,6 +15,7 @@
+  MISS include/osv/net_channel.hh hunk2 @@ -122,6 +123,18 @@ public:
+  MISS include/osv/net_channel.hh hunk3 @@ -143,4 +156,65 @@ private:
+HUNKS_TOTAL 12
+HUNKS_REVERSE 0

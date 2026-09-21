@@ -1,0 +1,32 @@
+  REV  arch/x64/exceptions.cc hunk1 @@ -118,7 +118,12 @@ unsigned interrupt_descriptor_table::re
+  REV  drivers/msi.cc hunk1 @@ -25,7 +25,11 @@ msix_vector::msix_vector(pci::function* d
+  REV  drivers/msi.cc hunk2 @@ -198,7 +202,16 @@ std::vector<msix_vector*> interrupt_man
+  REV  drivers/virtio-blk.cc hunk1 @@ -137,6 +137,20 @@ blk::blk(virtio_device& virtio_dev)
+  MISS drivers/virtio-net.cc hunk1 @@ -19,6 +19,7 @@
+  REV  drivers/virtio-net.cc hunk2 @@ -136,10 +137,13 @@ static int if_transmit(struct ifnet* i
+  REV  drivers/virtio-net.cc hunk3 @@ -186,9 +190,13 @@ static void if_getinfo(struct ifnet* if
+  REV  drivers/virtio-net.cc hunk4 @@ -203,15 +211,16 @@ void net::fill_qstats(const struct rxq
+  REV  drivers/virtio-net.cc hunk5 @@ -220,7 +229,9 @@ bool net::ack_irq()
+  REV  drivers/virtio-net.cc hunk6 @@ -239,18 +250,12 @@ void net::init()
+  REV  drivers/virtio-net.cc hunk7 @@ -259,6 +264,62 @@ net::net(virtio_device& dev)
+  REV  drivers/virtio-net.cc hunk8 @@ -277,7 +338,7 @@ net::net(virtio_device& dev)
+  MISS drivers/virtio-net.cc hunk9 @@ -297,30 +358,63 @@ net::net(virtio_device& dev)
+  MISS drivers/virtio-net.cc hunk10 @@ -340,7 +434,18 @@ net::net(virtio_device& dev)
+  MISS drivers/virtio-net.cc hunk11 @@ -384,6 +489,18 @@ void net::read_config()
+  MISS drivers/virtio-net.cc hunk12 @@ -459,9 +576,9 @@ bool net::bad_rx_csum(struct mbuf* m, st
+  MISS drivers/virtio-net.cc hunk13 @@ -473,8 +590,8 @@ void net::receiver()
+  MISS drivers/virtio-net.cc hunk14 @@ -490,7 +607,7 @@ void net::receiver()
+  MISS drivers/virtio-net.cc hunk15 @@ -553,11 +670,11 @@ void net::receiver()
+  REV  drivers/virtio-net.cc hunk16 @@ -637,11 +754,11 @@ unsigned* net::rx_buffer_refcnt(void* 
+  MISS drivers/virtio-net.cc hunk17 @@ -929,6 +1046,51 @@ void net::txq::gc()
+  MISS drivers/virtio-net.cc hunk18 @@ -942,6 +1104,12 @@ u64 net::get_driver_features()
+  MISS drivers/virtio-net.hh hunk1 @@ -15,6 +15,7 @@
+  REV  drivers/virtio-net.hh hunk2 @@ -28,6 +29,14 @@ namespace virtio {
+  MISS drivers/virtio-net.hh hunk3 @@ -220,8 +229,12 @@ public:
+  REV  drivers/virtio-net.hh hunk4 @@ -313,7 +326,8 @@ private:
+  MISS drivers/virtio-net.hh hunk5 @@ -497,9 +511,20 @@ private:
+  REV  drivers/virtio.cc hunk1 @@ -6,6 +6,8 @@
+  REV  drivers/virtio.cc hunk2 @@ -19,6 +21,38 @@ namespace virtio {
+  REV  drivers/virtio.hh hunk1 @@ -104,6 +104,16 @@ public:
+HUNKS_TOTAL 30
+HUNKS_REVERSE 17

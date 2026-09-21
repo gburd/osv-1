@@ -1,0 +1,5 @@
+  MISS conf/kconfig/threads hunk1 @@ -10,6 +10,18 @@ config lazy_stack_invariant
+  MISS core/sched.cc hunk1 @@ -25,6 +25,7 @@
+  MISS core/sched.cc hunk2 @@ -792,54 +793,89 @@ void thread::unpin()
+HUNKS_TOTAL 3
+HUNKS_REVERSE 0
