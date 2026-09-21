@@ -2246,34 +2246,23 @@ bootfs_dep := scripts/mkbootfs.py $(bootfs_manifest) $(bootfs_manifest_dep) $(ou
 ifeq ($(fs),ext)
 bootfs_dep += $(out)/modules/libext/libext.so
 else
-ifeq ($(fs),zfs)
-bootfs_dep += $(tools:%=$(out)/%) $(out)/libsolaris.so
-else
 # bootfs.manifest.skel names /usr/lib/fs/libsolaris.so unconditionally, so the
-# ZFS library is part of bootfs for every root filesystem, not only fs=zfs.  Any
-# ZFS-enabled build therefore has to list it (and the tools that go with it) as a
-# prerequisite here, or mkbootfs runs before it exists: serially that is a hard
-# failure on the missing file, and under -j it is a race that shows up as an
-# intermittent build break.
+# ZFS library is part of bootfs for every configuration, not only fs=zfs.  List
+# it (and the tools that go with it) as a prerequisite unconditionally, or
+# mkbootfs.py runs before the library exists: serially that is a hard
+# FileNotFoundError, and under -j it is a race that surfaces as an intermittent
+# build failure.
 #
-# This is UNCONDITIONAL, not keyed on conf_zfs or on the root filesystem.  Both
-# narrower forms were tried and both leave the default configuration broken:
-# keying on `fs=zfs` misses every other root filesystem, and keying on
-# `conf_zfs_openzfs` misses conf_zfs=bsd, which also builds libsolaris.so.
-# scripts/build defaults fs=zfs, so the only routinely exercised path happens to
-# set the dependency and the omission stays invisible; a bare
-# `make build/release.x64/bootfs.bin` with fs unset reproduces the failure on an
-# unmodified tree.  The manifest names the library for every configuration, so
-# the prerequisite belongs in every configuration.
+# Do NOT narrow this to a filesystem or to a conf_zfs value.  Both forms leave
+# the default configuration broken: fs=zfs misses every other root filesystem,
+# and conf_zfs=openzfs misses conf_zfs=bsd, which also builds libsolaris.so.
 bootfs_dep += $(tools:%=$(out)/%) $(out)/libsolaris.so
 ifeq ($(fs),ramfs)
-# For fs=ramfs, scripts/build passes $(out)/usr.manifest as the bootfs manifest,
-# and that manifest is generated from usr_ramfs.manifest.skel, which lists
-# tools/mount/mount-fs.so and tools/mount/umount.so.  Without these the very
-# first build of a fresh tree races: mkbootfs.py stats a tool nothing ordered
-# and dies with FileNotFoundError.
+# For fs=ramfs, scripts/build passes the generated $(out)/usr.manifest as the
+# bootfs manifest.  That manifest comes from usr_ramfs.manifest.skel, which
+# lists tools/mount/mount-fs.so and tools/mount/umount.so, so a fresh tree
+# races on those two the same way.
 bootfs_dep += $(out)/tools/mount/mount-fs.so $(out)/tools/mount/umount.so
-endif
 endif
 endif
 $(out)/bootfs.bin: $(bootfs_dep)
