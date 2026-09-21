@@ -15,6 +15,17 @@
 # Each row: PR  file  grep-marker  min-count  why.  A base is REQUIRED to carry
 # every row below.  Optional/situational fixes (#1503 per-chain locks, #1506 ARC
 # env knob) are intentionally NOT gated -- see the notes at the bottom.
+#
+# ANCESTRY: content markers alone are NOT enough.  A base was benchmarked for
+# weeks while sitting 24 commits BEHIND upstream/master, forked before the commit
+# that restructured modules/open_zfs (0e34e4dc2).  Every content marker passed,
+# because the markers only ask "is this fix present", never "is this base current".
+# Consequences: the run was described as the projected-merged future when it was
+# really the fork stack as of an older fork point; and a fix whose upstream form
+# edits a file that only exists after the restructure could not be applied at all.
+# So the gate now also asserts the base is a DESCENDANT of upstream/master.
+# Override with BENCH_ALLOW_STALE_BASE=1 when an old base is deliberate, e.g. when
+# re-measuring an earlier result on its original base for a single-variable A/B.
 
 TREE="${1:-.}"
 fail=0
@@ -60,6 +71,30 @@ for opt_marker in dentry_chain_lock OSV_ZFS_ARC_MAX; do
         echo "  note: optional marker '$opt_marker' present"
     fi
 done
+
+# Ancestry: is the base actually current with upstream/master?  A content-only
+# gate passed for weeks on a base 24 commits behind master (fork point cb8c7205b,
+# before the modules/open_zfs restructure in 0e34e4dc2).
+if git -C "$TREE" rev-parse --git-dir >/dev/null 2>&1; then
+    if git -C "$TREE" rev-parse --verify -q upstream/master >/dev/null 2>&1; then
+        if git -C "$TREE" merge-base --is-ancestor upstream/master HEAD 2>/dev/null; then
+            echo "  ok [ancestry] base contains upstream/master"
+        else
+            behind=$(git -C "$TREE" rev-list --count "$(git -C "$TREE" merge-base upstream/master HEAD)"..upstream/master 2>/dev/null)
+            if [ "${BENCH_ALLOW_STALE_BASE:-0}" = "1" ]; then
+                echo "  note [ancestry] base is ${behind:-?} commits behind upstream/master (allowed: BENCH_ALLOW_STALE_BASE=1)"
+            else
+                echo "GATE FAIL [ancestry] base does NOT contain upstream/master: ${behind:-?} commits behind" >&2
+                echo "  A stale base is not the projected-merged future, and a fix whose upstream form" >&2
+                echo "  touches a restructured path may be impossible to apply.  Rebase onto" >&2
+                echo "  upstream/master, or set BENCH_ALLOW_STALE_BASE=1 if the old base is deliberate." >&2
+                fail=1
+            fi
+        fi
+    else
+        echo "  note [ancestry] no upstream/master ref here; ancestry unchecked"
+    fi
+fi
 
 if [ "$fail" -ne 0 ]; then
     echo "" >&2
