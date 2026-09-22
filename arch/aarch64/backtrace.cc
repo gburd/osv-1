@@ -14,7 +14,7 @@ struct frame {
     void* pc;
 };
 
-static inline int unwind_fp_chain(frame* fp, void** pc, int nr, int i)
+static inline __attribute__((always_inline)) int unwind_fp_chain(frame* fp, void** pc, int nr, int i)
 {
     frame* next;
 
@@ -48,6 +48,14 @@ int backtrace_safe_from_interrupt(void** pc, int nr)
     if (nr < 1) {
         return 0;
     }
-    pc[0] = (void*)ef->elr;
-    return unwind_fp_chain((frame*)ef->regs[29], pc, nr, 1);
+    u64 elr = 0;
+    if (!safe_load(&ef->elr, elr)) {
+        return 0;
+    }
+    pc[0] = (void*)elr;
+    u64 fp = 0;
+    if (!safe_load(&ef->regs[29], fp)) {
+        return 1;
+    }
+    return unwind_fp_chain((frame*)fp, pc, nr, 1);
 }

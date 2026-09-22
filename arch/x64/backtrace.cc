@@ -16,7 +16,7 @@ struct frame {
 };
 
 // Walk a frame-pointer chain, appending return addresses to pc[].
-static inline int unwind_fp_chain(frame* rbp, void** pc, int nr, int i)
+static inline __attribute__((always_inline)) int unwind_fp_chain(frame* rbp, void** pc, int nr, int i)
 {
     frame* next;
 
@@ -55,14 +55,23 @@ int backtrace_safe_from_interrupt(void** pc, int nr)
     // arrived.  It is the whole point of this function and it needs no
     // unwinding at all, so it is always correct even where the interrupted
     // code was built without frame pointers.
-    pc[0] = (void*)ef->rip;
-    // Continue up the interrupted thread's own frame-pointer chain.  Starting
-    // from the handler's rbp instead (what backtrace_safe() does) yields only
-    // the interrupt-entry frames, because the handler's chain is rooted in
-    // interrupt_entry_common and never crosses back into the interrupted
-    // stack: the entry stub pushes an exception_frame rather than a frame
-    // record, so there is no link for an unwinder to follow.
-    return unwind_fp_chain((frame*)ef->rbp, pc, nr, 1);
+    // current_interrupt_frame is __thread and this is the first code to read it
+    // from arbitrary tracepoint context, where fsbase may point at an app TCB.
+    // A non-null garbage ef would fault on a plain load, so read it the way the
+    // rest of this file reads untrusted memory.
+    u64 rip = 0;
+    if (!safe_load(&ef->rip, rip)) {
+        return 0;
+    }
+    pc[0] = (void*)rip;
+    // Continue up the interrupted thread's callers.  A frame-pointer walk can
+    // only ever reach callers, never the leaf, which is why pc[0] has to come
+    // from the frame above.
+    u64 rbp = 0;
+    if (!safe_load(&ef->rbp, rbp)) {
+        return 1;
+    }
+    return unwind_fp_chain((frame*)rbp, pc, nr, 1);
 }
 
 
