@@ -1,0 +1,4 @@
+REP osv ro vu192 r1 tps=88428.428347 lat_ms=2.170 lat_sd=1.786 int_tps_min=70837.4 int_lat_max=2.405 xact=5206716 failed=0 progfail=0 rc=0 drv_cpu_pct=4.8 drv_cores=1.72/36 drv_rx_MBps=10.2 drv_tx_MBps=11.2
+REP osv ro vu192 r2 tps=89663.273773 lat_ms=2.140 lat_sd=1.403 int_tps_min=79673.4 int_lat_max=2.207 xact=5304931 failed=0 progfail=0 rc=0 drv_cpu_pct=4.8 drv_cores=1.74/36 drv_rx_MBps=10.4 drv_tx_MBps=11.5
+REP osv ro vu192 r3 tps=89694.114544 lat_ms=2.139 lat_sd=1.397 int_tps_min=79569.1 int_lat_max=2.212 xact=5310666 failed=0 progfail=0 rc=0 drv_cpu_pct=4.9 drv_cores=1.78/36 drv_rx_MBps=10.4 drv_tx_MBps=11.5
+CELL_DONE osv ro vu192

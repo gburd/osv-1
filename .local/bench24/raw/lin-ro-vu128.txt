@@ -1,0 +1,4 @@
+REP lin ro vu128 r1 tps=321730.725007 lat_ms=0.396 lat_sd=0.200 int_tps_min=307112.9 int_lat_max=0.413 xact=19295705 failed=0 progfail=0 rc=0 drv_cpu_pct=14.7 drv_cores=5.28/36 drv_rx_MBps=37.9 drv_tx_MBps=41.7
+REP lin ro vu128 r2 tps=333082.995146 lat_ms=0.382 lat_sd=0.176 int_tps_min=324675.8 int_lat_max=0.388 xact=19954877 failed=0 progfail=0 rc=0 drv_cpu_pct=14.8 drv_cores=5.33/36 drv_rx_MBps=39.2 drv_tx_MBps=43.1
+REP lin ro vu128 r3 tps=337625.897168 lat_ms=0.376 lat_sd=0.161 int_tps_min=327771.0 int_lat_max=0.385 xact=20254054 failed=0 progfail=0 rc=0 drv_cpu_pct=15.4 drv_cores=5.55/36 drv_rx_MBps=39.7 drv_tx_MBps=43.7
+CELL_DONE lin ro vu128

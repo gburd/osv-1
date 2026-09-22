@@ -1,0 +1,4 @@
+REP osv rw vu64 r1 tps=4234.973755 lat_ms=15.100 lat_sd=15.049 int_tps_min=3598.8 int_lat_max=17.007 xact=252380 failed=0 progfail=0 rc=0 drv_cpu_pct=4.3 drv_cores=1.53/36 drv_rx_MBps=2.3 drv_tx_MBps=3.8
+REP osv rw vu64 r2 tps=4516.923228 lat_ms=14.147 lat_sd=12.262 int_tps_min=4233.9 int_lat_max=14.523 xact=269822 failed=0 progfail=0 rc=0 drv_cpu_pct=4.5 drv_cores=1.64/36 drv_rx_MBps=2.5 drv_tx_MBps=4.0
+REP osv rw vu64 r3 tps=4529.825287 lat_ms=14.114 lat_sd=12.422 int_tps_min=4369.7 int_lat_max=14.408 xact=270568 failed=0 progfail=0 rc=0 drv_cpu_pct=4.4 drv_cores=1.58/36 drv_rx_MBps=2.5 drv_tx_MBps=4.0
+CELL_DONE osv rw vu64

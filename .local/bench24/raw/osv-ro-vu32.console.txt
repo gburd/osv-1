@@ -1,0 +1,25 @@
+NONROTPROBE req_total=36085 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10005 percpu_busy_pct=70,70,70,69,67,67,67,67,46,42,40,37,35,36,34,35,32,30,32,33,31,32,34,32,38,33,39,39,33,34,34,32 agg_busy_vcpu=14.05 n_ge50=8 n_le5=0 MTXPROBE d_lock=46760343 d_uncont=44868493 d_blocked=249387 d_rho=31253
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106663 physmem_MB=128211
+NONROTPROBE req_total=36085 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10006 percpu_busy_pct=70,69,69,68,66,66,66,67,46,44,39,37,33,34,39,34,31,36,32,28,33,30,31,32,32,30,35,39,33,35,31,30 agg_busy_vcpu=13.79 n_ge50=8 n_le5=0 MTXPROBE d_lock=46258725 d_uncont=44394233 d_blocked=239821 d_rho=30472
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106663 physmem_MB=128211
+NONROTPROBE req_total=36085 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10006 percpu_busy_pct=70,68,67,67,65,65,65,66,45,40,38,34,36,35,41,32,31,34,30,29,35,33,30,29,33,29,33,33,30,34,30,35 agg_busy_vcpu=13.57 n_ge50=8 n_le5=0 MTXPROBE d_lock=45705786 d_uncont=43870396 d_blocked=231104 d_rho=29947
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106662 physmem_MB=128211
+NONROTPROBE req_total=36133 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10005 percpu_busy_pct=70,69,69,68,66,66,66,67,47,41,38,37,34,36,34,32,35,31,33,30,30,33,29,34,30,31,32,30,31,37,32,38 agg_busy_vcpu=13.73 n_ge50=8 n_le5=0 MTXPROBE d_lock=46021921 d_uncont=44166337 d_blocked=239205 d_rho=30321
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106662 physmem_MB=128211
+NONROTPROBE req_total=36133 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10006 percpu_busy_pct=68,67,67,66,65,65,64,65,44,42,39,37,34,35,35,28,34,31,30,30,29,31,28,35,32,34,33,34,30,32,33,37 agg_busy_vcpu=13.49 n_ge50=8 n_le5=0 MTXPROBE d_lock=45007550 d_uncont=43173166 d_blocked=264320 d_rho=29306
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106612 physmem_MB=128211
+NONROTPROBE req_total=36181 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10006 percpu_busy_pct=69,69,69,67,67,67,66,65,43,41,37,36,33,38,31,30,32,32,28,36,29,30,32,31,27,38,34,29,32,30,33,33 agg_busy_vcpu=13.47 n_ge50=8 n_le5=0 MTXPROBE d_lock=45502277 d_uncont=43708109 d_blocked=196272 d_rho=30058
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106612 physmem_MB=128211
+NONROTPROBE req_total=36229 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10005 percpu_busy_pct=69,69,69,67,68,67,66,66,43,39,39,35,35,33,35,32,32,39,33,27,26,31,29,31,31,32,29,31,35,34,30,30 agg_busy_vcpu=13.47 n_ge50=8 n_le5=0 MTXPROBE d_lock=45432171 d_uncont=43639236 d_blocked=197143 d_rho=30314
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106611 physmem_MB=128211
+NONROTPROBE req_total=36229 req_gt128KiB=0 max_KiB=128
+SCHEDPROBE ncpu=32 wall_ms=10006 percpu_busy_pct=69,70,69,68,68,67,67,66,43,39,39,35,38,36,32,32,31,36,31,30,34,29,29,33,30,31,31,31,30,32,33,30 agg_busy_vcpu=13.52 n_ge50=8 n_le5=0 MTXPROBE d_lock=45739414 d_uncont=43932989 d_blocked=199916 d_rho=30164
+ARCPROBE arc_size_MB=3079 arc_c_MB=4006 arc_c_max_MB=64105 zfs_arc_max_MB=0 dirty_max_MB=4096 free_MB=106611 physmem_MB=128211
+NONROTPROBE req_total=36229 req_gt128KiB=0 max_KiB=128

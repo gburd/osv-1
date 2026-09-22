@@ -1,0 +1,17 @@
+starting vacuum...end.
+progress: 10.0 s, 317010.6 tps, lat 0.400 ms stddev 0.219, 0 failed
+progress: 20.0 s, 332389.8 tps, lat 0.383 ms stddev 0.191, 0 failed
+progress: 30.0 s, 336867.4 tps, lat 0.378 ms stddev 0.185, 0 failed
+progress: 40.0 s, 337344.7 tps, lat 0.378 ms stddev 0.182, 0 failed
+progress: 50.0 s, 337681.7 tps, lat 0.377 ms stddev 0.182, 0 failed
+progress: 60.0 s, 338040.8 tps, lat 0.377 ms stddev 0.187, 0 failed
+progress: 70.0 s, 338584.3 tps, lat 0.376 ms stddev 0.182, 0 failed
+progress: 80.0 s, 338384.3 tps, lat 0.376 ms stddev 0.183, 0 failed
+progress: 90.0 s, 338559.4 tps, lat 0.376 ms stddev 0.179, 0 failed
+progress: 100.0 s, 338751.4 tps, lat 0.376 ms stddev 0.176, 0 failed
+progress: 110.0 s, 339071.2 tps, lat 0.376 ms stddev 0.173, 0 failed
+progress: 120.0 s, 339330.6 tps, lat 0.375 ms stddev 0.171, 0 failed
+progress: 130.0 s, 338966.3 tps, lat 0.376 ms stddev 0.170, 0 failed
+progress: 140.0 s, 338883.5 tps, lat 0.376 ms stddev 0.171, 0 failed
+progress: 150.0 s, 339987.9 tps, lat 0.375 ms stddev 0.168, 0 failed
+progress: 160.0 s, 340414.2 tps, lat 0.374 ms stddev 0.166, 0 failed

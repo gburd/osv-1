@@ -1,0 +1,4 @@
+REP lin ro vu64 r1 tps=247967.462594 lat_ms=0.257 lat_sd=0.073 int_tps_min=239904.5 int_lat_max=0.265 xact=14871796 failed=0 progfail=0 rc=0 drv_cpu_pct=10.3 drv_cores=3.72/36 drv_rx_MBps=29.2 drv_tx_MBps=32.2
+REP lin ro vu64 r2 tps=244872.374366 lat_ms=0.260 lat_sd=0.074 int_tps_min=244173.3 int_lat_max=0.261 xact=14686216 failed=0 progfail=0 rc=0 drv_cpu_pct=9.4 drv_cores=3.37/36 drv_rx_MBps=28.8 drv_tx_MBps=31.8
+REP lin ro vu64 r3 tps=246272.109361 lat_ms=0.259 lat_sd=0.074 int_tps_min=244966.1 int_lat_max=0.260 xact=14770864 failed=0 progfail=0 rc=0 drv_cpu_pct=10.7 drv_cores=3.85/36 drv_rx_MBps=29.0 drv_tx_MBps=31.9
+CELL_DONE lin ro vu64

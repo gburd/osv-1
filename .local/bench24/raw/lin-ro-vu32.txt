@@ -1,0 +1,4 @@
+REP lin ro vu32 r1 tps=155491.448160 lat_ms=0.206 lat_sd=0.054 int_tps_min=153796.6 int_lat_max=0.208 xact=9327171 failed=0 progfail=0 rc=0 drv_cpu_pct=6.8 drv_cores=2.44/36 drv_rx_MBps=18.3 drv_tx_MBps=20.2
+REP lin ro vu32 r2 tps=156401.220499 lat_ms=0.204 lat_sd=0.054 int_tps_min=151275.1 int_lat_max=0.211 xact=9381573 failed=0 progfail=0 rc=0 drv_cpu_pct=6.7 drv_cores=2.42/36 drv_rx_MBps=18.4 drv_tx_MBps=20.3
+REP lin ro vu32 r3 tps=156801.410910 lat_ms=0.204 lat_sd=0.052 int_tps_min=154352.6 int_lat_max=0.207 xact=9405748 failed=0 progfail=0 rc=0 drv_cpu_pct=6.8 drv_cores=2.45/36 drv_rx_MBps=18.5 drv_tx_MBps=20.4
+CELL_DONE lin ro vu32
