@@ -32,3 +32,16 @@ SELFCHECK_PASS CPUCLOCK_OK=1
 === OSv ARM PREP 2026-09-22T23:25:57Z ===
 BENCH_VOL=vol-01ea82aa11b028cb3
 OSV_ROOTVOL=vol-0ba5e4b0c494f4084
+OSV_CMDLINE=--console=serial --nomount --rootfs=ramfs --mount-fs=rofs,/dev/vblk1.1,/bm /bm/bench -C -A -n 20000000 -r 5
+DOT_ROOT_AFTER_REATTACH=True
+DOT_BENCH_AFTER_ATTACH=True
+=== OSv ARM BOOT 2026-09-22T23:28:05Z ===
+OSV_RUNNING_AT 2026-09-22T23:28:24Z
+=== CLEANUP (exit=0) 2026-09-22T23:33:39Z ===
+deleting bench volume vol-01ea82aa11b028cb3
+--- ORPHAN CHECK: instances Owner=agent-alloc ---
+i-0e580b65ed9ec8e28	terminated
+i-03e64cd520d578f23	terminated
+--- ORPHAN CHECK: volumes Owner=agent-alloc ---
+--- ORPHAN CHECK: ALL available volumes in region (root-vol leak detector) ---
+=== CLEANUP DONE 2026-09-22T23:34:33Z ===

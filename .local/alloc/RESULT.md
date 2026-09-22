@@ -183,3 +183,23 @@ Consequences, both of which cut against a clean reading:
    DIFFERENT ALLOCATORS. The honest comparison is therefore three-way and descriptive, and the
    OSv-vs-Linux "ratio" depends entirely on which Linux libc you pick as the denominator — 26.3 ns
    (glibc) or 66.1 ns (musl). I will report both and privilege neither.
+
+## OSv ARM, ATTEMPT 1: FAILED TO PRODUCE DATA — ROOT CAUSE FOUND IN SOURCE, NOT GUESSED
+Attempt 1 booted, then STOPPED itself, and yielded a **47-byte console**: no `BENCH_START`, no mount
+message, nothing. Two distinct defects in my delivery, both now read out of `loader.cc`:
+
+1. **`--nomount` SKIPS `--mount-fs` ENTIRELY.** `loader.cc:330` sets `opt_mount = !nomount`, and the
+   whole mount block including the `opt_mount_fs` processing sits inside `if (opt_mount)`
+   (`loader.cc:557`). `opt_mount_fs` is only ever consumed by `pivot_rootfs()`
+   (`fs/vfs/main.cc:2679`), which for a ramfs root is reached **only** via the `--rootfs=ramfs`
+   branch at `loader.cc:574` — a branch whose own comment says *"That's the only difference between
+   this and --nomount"*. I passed **both** `--nomount` and `--rootfs=ramfs`; `--nomount` won, the
+   ROFS volume was never mounted, and `/bm/bench` never existed.
+2. **OSv powers off when main() returns, and EC2 DISCARDS a stopped instance's console buffer.**
+   `loader.cc:844/906`: without `--noshutdown` the kernel powers off after the app exits. So even a
+   fully successful run would have deleted its own output before I could read it. `--noshutdown`
+   (`loader.cc:906`) parks the kernel in `wait_until([]{return false;})` and keeps the box running.
+
+Both fixes are one word each on the cmdline; the binary, volumes and flags are unchanged, so the
+measurement is unaffected. **Attempt-1 boxes terminated, 0 instances / 0 volumes verified region-wide
+before relaunch.**
