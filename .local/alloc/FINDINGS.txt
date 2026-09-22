@@ -1,0 +1,34 @@
+=== RUN START 2026-09-22T23:05:31Z ===
+OSV_BOX=i-0e580b65ed9ec8e28 AZ=us-east-2c
+LINUX_BOX=i-03e64cd520d578f23
+LINUX_IP=3.16.31.81
+BOXES_UP 2026-09-22T23:05:55Z
+DRVPREP_RC=0
+FLAGS=-O2 -Wall -pthread
+/tmp/bench-glibc: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=04744ef658eeeb2453e6fa2c05842a260e34edaf, for GNU/Linux 3.2.0, not stripped
+/tmp/bench-musl-linux: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-musl-x86_64.so.1, with debug_info, not stripped
+/tmp/bench-musl: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-musl-x86_64.so.1, with debug_info, not stripped
+SELFCHECK xfrac=0 OK allocs=800000 loc=799744 rem=0 live=256 xach=0.0 wall=0.005 cpusum=0.019
+SELFCHECK xfrac=50 OK allocs=800000 loc=399358 rem=400386 live=322 xach=50.1 wall=0.085 cpusum=0.284
+SELFCHECK xfrac=100 OK allocs=800000 loc=167872 rem=631872 live=256 xach=79.0 wall=0.106 cpusum=0.335
+SELFCHECK_PASS CPUCLOCK_OK=1
+SELFCHECK xfrac=0 OK allocs=800000 loc=799744 rem=0 live=256 xach=0.0 wall=0.430 cpusum=1.480
+SELFCHECK xfrac=50 OK allocs=800000 loc=399358 rem=400386 live=322 xach=50.1 wall=0.366 cpusum=1.277
+SELFCHECK xfrac=100 OK allocs=800000 loc=0 rem=799744 live=256 xach=100.0 wall=0.373 cpusum=1.297
+SELFCHECK_PASS CPUCLOCK_OK=1
++ echo DRVPREP_DONE
+DRVPREP_DONE
+=== LINUX ARMS: glibc and musl, n=20000000 reps=5 2026-09-22T23:06:35Z ===
+32
+model name	: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+7.0.0-1012-aws
+--- linux arm glibc START 2026-09-22T23:06:35Z
+--- linux arm glibc RC=0 2026-09-22T23:08:18Z
+SELFCHECK_PASS CPUCLOCK_OK=1
+BENCH_DONE CPUCLOCK_OK=1
+--- linux arm musl-linux START 2026-09-22T23:08:18Z
+--- linux arm musl-linux RC=255 2026-09-22T23:25:57Z
+SELFCHECK_PASS CPUCLOCK_OK=1
+=== OSv ARM PREP 2026-09-22T23:25:57Z ===
+BENCH_VOL=vol-01ea82aa11b028cb3
+OSV_ROOTVOL=vol-0ba5e4b0c494f4084

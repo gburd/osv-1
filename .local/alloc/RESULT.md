@@ -107,3 +107,79 @@ per-CPU-second cost, not a throughput restatement), the **ACHIEVED** cross-CPU f
   as a ROFS filesystem, and rewrite the stock AMI's sector-1 cmdline to
   `--rootfs=ramfs --mount-fs=rofs,/dev/vblk1,/mnt /mnt/bench.so -A`, reusing the already-proven
   sector-1 patch mechanism from `.local/prepared/remote-sect1.sh`.
+
+---
+
+## BOXES (LIVE RUN, launched 2026-09-22T23:04Z)
+| role | instance id | type | AZ | state |
+|------|-------------|------|----|-------|
+| OSv arm | **i-0e580b65ed9ec8e28** | m5d.8xlarge native non-metal Nitro | us-east-2c (DISCOVERED) | running |
+| Linux arms (glibc + musl) + builder | **i-03e64cd520d578f23** | m5d.8xlarge | us-east-2c | running |
+
+Both arms are the SAME instance type. CPU: Intel Xeon Platinum 8259CL @ 2.50GHz, 32 vCPU, kernel 7.0.0-1012-aws.
+Flags, all three binaries, from one source: `-O2 -Wall -pthread` (OSv arm adds `-fPIC -pie`, which OSv requires).
+Fixed work: **n=20,000,000 pairs per worker, 5 reps**.
+
+## ARM 2 RESULT: LINUX + GLIBC (complete, the control)
+MODE P, CPU-ns per alloc+free pair, all 5 reps:
+
+| procs | rep1 | rep2 | rep3 | rep4 | rep5 | median | spread |
+|---|---|---|---|---|---|---|---|
+| 1 | 26.28 | 26.30 | 26.26 | 26.20 | 26.27 | **26.27** | 0.10 (0.4%) |
+| 8 | 26.22 | 26.23 | 26.24 | 26.21 | 26.20 | **26.22** | 0.04 (0.2%) |
+| 32 | 48.58 | 48.61 | 48.57 | 48.55 | 48.58 | **48.58** | 0.06 (0.1%) |
+| 128 | 48.66 | 48.66 | 48.59 | 48.60 | 48.61 | **48.61** | 0.07 (0.1%) |
+
+**THE CONTROL IS FLAT, WHICH IS THE PREDICTION.** Slope of CPU-ns/pair against slot index:
++0.0013 ns/slot at 32 procs, +0.0004 at 128 (r^2 0.002-0.06, i.e. no relationship).
+Raw binned slopes agree: at 128 procs the 8 bins read 48.5 -> 48.7 across slot 0 -> 127.
+1 -> 128 processes costs glibc **+2.34 ns/pair total (+8.9%)**, and that step happens between 8 and 32
+procs (26.2 -> 48.6), i.e. it is the box filling its 32 cores, not a per-process allocator cost.
+
+MODE T (glibc): 27.3 CPU-ns/pair at 1 thread; 50.0 at 32 threads, 0% cross-CPU; 168.2 at 25% cross-CPU
+(achieved 25.02%); 397.4 at requested 50% (achieved only 35.8%, ringfull 5.0e8 -> that cell is
+queue-saturated and I will not use it as evidence).
+
+**wall_nspp vs cpu_nspp is the confound receipt:** at 128 procs on 32 vCPU, wall-derived cost reads
+194.8 ns/pair while CPU-derived reads 48.6. A wall-clock benchmark here would have reported a
+4x "slowdown" that is purely 128 processes sharing 32 cores. Every number above is CPU time.
+
+## ARM 3 RESULT: LINUX + MUSL — *** THE THIRD ARM IS DECISIVE, AND IT WAS NEARLY OPTIONAL ***
+Same box, same source, same `-O2 -Wall -pthread`, same fixed work. Only the libc differs.
+
+MODE P, CPU-ns per alloc+free pair, all 5 reps:
+
+| procs | rep1 | rep2 | rep3 | rep4 | rep5 | median | glibc median | **musl/glibc** |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 66.28 | 66.11 | 66.22 | 66.11 | 66.08 | **66.11** | 26.27 | **2.52x** |
+| 8 | 66.71 | 66.71 | 66.82 | 66.74 | 66.65 | **66.71** | 26.22 | **2.54x** |
+| 32 | 114.73 | 114.87 | 114.79 | 114.94 | 114.86 | **114.86** | 48.58 | **2.36x** |
+| 128 | 115.56 | 115.71 | 116.14 | 116.20 | 115.78 | **115.78** | 48.61 | **2.38x** |
+
+Spread within each cell <=0.6%. **musl's allocator is ~2.4-2.5x glibc's on this allocation shape,
+ON LINUX, with no OSv involved.** musl-on-Linux is also FLAT against slot index (slope +0.0002 to
++0.0128 ns/slot), as expected: the per-address-space table is an OSv structure, not a libc one.
+
+### WHY THIS MATTERS BEFORE THE OSv ARM EVEN REPORTS
+The brief's headline question is "is OSv's malloc ~2x Linux's". A ~2.4x musl-vs-glibc gap on Linux
+means **the brief's ~2x target is already fully accounted for by the libc choice alone**, before any
+OSv code runs. So the OSv arm cannot be interpreted against glibc: the only interpretable comparison
+is **OSv+musl vs Linux+musl**, which holds libc constant and isolates OSv's kernel/allocator routing.
+Had I skipped this arm — it was the brief's optional "if you can get it cheaply" item — I would have
+reported OSv-vs-glibc and mis-attributed a musl cost to OSv.
+
+### *** A CORRECTION TO MY OWN ARM LABELS, FROM THE MAKEFILE (this changes the interpretation) ***
+I called the arms "OSv+musl" and "Linux+musl" as if they shared an allocator. **THEY DO NOT.**
+`grep '^musl += malloc' Makefile` returns **NOTHING**: of 586 `musl +=` object lines, not one comes
+from musl's `src/malloc/` directory. OSv's `malloc`/`free`/`calloc`/`realloc` are exported from
+**`core/mempool.cc`** (`OSV_LIBC_API`, and they appear in `exported_symbols/osv_libc.so.6.symbols`).
+So on OSv, musl supplies headers, ctype, string, stdio etc. — **but the ALLOCATOR is OSv's own.**
+
+Consequences, both of which cut against a clean reading:
+1. **The brief's third data point cannot do the job the brief wanted.** "musl-on-Linux close to OSv =>
+   it is MUSL's allocator" is **not available as an inference**, because OSv does not use musl's
+   allocator at all. If the two land close it is a coincidence of two different allocators, not shared code.
+2. **There is no arm that holds the allocator constant.** glibc, musl-on-Linux, and OSv are THREE
+   DIFFERENT ALLOCATORS. The honest comparison is therefore three-way and descriptive, and the
+   OSv-vs-Linux "ratio" depends entirely on which Linux libc you pick as the denominator — 26.3 ns
+   (glibc) or 66.1 ns (musl). I will report both and privilege neither.
