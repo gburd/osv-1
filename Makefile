@@ -2278,20 +2278,11 @@ bootfs_dep += $(out)/modules/libext/libext.so
 else
 # bootfs.manifest.skel names /usr/lib/fs/libsolaris.so unconditionally, so the
 # ZFS library is part of bootfs for every configuration, not only fs=zfs.  List
-# it (and the tools that go with it) as a prerequisite unconditionally, or
-# mkbootfs.py runs before the library exists: serially that is a hard
-# FileNotFoundError, and under -j it is a race that surfaces as an intermittent
-# build failure.
-#
-# Do NOT narrow this to a filesystem or to a conf_zfs value.  Both forms leave
-# the default configuration broken: fs=zfs misses every other root filesystem,
-# and conf_zfs=openzfs misses conf_zfs=bsd, which also builds libsolaris.so.
+# it, and the tools that go with it, as a prerequisite unconditionally.
 bootfs_dep += $(tools:%=$(out)/%) $(out)/libsolaris.so
 ifeq ($(fs),ramfs)
-# For fs=ramfs, scripts/build passes the generated $(out)/usr.manifest as the
-# bootfs manifest.  That manifest comes from usr_ramfs.manifest.skel, which
-# lists tools/mount/mount-fs.so and tools/mount/umount.so, so a fresh tree
-# races on those two the same way.
+# For fs=ramfs the bootfs manifest is the generated $(out)/usr.manifest, which
+# also lists the two mount tools.
 bootfs_dep += $(out)/tools/mount/mount-fs.so $(out)/tools/mount/umount.so
 endif
 endif
