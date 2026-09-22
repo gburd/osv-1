@@ -104,9 +104,13 @@ ssh $SSHO $LX "nproc; grep -m1 'model name' /proc/cpuinfo; uname -r" > "$NB/raw/
 cat "$NB/raw/linux-sysinfo.txt" | tee -a "$F"
 for arm in glibc musl-linux; do
   say "--- linux arm $arm START $(date -u +%FT%TZ)"
-  ssh $SSHO $LX "/tmp/bench-$arm -C -A -n $NPAIRS -r $REPS" \
+  # TIMEOUT, not tail: musl's 32-thread MODE T cell measured 27,038 ns/pair
+  # (vs 77 single-threaded) and would run for hours.  A cap keeps MODE P -- the
+  # primary experiment -- from being starved by a known-pathological MODE T cell.
+  # The partial .out is KEPT and the truncation is reported, never silently dropped.
+  ssh $SSHO $LX "timeout 900 /tmp/bench-$arm -C -A -n $NPAIRS -r $REPS" \
       > "$NB/raw/linux-$arm.out" 2> "$NB/raw/linux-$arm.err"
-  say "--- linux arm $arm RC=$? $(date -u +%FT%TZ)"
+  say "--- linux arm $arm RC=$? (124 == hit the 900s cap) $(date -u +%FT%TZ)"
   grep -cE "^RESULT" "$NB/raw/linux-$arm.out" | xargs -I{} say "   $arm RESULT lines: {}"
   grep -E "SELFCHECK_|BENCH_DONE" "$NB/raw/linux-$arm.out" | tee -a "$F"
 done
@@ -137,7 +141,16 @@ sleep 30
 # --rootfs=ramfs: do NOT auto-discover/mount ZFS (the PG data pool is irrelevant
 # here and mounting it only adds boot time and failure modes).
 # --mount-fs=rofs,/dev/vblk1.1,/bm : partition 1 of the SECOND disk.
-OSVCMD="--console=serial --nomount --rootfs=ramfs --mount-fs=rofs,/dev/vblk1.1,/bm /bm/bench -C -A -n $NPAIRS -r $REPS"
+# NO --nomount: loader.cc:330 sets opt_mount=!nomount and the ENTIRE mount block
+# (loader.cc:557), which is the only thing that ever consumes --mount-fs, is
+# inside `if (opt_mount)`.  Passing --nomount silently discards --mount-fs, which
+# is exactly how attempt 1 booted with no /bm and no output.
+# --rootfs=ramfs reaches pivot_rootfs("/") (loader.cc:574 -> fs/vfs/main.cc:2679),
+# which processes opt_mount_fs.
+# --noshutdown (loader.cc:906) keeps the kernel alive after main() returns: OSv
+# otherwise powers off (loader.cc:844) and EC2 DISCARDS the serial console buffer
+# of a stopped instance, destroying the result.
+OSVCMD="--console=serial --noshutdown --rootfs=ramfs --mount-fs=rofs,/dev/vblk1.1,/bm /bm/bench -C -A -n $NPAIRS -r $REPS"
 say "OSV_CMDLINE=$OSVCMD"
 ssh $SSHO $LX "sudo bash /tmp/remote-prep.sh '$OSVCMD'" 2>&1 | tee "$NB/raw/osvprep.log"
 grep -q PREP_DONE "$NB/raw/osvprep.log" || { echo "FATAL: OSv volume prep failed"; exit 1; }
@@ -167,7 +180,7 @@ BOOT_T=$(date +%s)
 say "OSV_RUNNING_AT $(date -u +%FT%TZ)"
 
 # The OSv arm has no sshd: its ONLY output channel is the serial console.
-for i in $(seq 1 40); do
+for i in $(seq 1 50); do
   sleep 30
   aws ec2 get-console-output --region $REGION --instance-id $SID --latest --output text \
     > "$NB/raw/osv-console-$i.txt"
