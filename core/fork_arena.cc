@@ -25,10 +25,13 @@
 // Fork heap arena implementation.  See include/osv/fork_arena.hh for the why.
 //
 // Layout of a served chunk:
-//     [ chunk_header (8 bytes) ][ user data ... ]
-//                               ^ returned pointer (aligned)
+//     [ chunk base (8B) ][ chunk_header (8B) ][ user data ... ]
+//                                            ^ returned pointer (16-aligned)
 // The header records the size class so free()/usable_size() need no external
-// bookkeeping.  All allocator state (free-list heads, bump pointer, lock) is in
+// bookkeeping.  Both metadata words sit immediately BELOW the returned pointer,
+// so recovering them is two loads at fixed negative offsets with no lookup.
+//
+// All allocator state (free-list heads, bump pointer, lock) is in
 // kernel BSS -- never in arena pages -- so arena management never faults an
 // arena page and never recurses into malloc during fork's page-table work.
 // -----------------------------------------------------------------------------
@@ -39,22 +42,47 @@ volatile __thread unsigned force_kernel_heap = 0;
 
 namespace {
 
-// Size classes: 32, 64, ... up to max_alloc, plus alignment slack.  A request
-// picks the smallest class that fits (header + user + alignment padding).
-constexpr size_t min_class_shift = 5;                 // 32 bytes
-constexpr size_t max_class_shift = 21;                // 2 MiB (== max_alloc)
-constexpr unsigned num_classes = max_class_shift - min_class_shift + 1;
+// Size classes.  NOT powers of two: a pure power-of-2 table wastes up to 50% of
+// every class by construction, and combined with the header it pushed small
+// requests a whole class up (malloc(40) needed 72 bytes -> the 128 class, 68.8%
+// of it not user data).  A PostgreSQL parse node that should fit one cache line
+// then occupied two classes' worth of footprint, doubling the working set of
+// exactly the allocation-heavy scattered-access code that measured ~2x.
+//
+// Instead, the progression libumem/jemalloc use:
+//   idx  0..7    16 32 48 64 80 96 112 128         (16-byte granule)
+//   idx  8..63    160 192 224 256 320 ... 2 MiB    (4 steps per octave)
+// Every class is a multiple of 16 (so a chunk base is always 16-aligned, which
+// is what malloc's alignof(max_align_t) contract needs), strictly increasing,
+// and the last class is exactly max_alloc.  Worst-case internal waste from the
+// table is 20% above 128 bytes, and one 16-byte granule below it.
+constexpr unsigned num_classes = 64;
+constexpr unsigned linear_classes = 8;      // idx 0..7 are 16*(idx+1)
+constexpr size_t   granule = 16;            // linear step, and every class is a multiple
+constexpr size_t   linear_max = linear_classes * granule;   // 128
+constexpr unsigned linear_max_shift = 7;                    // 1<<7 == linear_max
 
 struct free_node {
     free_node *next;
 };
 
 struct chunk_header {
-    uint32_t class_shift;   // size class = 1 << class_shift
+    uint32_t class_idx;   // index into the size-class table (class_size_for)
     uint32_t magic;
 };
 constexpr uint32_t chunk_magic = 0x464b4152;   // "FKAR"
-constexpr size_t header_size = 32;             // >= sizeof(chunk_header), keeps 16/32-align
+
+// Reserved bytes between the chunk base and the returned pointer.  Exactly the
+// two metadata words that live there: the saved chunk base at [user-16,user-8)
+// and the chunk_header at [user-8,user).  16 is also the minimum that keeps the
+// returned pointer 16-aligned when the chunk base is, so nothing is gained by
+// shrinking it further -- an 8-byte header would still have to round the user
+// pointer up to base+16 and would occupy an identical class.
+constexpr size_t header_size = 16;
+static_assert(header_size >= sizeof(chunk_header) + sizeof(uintptr_t),
+              "header_size must hold the chunk_header and the saved chunk base");
+static_assert(header_size % 16 == 0,
+              "header_size must preserve 16-byte alignment of the user pointer");
 
 // --- all state below is kernel BSS, never in arena pages ---
 //
@@ -258,16 +286,65 @@ as_freelist *slot_for(void *as)
     return nullptr;   // table full: bump-only for this AS
 }
 
-unsigned class_for(size_t total)
+// Byte size of size class @idx.  See the class-table comment above.
+constexpr size_t class_size_for(unsigned idx)
 {
-    // total includes header + user + alignment slack; round up to a power of 2
-    // >= 1<<min_class_shift.
-    unsigned s = min_class_shift;
-    while ((size_t(1) << s) < total) {
-        s++;
+    if (idx < linear_classes) {
+        return granule * (idx + 1);
     }
-    return s;
+    unsigned octave = (idx - linear_classes) / 4;   // 0 -> (128,256], 1 -> (256,512], ...
+    unsigned step   = (idx - linear_classes) % 4;   // quarter within the octave
+    size_t base = linear_max << octave;
+    return base + (base >> 2) * (step + 1);
 }
+
+// Smallest class index whose class_size_for() is >= @total.  O(1): one clz plus
+// shifts, where the old power-of-2 version ran a shift-and-compare loop.
+// @total must be >= 1 and <= max_alloc.
+constexpr unsigned class_for(size_t total)
+{
+    if (total <= linear_max) {
+        return unsigned((total + granule - 1) / granule) - 1;
+    }
+    // Octave of the value: bit index of the top set bit of (total-1), so an
+    // exact power of two stays in its own octave rather than starting the next.
+    unsigned lg = 63u - unsigned(__builtin_clzll(total - 1));
+    // Which quarter of (1<<lg, 1<<(lg+1)] the value falls in.
+    unsigned step = unsigned(((total - 1) >> (lg - 2)) & 3u);
+    return linear_classes + (lg - linear_max_shift) * 4u + step;
+}
+
+static_assert(class_size_for(0) == granule, "first class is one granule");
+static_assert(class_size_for(linear_classes - 1) == linear_max, "linear range ends at linear_max");
+static_assert(class_size_for(num_classes - 1) == max_alloc, "top class is exactly max_alloc");
+
+// Compile-time proof that the two halves of the table agree, over EVERY class.
+// This lives here rather than in a test so the formulas cannot drift apart: any
+// edit to class_for() or class_size_for() that breaks monotonicity, the 16-byte
+// granularity, or the size<->index round trip fails the build.
+constexpr bool class_table_consistent()
+{
+    for (unsigned i = 0; i < num_classes; i++) {
+        size_t c = class_size_for(i);
+        if (c % granule != 0) {
+            return false;                     // chunk bases must stay 16-aligned
+        }
+        if (class_for(c) != i) {
+            return false;                     // an exact fit must map to its own class
+        }
+        if (i > 0) {
+            size_t prev = class_size_for(i - 1);
+            if (c <= prev) {
+                return false;                 // strictly increasing
+            }
+            if (class_for(prev + 1) != i) {
+                return false;                 // one byte over the previous class lands here
+            }
+        }
+    }
+    return class_for(1) == 0;                 // smallest request uses the smallest class
+}
+static_assert(class_table_consistent(), "fork_arena size-class table is inconsistent");
 
 } // anonymous namespace
 
@@ -456,6 +533,9 @@ void *alloc(size_t size, size_t alignment)
     if (alignment < 16) {
         alignment = 16;
     }
+    if (!size) {
+        size = 1;   // malloc(0) still gets a distinct pointer with usable bytes
+    }
     // Worst-case footprint: header + alignment padding + user bytes.  The
     // returned pointer is header_size past the chunk start when alignment
     // divides header_size; otherwise we align up within the chunk.
@@ -463,12 +543,11 @@ void *alloc(size_t size, size_t alignment)
     if (need > max_alloc) {
         return nullptr;   // too big for the arena; caller uses the normal heap
     }
-    unsigned s = class_for(need);
-    if (s > max_class_shift) {
+    unsigned idx = class_for(need);
+    if (idx >= num_classes) {
         return nullptr;
     }
-    unsigned idx = s - min_class_shift;
-    size_t class_size = size_t(1) << s;
+    size_t class_size = class_size_for(idx);
 
     // Per-address-space free-list: recycle only within this process's own COW
     // domain (see the note on as_freelist).  If the slot table is full, this AS
@@ -516,23 +595,24 @@ void *alloc(size_t size, size_t alignment)
     uintptr_t base = reinterpret_cast<uintptr_t>(chunk);
     uintptr_t user = align_up(base + header_size, alignment);
     auto *h = reinterpret_cast<chunk_header*>(user - sizeof(chunk_header));
-    h->class_shift = s;
+    h->class_idx = idx;
     h->magic = chunk_magic;
     // Store the chunk base so free() can reconstruct it regardless of the
-    // alignment padding.  header_size (32) >= sizeof(chunk_header)(8) +
-    // sizeof(uintptr_t)(8), and user - header_size == base, so [base .. user)
+    // alignment padding.  header_size (16) == sizeof(chunk_header)(8) +
+    // sizeof(uintptr_t)(8), and user >= base + header_size, so [base .. user)
     // is ours.
     *reinterpret_cast<uintptr_t*>(user - 16) = base;
     return reinterpret_cast<void*>(user);
 }
 
 namespace {
-inline void recover(void *p, uintptr_t &base, unsigned &s)
+inline void recover(void *p, uintptr_t &base, unsigned &idx)
 {
     uintptr_t user = reinterpret_cast<uintptr_t>(p);
     auto *h = reinterpret_cast<chunk_header*>(user - sizeof(chunk_header));
     assert(h->magic == chunk_magic);
-    s = h->class_shift;
+    idx = h->class_idx;
+    assert(idx < num_classes);
     base = *reinterpret_cast<uintptr_t*>(user - 16);
 }
 } // anonymous namespace
@@ -589,9 +669,8 @@ void free(void *p)
         return;
     }
     uintptr_t base;
-    unsigned s;
-    recover(p, base, s);   // reads header (populated page), no lock, no fault
-    unsigned idx = s - min_class_shift;
+    unsigned idx;
+    recover(p, base, idx);   // reads header (populated page), no lock, no fault
     auto *n = reinterpret_cast<free_node*>(base);
     // Push onto THIS address space's free-list.  If the slot table is full,
     // drop the chunk (it leaks arena VA but is never mis-recycled across the
@@ -619,9 +698,9 @@ size_t usable_size(void *p)
     // chunks carry the identical header. (A cross-AS caller would be a bug
     // elsewhere; free() -- the only real cross-AS path -- already no-ops above.)
     uintptr_t base;
-    unsigned s;
-    recover(p, base, s);
-    size_t class_size = size_t(1) << s;
+    unsigned idx;
+    recover(p, base, idx);
+    size_t class_size = class_size_for(idx);
     uintptr_t user = reinterpret_cast<uintptr_t>(p);
     // Usable bytes = from user pointer to end of the chunk.
     return class_size - (user - base);
