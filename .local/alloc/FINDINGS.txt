@@ -84,3 +84,22 @@ DOT_ROOT_AFTER_REATTACH=True
 DOT_BENCH_AFTER_ATTACH=True
 === OSv ARM BOOT 2026-09-22T23:55:26Z ===
 OSV_RUNNING_AT 2026-09-22T23:55:45Z
+=== OSv ATTEMPT 3 START 2026-09-23T00:07:19Z ===
+ROOT=vol-0b1527952b7754a33 LINUX=i-075eab6106a12d828 STATE=stopped
+OSV_CMDLINE3=--console=serial --noshutdown --rootfs=ramfs --mount-fs=rofs,/dev/vblk1.1,/bm --mount-fs=rofs,/dev/vblk2.1,/bm --mount-fs=rofs,/dev/vblk3.1,/bm --mount-fs=rofs,/dev/vblk4.1,/bm --mount-fs=rofs,/dev/vblk5.1,/bm /bm/bench -C -A -n 20000000 -r 5
+OSV_CMDLINE3_LEN=242
+DOT_ROOT=True
+DOT_BENCH=True
+OSV_RUNNING3 2026-09-23T00:08:57Z
+OSV3 STOPPED ITSELF at 35s
+--- OSv attempt 3, mount outcome and results ---
+=== OSv ATTEMPT 3 END 2026-09-23T00:09:32Z ===
+=== FINAL CLEANUP (exit=0) 2026-09-23T00:09:32Z ===
+--- instances Owner=agent-alloc ---
+i-0e580b65ed9ec8e28	terminated
+i-03e64cd520d578f23	terminated
+i-075eab6106a12d828	terminated
+i-070b9bce7f756d286	terminated
+--- volumes Owner=agent-alloc ---
+--- ALL available volumes REGION-WIDE (root-vol leak detector) ---
+=== FINAL CLEANUP DONE 2026-09-23T00:10:28Z ===
