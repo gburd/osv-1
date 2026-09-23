@@ -179,6 +179,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-smoke.so tst-bsd-evh.
 	tst-fork-serial.so \
 	tst-fork-sigchld-latch.so \
 	tst-fork-arena-freelist.so \
+	tst-fork-arena-classes.so \
 	tst-fork-irq-cow.so \
 	tst-fork-shared-race.so \
 	tst-fork-timer-park-stress.so \
