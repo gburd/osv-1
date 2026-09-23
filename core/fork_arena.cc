@@ -656,16 +656,18 @@ void free(void *p)
             return;
         }
         uintptr_t obase;
-        unsigned os;
-        recover(p, obase, os);  // our own AS's page: present, safe to read
-        unsigned oidx = os - min_class_shift;
+        unsigned oidx;
+        recover(p, obase, oidx);  // our own AS's page: present, safe to read
         auto *on = reinterpret_cast<free_node*>(obase);
         free_node *ohead = fl->heads[oidx].load(std::memory_order_relaxed);
         do {
             on->next = ohead;
         } while (!fl->heads[oidx].compare_exchange_weak(ohead, on,
                      std::memory_order_release, std::memory_order_relaxed));
-        g_ovf_recycled.fetch_add(size_t(1) << os, std::memory_order_relaxed);
+        // g_ovf_recycled counts BYTES (overflow_alloc adds the region size), and
+        // classes are no longer powers of two, so the size must come from the
+        // table rather than from 1 << idx.
+        g_ovf_recycled.fetch_add(class_size_for(oidx), std::memory_order_relaxed);
         return;
     }
     uintptr_t base;
