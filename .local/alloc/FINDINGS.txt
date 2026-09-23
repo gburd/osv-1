@@ -45,3 +45,42 @@ i-03e64cd520d578f23	terminated
 --- ORPHAN CHECK: volumes Owner=agent-alloc ---
 --- ORPHAN CHECK: ALL available volumes in region (root-vol leak detector) ---
 === CLEANUP DONE 2026-09-22T23:34:33Z ===
+=== RUN START 2026-09-22T23:35:30Z ===
+OSV_BOX=i-070b9bce7f756d286 AZ=us-east-2c
+LINUX_BOX=i-075eab6106a12d828
+LINUX_IP=18.225.169.74
+BOXES_UP 2026-09-22T23:35:54Z
+DRVPREP_RC=0
+FLAGS=-O2 -Wall -pthread
+/tmp/bench-glibc: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=04744ef658eeeb2453e6fa2c05842a260e34edaf, for GNU/Linux 3.2.0, not stripped
+/tmp/bench-musl-linux: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-musl-x86_64.so.1, with debug_info, not stripped
+/tmp/bench-musl: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-musl-x86_64.so.1, with debug_info, not stripped
+SELFCHECK xfrac=0 OK allocs=800000 loc=799744 rem=0 live=256 xach=0.0 wall=0.005 cpusum=0.019
+SELFCHECK xfrac=50 OK allocs=800000 loc=399358 rem=400386 live=322 xach=50.1 wall=0.082 cpusum=0.272
+SELFCHECK xfrac=100 OK allocs=800000 loc=153920 rem=645824 live=256 xach=80.8 wall=0.099 cpusum=0.312
+SELFCHECK_PASS CPUCLOCK_OK=1
+SELFCHECK xfrac=0 OK allocs=800000 loc=799744 rem=0 live=256 xach=0.0 wall=0.426 cpusum=1.468
+SELFCHECK xfrac=50 OK allocs=800000 loc=399358 rem=400386 live=322 xach=50.1 wall=0.364 cpusum=1.268
+SELFCHECK xfrac=100 OK allocs=800000 loc=0 rem=799744 live=256 xach=100.0 wall=0.371 cpusum=1.290
+SELFCHECK_PASS CPUCLOCK_OK=1
++ echo DRVPREP_DONE
+DRVPREP_DONE
+=== LINUX ARMS: glibc and musl, n=20000000 reps=5 2026-09-22T23:36:34Z ===
+32
+model name	: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+7.0.0-1012-aws
+--- linux arm glibc START 2026-09-22T23:36:34Z
+--- linux arm glibc RC=0 (124 == hit the 900s cap) 2026-09-22T23:38:18Z
+SELFCHECK_PASS CPUCLOCK_OK=1
+BENCH_DONE CPUCLOCK_OK=1
+--- linux arm musl-linux START 2026-09-22T23:38:18Z
+--- linux arm musl-linux RC=124 (124 == hit the 900s cap) 2026-09-22T23:53:18Z
+SELFCHECK_PASS CPUCLOCK_OK=1
+=== OSv ARM PREP 2026-09-22T23:53:18Z ===
+BENCH_VOL=vol-0e1bd6b4a81488c65
+OSV_ROOTVOL=vol-0b1527952b7754a33
+OSV_CMDLINE=--console=serial --noshutdown --rootfs=ramfs --mount-fs=rofs,/dev/vblk1.1,/bm /bm/bench -C -A -n 20000000 -r 5
+DOT_ROOT_AFTER_REATTACH=True
+DOT_BENCH_AFTER_ATTACH=True
+=== OSv ARM BOOT 2026-09-22T23:55:26Z ===
+OSV_RUNNING_AT 2026-09-22T23:55:45Z

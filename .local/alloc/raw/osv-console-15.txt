@@ -1,0 +1,15 @@
+i-070b9bce7f756d286	OSv v0.57.0-579-ge83cdfef
+IDLE_SPIN_PROOF adaptive=1 cap=100000 floor=256 shrink_after=4
+FPPROBE started interval_s=0000000000000005
+SCHEDPROBE started interval_s=10
+CPUPROF off
+WAKE_PULL ON
+WAKE_LOCAL off
+RNGPROOF rdrand=1 rdseed=1 hwsrc_empty=0 seeded=0
+ZFS: OpenZFS 5000 initialized
+failed to mount rofs, error = No such device or address
+eth0: 172.31.37.217
+Booted up in 2019.02 ms
+Cmdline: /bm/bench -C -A -n 20000000 -r 5
+Failed to load object: /bm/bench. Powering off.
+	2026-09-23T00:03:09+00:00
