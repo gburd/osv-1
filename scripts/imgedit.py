@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import sys, struct
+import os
 import subprocess
 import time
 
@@ -8,6 +9,13 @@ from nbd_client import nbd_client
 from random import randint
 
 _devnull = open('/dev/null', 'w')
+
+# The image argument may carry a qemu "-f raw " prefix (see nbd_file); strip it
+# when the plain path is needed, e.g. to stat the file.
+def img_path(name):
+    if name.startswith("-f raw "):
+        return name[7:]
+    return name
 
 cmd = sys.argv[1]
 args = sys.argv[2:]
@@ -165,6 +173,54 @@ elif cmd == 'setsize_aarch64':
     f = nbd_file(img)
     f.seek(0x10)
     f.write(struct.pack('<Q', size))
+    # The same image is also a PE/COFF EFI application (see the _head comment
+    # in arch/aarch64/preboot.S).  Four PE size fields cannot be known until
+    # the kernel ELF has been concatenated onto the preboot stub, so they are
+    # emitted as zero and filled in here.
+    #
+    # The PE header is located by reading the offset back out of _head + 0x3c
+    # rather than by hardcoding it, so the layout lives in exactly one place.
+    # A kernel built without the PE overlay has 0 there and is left alone,
+    # which keeps this a no-op for any other arch or an older preboot.
+    f.seek(0x3c)
+    (pe_off,) = struct.unpack('<I', f.read(4))
+    if pe_off != 0:
+        f.seek(pe_off)
+        if f.read(4) == b'PE\0\0':
+            # *** TWO DIFFERENT SIZES, AND CONFUSING THEM IS NOT A CLEAN
+            # FAILURE. ***
+            #
+            # `size` is the MEMORY footprint from image_start: it includes the
+            # kernel's .bss, so it is larger than the file.  It is the right
+            # value for SizeOfImage and the section's VirtualSize, which tell
+            # the firmware how much memory to reserve.
+            #
+            # SizeOfRawData and SizeOfCode describe BYTES PRESENT IN THE FILE.
+            # Setting them from `size` makes the firmware read past EOF; EDK2
+            # then rejects the image with "Unsupported" and the boot manager
+            # reports only "No bootable option or device was found", which
+            # looks like a missing or mis-named file rather than a bad header.
+            file_size = os.path.getsize(img_path(img))
+            mem_size = size
+            raw_size = file_size - 0x1000
+            coff = pe_off + 4
+            # Read SizeOfOptionalHeader rather than assuming it: the section
+            # table follows the optional header, whose length depends on
+            # NumberOfRvaAndSizes.  Hardcoding it is how you end up patching
+            # the middle of a data directory, corrupting the image without
+            # changing its size.
+            f.seek(coff + 16)
+            (opt_size,) = struct.unpack('<H', f.read(2))
+            opt = coff + 20
+            sec = opt + opt_size
+            f.seek(opt + 4)                 # SizeOfCode      (in the file)
+            f.write(struct.pack('<I', raw_size))
+            f.seek(opt + 56)                # SizeOfImage     (in memory)
+            f.write(struct.pack('<I', mem_size))
+            f.seek(sec + 8)                 # VirtualSize     (in memory)
+            f.write(struct.pack('<I', mem_size - 0x1000))
+            f.seek(sec + 16)                # SizeOfRawData   (in the file)
+            f.write(struct.pack('<I', raw_size))
     f.close()
 elif cmd == 'setpartition':
     img = args[0]
