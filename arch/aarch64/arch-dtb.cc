@@ -225,14 +225,30 @@ u64 dtb_get_mmio_serial_console(int *irqid)
     if (node < 0)
         return 0;
 
-    const char *node_name = fdt_get_name(dtb, node, NULL);
-    if (!node_name) {
+    /* Read the address from the "reg" property rather than by scanning it back
+     * out of the node name.
+     *
+     * The node name is a display convention, not an interface: the binding
+     * puts the address in "reg", and a producer is free to name the node
+     * "serial@...", "uart@..." or anything else.  Parsing the name also went
+     * wrong in a way that is invisible on a 32-bit address: the old code was
+     *
+     *     u64 address;
+     *     sscanf(node_name, "uart@%x", &address)
+     *
+     * where %x writes FOUR bytes through a pointer to an EIGHT byte object, so
+     * the upper half of the address keeps whatever was on the stack.  It
+     * happens to work whenever those bytes are zero, which is why it survived,
+     * and it produces a wild MMIO address whenever they are not.  A 16550
+     * console above 4 GB could never have worked at all.
+     *
+     * Falling back to the node name is deliberately NOT kept: a silent
+     * fallback would restore exactly the bug this removes for any tree that
+     * omits "reg", and such a tree is malformed.
+     */
+    size_t len = dtb_get_reg(node, &address);
+    if (!len)
         return 0;
-    }
-
-    if (sscanf(node_name,"uart@%x", &address) != 1) {
-        return 0;
-    }
 
     if( !dtb_get_int_spec(node, int_spec, 1)) {
         return 0;

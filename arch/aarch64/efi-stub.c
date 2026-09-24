@@ -1134,6 +1134,14 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
     stub_puthex(st, m.uart_base);
     stub_puts(st, " kind ");
     stub_puthex(st, (u64)m.uart_kind);
+    /* The UART's own GSIV matters as much as its address: dtb_get_uart() and
+     * dtb_get_mmio_serial_console() BOTH return 0 when the interrupt specifier
+     * is missing, and arch_init_early_console() then silently falls back to the
+     * PL011 default base of 0x9000000.  On a machine whose console is not there
+     * that produces a completely silent boot, so this value is the difference
+     * between a diagnosable failure and an invisible one. */
+    stub_puts(st, " uart_gsiv ");
+    stub_puthex(st, (u64)m.uart_gsiv);
     stub_puts(st, " timer_virt_gsiv ");
     stub_puthex(st, (u64)m.timer_gsiv[2]);
     stub_puts(st, "\nosv-efi: psci ");
