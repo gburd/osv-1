@@ -620,7 +620,7 @@ $(out)/arch/$(arch)/efi-stub.o: arch/$(arch)/efi-stub.c
 $(out)/preboot.elf: arch/$(arch)/preboot.ld $(out)/arch/$(arch)/preboot.o \
 		$(out)/arch/$(arch)/efi-stub.o
 	$(call quiet, $(LD) -o $@ -T $(filter %.ld, $^) $(filter %.o, $^), LD $@)
-	$(call very-quiet, scripts/check-efi-stub.sh $(CROSS_PREFIX) $@)
+	$(call very-quiet, CROSS_PREFIX=$(CROSS_PREFIX) scripts/check-efi-stub.sh $@)
 
 $(out)/preboot.bin: $(out)/preboot.elf
 	$(call quiet, $(OBJCOPY) -O binary $^ $@, OBJCOPY $@)

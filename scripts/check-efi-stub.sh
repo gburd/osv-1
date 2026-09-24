@@ -20,8 +20,12 @@
 
 set -u
 
-cross_prefix="${1:-}"
-elf="${2:-}"
+# The toolchain prefix comes from the environment, NOT from a positional
+# argument.  A NATIVE build has CROSS_PREFIX empty, so passing it positionally
+# makes "$1" the ELF path and shifts every later argument, and the script then
+# fails with its own usage message in the middle of an otherwise good build.
+# Found exactly that way, by a clean native build on aarch64 hardware.
+cross_prefix="${CROSS_PREFIX:-}"
 
 nm="${cross_prefix}nm"
 readelf="${cross_prefix}readelf"
@@ -239,13 +243,15 @@ EOF
     return $rc
 }
 
-if [ "${1:-}" = "--self-test" ] || [ "${2:-}" = "--self-test" ]; then
-    [ "${1:-}" = "--self-test" ] && cross_prefix=""
-    nm="${cross_prefix}nm"
-    readelf="${cross_prefix}readelf"
+if [ "${1:-}" = "--self-test" ]; then
     self_test
     exit $?
 fi
 
-[ -n "$elf" ] || { echo "usage: $0 CROSS_PREFIX preboot.elf | $0 [CROSS_PREFIX] --self-test" >&2; exit 2; }
+elf="${1:-}"
+[ -n "$elf" ] || {
+    echo "usage: [CROSS_PREFIX=...] $0 preboot.elf" >&2
+    echo "       [CROSS_PREFIX=...] $0 --self-test" >&2
+    exit 2
+}
 run_checks "$elf"
