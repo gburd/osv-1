@@ -603,8 +603,24 @@ include $(libfdt_base)/Makefile.libfdt
 libfdt-source := $(patsubst %.c, $(libfdt_base)/%.c, $(LIBFDT_SRCS))
 libfdt = $(patsubst %.c, %.o, $(libfdt-source))
 
-$(out)/preboot.elf: arch/$(arch)/preboot.ld $(out)/arch/$(arch)/preboot.o
-	$(call quiet, $(LD) -o $@ -T $^, LD $@)
+# The UEFI stub.  Built freestanding, position independent, and with NO
+# dynamic relocations: UEFI loads the image wherever it likes and we declare
+# ImageBase = 0 with no .reloc section, so a single relocation here would be a
+# silent wrong-address bug at runtime rather than a link error.  -fno-jump-tables
+# is what keeps GCC from emitting the .rodata address tables that a switch
+# statement would otherwise produce.
+efi-stub-flags = -ffreestanding -fno-stack-protector -fno-builtin -fpie \
+	-fno-asynchronous-unwind-tables -fno-unwind-tables -fno-jump-tables \
+	-fno-common -Os -Wall -Wextra -Werror -mgeneral-regs-only
+
+$(out)/arch/$(arch)/efi-stub.o: arch/$(arch)/efi-stub.c
+	$(makedir)
+	$(call quiet, $(CC) $(efi-stub-flags) -c -o $@ $<, CC arch/$(arch)/efi-stub.c)
+
+$(out)/preboot.elf: arch/$(arch)/preboot.ld $(out)/arch/$(arch)/preboot.o \
+		$(out)/arch/$(arch)/efi-stub.o
+	$(call quiet, $(LD) -o $@ -T $(filter %.ld, $^) $(filter %.o, $^), LD $@)
+	$(call very-quiet, scripts/check-efi-stub.sh $(CROSS_PREFIX) $@)
 
 $(out)/preboot.bin: $(out)/preboot.elf
 	$(call quiet, $(OBJCOPY) -O binary $^ $@, OBJCOPY $@)
