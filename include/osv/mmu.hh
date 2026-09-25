@@ -13,6 +13,7 @@
 #include <boost/intrusive/set.hpp>
 #include <osv/types.h>
 #include <functional>
+#include <atomic>
 #include <osv/error.h>
 #include <osv/addr_range.hh>
 #include <unordered_map>
@@ -379,6 +380,16 @@ void vcleanup(void* addr, size_t size);
 error  advise(void* addr, size_t size, int advice);
 
 void vm_fault(uintptr_t addr, exception_frame* ef);
+
+// PARSEPROFILE: minor-fault counters, read by the CPUPROF window dump so
+// faults/txn is on the SAME schedule as the per-symbol profile.  g_vmfault_all
+// counts every entry into vm_fault() (a minor page fault serviced by OSv:
+// anonymous first-touch, COW write, shared-anon, demand-page); g_vmfault_write
+// counts the WRITE-fault subset (a superset of COW: writable first-touch +
+// COW private-copy).  Both are the
+// OSv equivalent of Linux minor-faults (no I/O), NOT major faults.
+extern std::atomic<unsigned long> g_vmfault_all;
+extern std::atomic<unsigned long> g_vmfault_write;
 
 #if CONF_fork
 // -----------------------------------------------------------------------------

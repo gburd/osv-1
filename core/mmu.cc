@@ -2990,6 +2990,10 @@ static bool handle_cow_write_fault(uintptr_t addr)
 }
 #endif // CONF_fork
 
+// PARSEPROFILE: minor-fault counters (declared extern in include/osv/mmu.hh).
+std::atomic<unsigned long> g_vmfault_all{0};
+std::atomic<unsigned long> g_vmfault_write{0};
+
 void vm_fault(uintptr_t addr, exception_frame* ef)
 {
 #if CONF_fork
@@ -3005,6 +3009,11 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
     fork_arena::kernel_heap_scope kh;
 #endif
     trace_mmu_vm_fault(addr, ef->get_error());
+    // PARSEPROFILE: count this minor fault (see include/osv/mmu.hh). relaxed:
+    // a statistical per-window count, not a synchronization point.
+    g_vmfault_all.fetch_add(1, std::memory_order_relaxed);
+    if (mmu::is_page_fault_write(ef->get_error()))
+        g_vmfault_write.fetch_add(1, std::memory_order_relaxed);
     if (fast_sigsegv_check(addr, ef)) {
         vm_sigsegv(addr, ef);
         trace_mmu_vm_fault_sigsegv(addr, ef->get_error(), "fast");

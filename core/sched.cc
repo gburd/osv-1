@@ -2851,6 +2851,20 @@ static void cpuprof_start_on_current(u64 period_ns)
 
 static void cpuprof_dump()
 {
+    // PARSEPROFILE: minor-fault window count, printed on the SAME schedule as the
+    // per-symbol profile so faults/txn = fault_delta / (tps * window_secs) is
+    // computed off-box from the pgbench tps.  vmfault_all = every OSv page fault
+    // serviced (anon first-touch, COW, shared-anon, demand-page); vmfault_write
+    // = the write-fault subset.  Both are minor faults (no I/O), the OSv analogue
+    // of Linux minor-faults.
+    {
+        static unsigned long last_all = 0, last_wr = 0;
+        unsigned long cur_all = mmu::g_vmfault_all.load(std::memory_order_relaxed);
+        unsigned long cur_wr  = mmu::g_vmfault_write.load(std::memory_order_relaxed);
+        printf("CPUPROF_VMFAULT all=%lu write=%lu all_delta=%lu write_delta=%lu\n",
+            cur_all, cur_wr, cur_all - last_all, cur_wr - last_wr);
+        last_all = cur_all; last_wr = cur_wr;
+    }
     static u64 mpc[CPUPROF_SLOTS * 2];  static u64 mhit[CPUPROF_SLOTS * 2];
     static u64 apc[CPUPROF_SLOTS * 2];  static u64 ahit[CPUPROF_SLOTS * 2];
     unsigned mn = 0, an = 0;
