@@ -2769,6 +2769,9 @@ struct cpuprof_table {
     u64 ef_null;                 // samples with no exception frame (should be ~0)
     u64 idle_samples;            // landed on the idle thread: not workload cost
     u64 busy_samples;            // landed on real work: the profile's denominator
+    u64 kern_self;               // PARSEPROFILE: bt[0] in kernel text (0x40000000..)
+    u64 app_self;                // PARSEPROFILE: bt[0] in app/.so text (0x100000000000..)
+    u64 other_self;              // PARSEPROFILE: neither region (should be ~0)
     u64 depth_sum;               // mean unwind depth, proves we get past frame 0
     // SELFTEST: the OLD unwinder's pc[0], to demonstrate the difference.
     u64 opc[64];
@@ -2814,6 +2817,16 @@ public:
         if (n > 0 && bt[0]) {
             // pc[0] is the instruction that was actually executing: SELF time.
             cpuprof_bump(t->pc, t->hits, CPUPROF_SLOTS, (u64)bt[0], &t->dropped);
+            // PARSEPROFILE: classify the leaf PC by text region so the kern/app
+            // self-time split covers the WHOLE distribution (every busy sample),
+            // not just the printed top-100.  kernel .text = 0x40000000.., app +
+            // shared-object .text = program_base 0x100000000000..
+            {
+                u64 p0 = (u64)bt[0];
+                if (p0 >= 0x40000000ull && p0 < 0x100000000ull) t->kern_self++;
+                else if (p0 >= 0x100000000000ull)               t->app_self++;
+                else                                             t->other_self++;
+            }
             // every frame: INCLUSIVE time, so a cost spread across many leaves
             // still shows up against its common caller.  That distinction is
             // exactly the concentrated-vs-diffuse question.
@@ -2869,6 +2882,7 @@ static void cpuprof_dump()
     static u64 apc[CPUPROF_SLOTS * 2];  static u64 ahit[CPUPROF_SLOTS * 2];
     unsigned mn = 0, an = 0;
     u64 tot = 0, drop = 0, efnull = 0, dsum = 0, idles = 0, busys = 0;
+    u64 kself = 0, aself = 0, oself = 0;  // PARSEPROFILE region split (whole distribution)
     static u64 opc[64]; static u64 ohit[64]; unsigned on_ = 0;
 
     for (unsigned c = 0; c < cpus.size(); c++) {
@@ -2876,6 +2890,7 @@ static void cpuprof_dump()
         tot += t->samples; drop += t->dropped;
         efnull += t->ef_null; dsum += t->depth_sum;
         idles += t->idle_samples; busys += t->busy_samples;
+        kself += t->kern_self; aself += t->app_self; oself += t->other_self;
         for (unsigned s = 0; s < CPUPROF_SLOTS; s++) {
             if (t->pc[s]) {
                 unsigned j = 0; for (; j < mn; j++) if (mpc[j] == t->pc[s]) break;
@@ -2915,6 +2930,21 @@ static void cpuprof_dump()
         mn, on_, (unsigned long long)drop,
         (unsigned long long)(busys ? drop*100/busys : 0),
         (unsigned long long)(busys ? (drop*1000/busys)%10 : 0));
+    // PARSEPROFILE: THE HEADLINE SPLIT over the WHOLE distribution (every busy
+    // sample classified by leaf-PC region, not just the printed top-100).
+    // kernel_self = work OSv does; app_self = PostgreSQL's own code.
+    printf("CPUPROF_REGION busy=%llu kernel_self=%llu (%llu.%llu%%) "
+           "app_self=%llu (%llu.%llu%%) other_self=%llu (%llu.%llu%%)\n",
+        (unsigned long long)busys,
+        (unsigned long long)kself,
+        (unsigned long long)(busys ? kself*100/busys : 0),
+        (unsigned long long)(busys ? (kself*1000/busys)%10 : 0),
+        (unsigned long long)aself,
+        (unsigned long long)(busys ? aself*100/busys : 0),
+        (unsigned long long)(busys ? (aself*1000/busys)%10 : 0),
+        (unsigned long long)oself,
+        (unsigned long long)(busys ? oself*100/busys : 0),
+        (unsigned long long)(busys ? (oself*1000/busys)%10 : 0));
     // A saturated table biases the histogram toward whatever arrived first, so
     // say so loudly rather than leaving it to be read off a number.
     if (busys && drop*100/busys > 2)
@@ -2987,6 +3017,7 @@ static void cpuprof_reset()
         for (unsigned s = 0; s < 64; s++) { t->opc[s]=0; t->ohits[s]=0; }
         t->samples=0; t->dropped=0; t->ef_null=0; t->depth_sum=0;
         t->idle_samples=0; t->busy_samples=0;
+        t->kern_self=0; t->app_self=0; t->other_self=0;
     }
 }
 
