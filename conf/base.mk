@@ -15,3 +15,8 @@ conf_lazy_stack_invariant=0
 # Set to 1 to enable IPV6
 # This macro controls the FreeBSD INET6 macro defined in bsd/porting/netport.h
 conf-INET6=1
+
+# x86_64 PMU (performance-counter) readout, diagnostic-only (see conf/kconfig
+# core "config pmu" and include/osv/pmu.hh).  Off by default; set to 1 to build
+# in arch/x64/pmu.o and the PMUPROOF boot line.
+conf_pmu=0
