@@ -97,6 +97,26 @@ static u16 rx_inline_weight()
     return w;
 }
 
+// #1467 receive-path wake batching (OSV_NET_BATCH_WAKE, default ON): the poll
+// thread's rx_drain coalesces the per-packet net_channel wakes of one drain
+// pass into one wake per distinct connection, flushed together so wake_impl()'s
+// per-target-CPU IPI coalescing collapses the wakeup IPIs. Set "0" to disable
+// (per-packet wakes, the pre-#1467 behavior) for a single-image A/B.  Read once
+// from the env at first call; cannot change after boot. Prints its RESOLVED
+// value to the console so an A/B run can prove which arm it is (a lever proven
+// live at runtime, not merely present in source).
+bool net::batch_wakes_enabled()
+{
+    static const bool enabled = [] {
+        const char* v = getenv("OSV_NET_BATCH_WAKE");
+        bool on = !(v && v[0] == '0');
+        printf("NET_BATCH_WAKE=%d (OSV_NET_BATCH_WAKE=%s)\n",
+               on ? 1 : 0, v ? v : "<unset>");
+        return on;
+    }();
+    return enabled;
+}
+
 // Per-wakeup drain budget for the RX poll thread when the NAPI bottom-half is
 // enabled (OSV_RX_INLINE != 0). Bounding the drain lets the poll thread yield
 // to the backends it just woke (and to any other runnable thread) instead of
@@ -709,6 +729,29 @@ bool net::rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx)
 {
     vring* vq = rxq->vqueue;
     std::vector<iovec> packet;
+    // Coalesce the per-packet channel wakes issued while draining one RX pass
+    // into one wake per channel, flushed together at the end of the pass, so
+    // the scheduler's per-target-CPU IPI coalescing collapses the wakeup IPIs
+    // (see classifier::post_packet(m, batch) and net_channel_wake_batch).
+    // Only on the poll-thread path (!inline_ctx): the inline RX-IRQ context
+    // runs !preemptable and net_channel_wake_batch spill would allocate, which
+    // is illegal there; and the inline budget is a small NAPI weight anyway, so
+    // there is little to coalesce. Runtime toggle OSV_NET_BATCH_WAKE for A/B;
+    // default on.
+    const bool batch_wakes = !inline_ctx && net::batch_wakes_enabled();
+    net_channel_wake_batch wake_batch;
+    // When batching, we cannot classify+wake inside the drain loop: the wake
+    // must happen under a continuous osv::rcu_read_lock (which disables
+    // preemption) so the recorded net_channel pointers cannot be rcu_dispose()d
+    // before flush, yet packet_to_mbuf() above allocates and would fault while
+    // !preemptable under CONF_fork. So the loop below only BUILDS mbufs
+    // (preemptable, allocation legal) and collects them here; a second phase
+    // after the loop classifies+pushes+records+flushes them all under one rcu
+    // lock with no allocation inside it. Slow-path (unclassified) packets are
+    // deferred to after the flush+unlock, where if_input()'s BSD stack may
+    // fault safely.
+    std::vector<mbuf*> built;
+    std::vector<mbuf*> slow_path;
 #if CONF_fork
     // The inline RX drain runs in non-preemptable interrupt context.  This
     // local vector's first push_back would malloc its backing store, and under
@@ -847,6 +890,18 @@ bool net::rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx)
         rx_packets++;
         rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
 
+        if (batch_wakes) {
+            // Defer classify+push+wake to the post-loop rcu-locked phase (see
+            // the `built` vector's comment). Building the mbuf above already
+            // did every allocation this packet needs.
+            built.push_back(m_head);
+            trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
+            done++;
+            if ((_ifn->if_drv_flags & IFF_DRV_RUNNING) == 0)
+                break;
+            continue;
+        }
+
         bool fast_path = _ifn->if_classifier.post_packet(m_head);
         if (!fast_path) {
             if (inline_ctx) {
@@ -877,6 +932,33 @@ bool net::rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx)
         // passing the packet up the network stack.
         if ((_ifn->if_drv_flags & IFF_DRV_RUNNING) == 0)
             break;
+    }
+
+    if (batch_wakes && !built.empty()) {
+        // Phase 2: classify + push + record every built mbuf under ONE
+        // continuous rcu_read_lock (preemption disabled, no allocation inside),
+        // so no grace period can elapse and free a recorded net_channel before
+        // flush(). One wake per distinct connection touched this pass; the
+        // flushed wakes run back-to-back so wake_impl() coalesces the wakeup
+        // IPIs per destination CPU (the whole point of #1467).
+        WITH_LOCK(osv::rcu_read_lock) {
+            for (mbuf* m : built) {
+                if (!_ifn->if_classifier.post_packet(m, wake_batch)) {
+                    // Not an established-TCP fast-path packet: defer to after
+                    // the lock is released; if_input()'s BSD stack may fault,
+                    // which is illegal while the rcu lock holds preemption off.
+                    slow_path.push_back(m);
+                }
+            }
+            wake_batch.flush();
+        }
+        built.clear();
+        // Now preemptable again: run the deferred slow-path packets up the
+        // stack (tcp_input etc. may fault, fine outside the rcu lock).
+        for (mbuf* m : slow_path) {
+            (*_ifn->if_input)(_ifn, m);
+        }
+        slow_path.clear();
     }
 
     // If we hit the budget but the ring still has used buffers, or we deferred

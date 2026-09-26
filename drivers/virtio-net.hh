@@ -273,6 +273,10 @@ public:
     // should wake the poll thread to finish (ring not drained, or a non
     // fast-path packet was deferred). See virtio-net.cc for the safety rules.
     bool rx_drain(struct rxq* rxq, u32 budget, bool inline_ctx);
+    // #1467 receive-path wake batching toggle (OSV_NET_BATCH_WAKE, default on;
+    // "0" disables).  Read once at first call and cached; the resolved value is
+    // printed to the console for A/B proof.
+    static bool batch_wakes_enabled();
     void fill_rx_ring(struct rxq* rxq);
     // Refill rxq->hdr_pool up to its target with m_gethdr()-allocated bare mbuf
     // headers.  MUST run in a preemptable context (the poll thread), never the
