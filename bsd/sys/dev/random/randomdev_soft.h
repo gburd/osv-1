@@ -52,6 +52,7 @@
 struct harvest {
 	harvest(uintmax_t somecounter, const void* src, u_int src_size, u_int bits, enum esource source)
 		: somecounter(somecounter)
+		, entropy{}
 		, size(std::min(src_size, (u_int)HARVESTSIZE))
 		, bits(bits)
 		, source(source)

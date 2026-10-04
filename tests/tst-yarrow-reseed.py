@@ -6,7 +6,8 @@
 OS mutex/sleep/harvest boundaries are supplied by the fixture. No entropy
 hardware is registered. Fork copies the full process state (including local
 static caches); it is NOT an OSv hypervisor snapshot/resume integration test.
-Run: python3 tests/tst-yarrow-reseed.py [unseeded|tail|serialization]
+Run: python3 tests/tst-yarrow-reseed.py [unseeded|tail|serialization|stopped]
+Without arguments, runs all four cases.
 CC/CXX and TEST_CFLAGS may select sanitizers. No third-party test dependency.
 """
 import os
@@ -86,6 +87,6 @@ with tempfile.TemporaryDirectory(prefix='tst-yarrow-') as d:
     subprocess.run(shlex.split(os.environ.get('CXX', 'c++')) + ['-std=gnu++17', '-O1', '-g',
                    '-Wall', '-Wextra', '-Werror', '-pthread', '-I' + str(d), str(source)] +
                    objects + flags + ['-o', str(exe)], check=True, timeout=120)
-    cases = sys.argv[1:] or ['unseeded', 'tail', 'serialization']
+    cases = sys.argv[1:] or ['unseeded', 'tail', 'serialization', 'stopped']
     for case in cases:
         subprocess.run([str(exe), case], check=True, timeout=30)

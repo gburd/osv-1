@@ -28,6 +28,7 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 #include "opt_random.h"
+#include <atomic>
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
@@ -179,6 +180,10 @@ random_process_event(struct harvest *event)
 void
 random_yarrow_init_alg(void)
 {
+    static std::atomic<bool> initialized{false};
+    if (initialized.exchange(true)) {
+        panic("Yarrow reinitialization is not supported");
+    }
 	int i;
 #ifndef __OSV__
 	struct sysctl_oid *random_yarrow_o;
@@ -247,7 +252,9 @@ random_yarrow_init_alg(void)
 void
 random_yarrow_deinit_alg(void)
 {
-	mtx_destroy(&random_reseed_mtx);
+    // Process-lifetime state: exported read/event/reseed entrypoints and
+    // sleepers may still use this mutex after the harvest worker stops.
+    // Full RNG unload/reinitialization is not supported.
 }
 
 static void

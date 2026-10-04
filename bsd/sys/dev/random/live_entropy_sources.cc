@@ -50,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include "live_entropy_sources.h"
 
 #include <osv/debug.h>
+#include <type_traits>
 
 LIST_HEAD(les_head, live_entropy_sources);
 static struct les_head sources = LIST_HEAD_INITIALIZER(sources);
@@ -133,7 +134,11 @@ live_entropy_sources_init(void *unused)
 	    NULL, 0, live_entropy_source_handler, "",
 	    "List of Active Live Entropy Sources");
 #endif
+#ifndef __OSV__
 	sx_init(&les_lock, "live_entropy_sources");
+#endif
+    // OSv's rwlock member is constructed once with static storage. Sources
+    // register before adaptor initialization: never reset an active lock.
 }
 
 /*
@@ -149,8 +154,10 @@ live_entropy_sources_init(void *unused)
 void
 live_entropy_sources_feed(int rounds, event_proc_f entropy_processor)
 {
-	static struct harvest event;
-	static uint8_t buf[HARVESTSIZE];
+	struct harvest event;
+    static_assert(std::is_trivially_copyable<struct harvest>::value,
+        "harvest record must permit complete byte initialization");
+	uint8_t buf[HARVESTSIZE];
 	struct live_entropy_sources *les;
 	int i, n;
 
@@ -174,6 +181,9 @@ live_entropy_sources_feed(int rounds, event_proc_f entropy_processor)
 				continue;
 			}
 
+            // Yarrow hashes sizeof(event), including tail and padding. Reset
+            // for EVERY draw: a short draw must not retain a prior long tail.
+            memset(static_cast<void*>(&event), 0, sizeof(event));
 			event.somecounter = get_cyclecount();
 			event.size = n;
 			event.bits = (n*8)/2;
@@ -203,7 +213,10 @@ void
 live_entropy_sources_deinit(void *unused)
 {
 
+#ifndef __OSV__
 	sx_destroy(&les_lock);
+#endif
+    // OSv registry lock is process-lifetime, even after worker shutdown.
 }
 
 #ifndef __OSV__

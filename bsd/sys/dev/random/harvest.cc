@@ -41,6 +41,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 
 #ifdef __OSV__
+#include <osv/irqlock.hh>
+#include <osv/spinlock.h>
+#include <osv/mutex.h>
+static spinlock harvest_registration_lock;
 
 #define log(prio, msg) do { printf(msg); } while(0)
 #define kproc_exit(v) do { kthread_exit(); } while(0)
@@ -70,6 +74,9 @@ void
 randomdev_init_harvester(void (*reaper)(u_int64_t, const void *, u_int,
     u_int, enum esource), int (*reader)(void *, int))
 {
+	irq_save_lock_type irq;
+	std::lock_guard<irq_save_lock_type> irq_guard(irq);
+	std::lock_guard<spinlock> guard(harvest_registration_lock);
 	reap_func = reaper;
 	read_func = reader;
 }
@@ -78,6 +85,9 @@ randomdev_init_harvester(void (*reaper)(u_int64_t, const void *, u_int,
 void
 randomdev_deinit_harvester(void)
 {
+	irq_save_lock_type irq;
+	std::lock_guard<irq_save_lock_type> irq_guard(irq);
+	std::lock_guard<spinlock> guard(harvest_registration_lock);
 	reap_func = NULL;
 	read_func = read_random_phony;
 	warned = 0;
@@ -95,6 +105,9 @@ randomdev_deinit_harvester(void)
 void
 random_harvest(const void *entropy, u_int count, u_int bits, enum esource origin)
 {
+	irq_save_lock_type irq;
+	std::lock_guard<irq_save_lock_type> irq_guard(irq);
+	std::lock_guard<spinlock> guard(harvest_registration_lock);
 	if (reap_func)
 		(*reap_func)(get_cyclecount(), entropy, count, bits, origin);
 }

@@ -233,6 +233,9 @@ random_device::random_device()
 
 random_device::~random_device()
 {
+#if CONF_core_reseed_on_resume
+    _reseed_ready.store(false, std::memory_order_release);
+#endif
 #ifdef __x86_64__
     if (processor::features().rdrand) {
         live_entropy_source_deregister(&drng);
@@ -287,8 +290,15 @@ void reseed_on_resume()
     // Give timing data zero entropy credit. The flush processes queued events
     // and polls live sources; Yarrow rekeys only if already seeded (possibly
     // by credited events in that flush). No hardware source is required.
-    random_harvestq_internal(seed.tsc, &seed, sizeof(seed),
-                             0, RANDOM_PURE_RDRAND);
+    // The hook is sleepable. Process directly instead of risking a full ring
+    // drop; two records retain all 24 bytes and mix into both Yarrow pools.
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&seed);
+    for (size_t off = 0; off < sizeof(seed); off += HARVESTSIZE) {
+        struct harvest event(seed.tsc, bytes + off,
+            std::min(sizeof(seed) - off, size_t(HARVESTSIZE)),
+            0, RANDOM_PURE_RDRAND);
+        random_process_event(&event);
+    }
     if (random_adaptor->reseed) {
         (random_adaptor->reseed)();
     }

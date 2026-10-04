@@ -35,13 +35,18 @@ typedef void (*event_proc_f)(struct harvest *event);
 
 __BEGIN_DECLS
 
+/* One-shot initialization. Reinitialization (including after stop) is rejected. */
 void random_harvestq_init(event_proc_f);
 void random_harvestq_deinit(void);
+/* ENXIO once stopped; never waits for a worker which has exited. */
+int random_harvestq_flush(void);
+/* Nonblocking admission: false means full OR stopped; no event/credit accepted.
+ * Stop drains admitted producers and their events before freeing the queue. */
+bool random_harvestq_try(u_int64_t, const void *, u_int, u_int, enum esource);
 void random_harvestq_internal(u_int64_t, const void *,
     u_int, u_int, enum esource);
 void random_set_wakeup_exit(void *);
 
-extern int random_kthread_control;
 extern struct mtx harvest_mtx;
 
 __END_DECLS

@@ -18,7 +18,7 @@
 // KERNEL_HEADERS
 struct mtx { std::mutex lock; };
 static void mtx_init(mtx*, const char*, void*, int) {}
-static void mtx_destroy(mtx*) {}
+[[maybe_unused]] static void mtx_destroy(mtx*) {}
 static thread_local bool observe_lock;
 static std::atomic<bool> lock_attempted{false};
 static void mtx_lock(mtx* m) {
@@ -31,15 +31,16 @@ static struct { int seeded; } random_context;
 static int wakes;
 static void wakeup(void*) { ++wakes; }
 static void debug(const char*) {}
+[[noreturn]] static void panic(const char*) { std::abort(); }
 static int msleep(void*, mtx*, int, const char*, int) { assert(false); return 0; }
-static int random_kthread_control;
-static int hz = 100;
 static struct harvest pending;
 static bool have_pending;
-static void bsd_pause(const char*, int) {
+static bool flush_stopped;
+static int random_harvestq_flush() {
+    if (flush_stopped) return ENXIO;
     // Complete the flush handshake without a scheduler or live HW source.
     if (have_pending) { random_process_event(&pending); have_pending = false; }
-    random_kthread_control = 0;
+    return 0;
 }
 static thread_local unsigned encryptions;
 static void counted_encrypt(randomdev_key* key, void* in, void* out, unsigned n) {
@@ -84,6 +85,16 @@ static void unseeded() {
     flush(0, 43);
     assert(random_context.seeded && wakes == 1);
     puts("PASS: unseeded zero-credit flush blocked; credited seeding; seeded rekey");
+}
+static void stopped() {
+    flush(256, 42);
+    uint8_t bytes[32];
+    read_all(bytes, sizeof(bytes));
+    auto before = random_state;
+    flush_stopped = true;
+    randomdev_flush_reseed();
+    assert(memcmp(&before, &random_state, sizeof(before)) == 0);
+    puts("PASS: failed queue flush does not rekey output state");
 }
 static void tail() {
     flush(256, 42);
@@ -153,6 +164,7 @@ int main(int argc, char** argv) {
     random_yarrow_init_alg();
     if (!strcmp(argv[1], "unseeded")) unseeded();
     else if (!strcmp(argv[1], "tail")) tail();
+    else if (!strcmp(argv[1], "stopped")) stopped();
     else if (!strcmp(argv[1], "serialization")) serialization();
     else assert(false);
     random_yarrow_deinit_alg();

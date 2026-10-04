@@ -27,6 +27,7 @@
  */
 
 #include "opt_random.h"
+#include <atomic>
 
 #if !defined(RANDOM_YARROW) && !defined(RANDOM_FORTUNA)
 #define RANDOM_YARROW
@@ -133,6 +134,10 @@ random_check_boolean(SYSCTL_HANDLER_ARGS)
 void
 randomdev_init(void)
 {
+    static std::atomic<bool> initialized{false};
+    if (initialized.exchange(true)) {
+        panic("random adaptor reinitialization is not supported");
+    }
 #ifndef __OSV__
 	struct sysctl_oid *random_sys_o, *random_sys_harvest_o;
 #endif
@@ -198,8 +203,7 @@ randomdev_deinit(void)
 	/*
 	 * Command the hash/reseed thread to end and wait for it to finish
 	 */
-	random_kthread_control = -1;
-	tsleep((void *)&random_kthread_control, 0, "term", 0);
+	random_harvestq_deinit();
 
 #if defined(RANDOM_YARROW)
 	random_yarrow_deinit_alg();
@@ -276,9 +280,9 @@ static void
 randomdev_flush_reseed(void)
 {
 	/* Command a entropy queue flush and wait for it to finish */
-	random_kthread_control = 1;
-	while (random_kthread_control)
-		bsd_pause("-", hz / 10);
+	if (random_harvestq_flush() != 0) {
+		return;
+	}
 
 #if defined(RANDOM_YARROW)
 	/* Rekey without changing the seeded gate; the flush above may have
