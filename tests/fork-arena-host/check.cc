@@ -101,7 +101,7 @@ static void boundaries()
     assert(first == reinterpret_cast<void*>(ovf_slot_base));
     assert(host::maps == 2);
     host::irq = false;
-    assert(overflow_alloc(fl, 64) == reinterpret_cast<void*>(ovf_slot_base + 64));
+    assert(!overflow_alloc(fl, 64));
     assert(!overflow_alloc(fl, max_alloc));
     host::irq = true;
     host::preemptable = false;
@@ -186,7 +186,137 @@ static void aba()
     host::aba_done = true;
     reader.join();
     assert(slow == a);
-    assert(alloc(32, 16) != live); // Known independent Treiber ABA, NOT fixed.
+    assert(alloc(32, 16) != live); // A stale pop must not republish the live B.
+}
+
+// Removing the atomic-context guard must fail without touching even an
+// inaccessible arena page. Read-only free catches an in-band link write.
+static void readonly_free()
+{
+    auto p = alloc(32, 16);
+    auto page = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) & ~4095ull);
+    assert(::mprotect(page, 4096, PROT_READ) == 0);
+    std::atomic<bool> vma_held{false}, free_done{false};
+    std::thread vma_owner([&] {
+        std::lock_guard<std::mutex> vma(host::vma_lock);
+        vma_held = true;
+        // If free writes an arena link, it faults under the VMA lock.
+        fork_arena::free(p);
+        free_done = true;
+    });
+    host::wait(vma_held);
+    std::thread other([&] {
+        host::wait(free_done);
+        // A simultaneous mapping claimant must make forward progress too.
+        std::lock_guard<std::mutex> vma(host::vma_lock);
+    });
+    vma_owner.join();
+    other.join();
+    assert(::mprotect(page, 4096, PROT_READ | PROT_WRITE) == 0);
+    assert(alloc(32, 16) == p);
+}
+
+static void cache_bound()
+{
+    // More frees than cache slots: all must remain disjoint when allocated
+    // again, including the discarded entry. Teardown must reset indices.
+    std::vector<void*> ptrs(1025);
+    for (auto& p : ptrs) { p = alloc(32, 16); assert(p); }
+    unsigned long before, after;
+    overflow_stats(nullptr, &before, nullptr, nullptr);
+    for (auto p : ptrs) fork_arena::free(p);
+    overflow_stats(nullptr, &after, nullptr, nullptr);
+    assert(after - before == 1024 * 48); // accepted bytes only, not dropped free
+    auto dropped = ptrs.back();
+    for (unsigned i = 0; i < 1024; ++i) {
+        auto p = alloc(32, 16);
+        assert(p == ptrs[1023 - i]); // exact capacity and LIFO reuse
+        assert(p != dropped);
+    }
+    auto fresh = alloc(32, 16);
+    assert(fresh && fresh != dropped);
+    ptrs.back() = fresh;
+    std::sort(ptrs.begin(), ptrs.end());
+    assert(std::adjacent_find(ptrs.begin(), ptrs.end()) == ptrs.end());
+    for (auto p : ptrs) fork_arena::free(p);
+    release_as(mmu::current_address_space());
+    assert(live_as_slots() == 0);
+    auto p = alloc(32, 16);
+    assert(p);
+    fork_arena::free(p);
+    assert(alloc(32, 16) == p);
+}
+
+static void atomic_touch()
+{
+    auto p = alloc(32, 16);
+    fork_arena::free(p);
+    auto page = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) & ~4095ull);
+    assert(::mprotect(page, 4096, PROT_NONE) == 0);
+    host::irq = false;
+    assert(!alloc(32, 16));
+    fork_arena::free(p); // deliberately unreadable: early bypass must not load header
+    host::irq = true;
+    host::preemptable = false;
+    assert(!alloc(64, 16));
+    fork_arena::free(p);
+    host::preemptable = true;
+    assert(::mprotect(page, 4096, PROT_READ | PROT_WRITE) == 0);
+    assert(alloc(32, 16) == p);
+}
+
+static void recycle_stress()
+{
+    std::mutex live_lock;
+    std::vector<void*> live;
+    std::thread workers[4];
+    for (unsigned t = 0; t < 4; ++t) workers[t] = std::thread([&, t] {
+        for (unsigned i = 0; i < 20000; ++i) {
+            auto p = alloc(32, 16);
+            assert(p);
+            {
+                std::lock_guard<std::mutex> guard(live_lock);
+                assert(std::find(live.begin(), live.end(), p) == live.end());
+                live.push_back(p);
+            }
+            memset(p, t + 1, 32);
+            std::this_thread::yield();
+            for (unsigned j = 0; j < 32; ++j) assert(static_cast<unsigned char*>(p)[j] == t + 1);
+            {
+                std::lock_guard<std::mutex> guard(live_lock);
+                live.erase(std::find(live.begin(), live.end(), p));
+            }
+            fork_arena::free(p);
+        }
+    });
+    for (auto& w : workers) w.join();
+    assert(live.empty());
+}
+
+// Pause inside the actual descriptor pop. Resume only after real contention
+// or rival completion, never a sleep: removing pop's lock duplicates a live VA.
+static void descriptor_lock()
+{
+    auto first = alloc(32, 16);
+    auto second = alloc(32, 16);
+    assert(first && second && first != second);
+    fork_arena::free(second);
+    fork_arena::free(first);
+    host::mode = 7;
+    void *a = nullptr, *b = nullptr;
+    std::thread slow([&] { host::tid = 1; a = alloc(32, 16); });
+    host::wait(host::descriptor_read);
+    std::thread rival([&] { host::tid = 2; b = alloc(32, 16); host::rival_done = true; });
+    while (!host::blocked && !host::rival_done) std::this_thread::yield();
+    puts(host::blocked ? "contender observed held descriptor lock" :
+                        "contender completed while descriptor read suspended");
+    fflush(stdout);
+    host::resume_pop = true;
+    slow.join();
+    rival.join();
+    assert(a && b && a != b);
+    assert(host::blocked);
+    puts("descriptor lock: live uniqueness and actual contention PASS");
 }
 
 static void vma_order()
@@ -214,7 +344,12 @@ int main(int argc, char** argv)
     else if (!strcmp(argv[1], "threads")) threads();
     else if (!strcmp(argv[1], "null")) assert(slot_for(nullptr) == nullptr);
     else if (!strcmp(argv[1], "vma-order")) vma_order();
+    else if (!strcmp(argv[1], "descriptor-lock")) descriptor_lock();
     else if (!strcmp(argv[1], "aba")) aba();
+    else if (!strcmp(argv[1], "readonly-free")) readonly_free();
+    else if (!strcmp(argv[1], "atomic-touch")) atomic_touch();
+    else if (!strcmp(argv[1], "cache-bound")) cache_bound();
+    else if (!strcmp(argv[1], "recycle-stress")) recycle_stress();
     else return 2;
     puts("PASS");
 }

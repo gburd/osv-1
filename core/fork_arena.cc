@@ -34,7 +34,7 @@
 //
 // All allocator state (free-list heads, bump pointer, lock) is in
 // kernel BSS -- never in arena pages -- so arena management never faults an
-// arena page and never recurses into malloc during fork's page-table work.
+// arena page under a recycle lock. Returned-chunk writes may COW-fault.
 // -----------------------------------------------------------------------------
 
 namespace fork_arena {
@@ -63,8 +63,12 @@ constexpr size_t   granule = 16;            // linear step, and every class is a
 constexpr size_t   linear_max = linear_classes * granule;   // 128
 constexpr unsigned linear_max_shift = 7;                    // 1<<7 == linear_max
 
-struct free_node {
-    free_node *next;
+// Bounded recycle cache, not allocation ownership metadata. Dropping a free
+// entry retains its mapping until AS teardown, but never reissues a live chunk.
+constexpr uint16_t recycle_capacity = 1024;
+struct recycle_entry {
+    uintptr_t chunk;
+    uint16_t next;
 };
 
 struct chunk_header {
@@ -105,9 +109,8 @@ static_assert(header_size % 16 == 0,
 // process's recycling inside its own COW domain: a chunk freed by one process
 // is only ever re-handed to that same process, whose links stay self-coherent.
 //
-// Each per-AS free-list head is still a lock-free Treiber stack, so the COW
-// page fault that writing a chunk's link may trigger is serviced with no lock
-// held and preemption on (the original correctness property is preserved).
+// Recycle descriptors and their links are identity-resident. No arena access,
+// allocator call or fault is allowed while holding the recycle spinlock.
 std::atomic<bool> g_ready{false};
 std::atomic<uintptr_t> g_bump{0};   // next never-yet-carved VA (GLOBAL: unique VA)
 uintptr_t g_end = 0;                // arena_base + arena_size
@@ -224,12 +227,48 @@ std::atomic<unsigned long> g_ovf_foreign_frees{0};
 // with linear probing: the concurrent-process count is modest (postmaster +
 // its backends/aux), and if it ever fills, that address space simply runs
 // bump-only (no recycling) -- correct, just less space-efficient.  Slot
-// acquisition takes a brief spinlock; the per-AS freelist ops themselves stay
-// lock-free.  A slot is reclaimed when its address space is destroyed
+// acquisition takes a brief spinlock; per-AS recycle operations use a separate
+// short spinlock over identity metadata only.  A slot is reclaimed when its address space is destroyed
 // (release_as(), called from mmu::destroy_address_space).
 struct as_freelist {
     std::atomic<void*>      owner{nullptr};   // address_space* key, null == free slot
-    std::atomic<free_node*> heads[num_classes];
+    spinlock recycle_lock;
+    uint16_t heads[num_classes];
+    uint16_t unused;
+    recycle_entry entries[recycle_capacity];
+
+    void reset_recycle()
+    {
+        for (auto& head : heads) head = recycle_capacity;
+        for (uint16_t i = 0; i < recycle_capacity; ++i) entries[i].next = i + 1;
+        unused = 0;
+    }
+
+    void *pop(unsigned idx)
+    {
+        SCOPE_LOCK(recycle_lock);
+        auto n = heads[idx];
+        if (n == recycle_capacity) return nullptr;
+        auto chunk = entries[n].chunk;
+        heads[idx] = entries[n].next;
+        entries[n].next = unused;
+        unused = n;
+        return reinterpret_cast<void*>(chunk);
+    }
+
+    bool push(uintptr_t chunk, unsigned idx)
+    {
+        SCOPE_LOCK(recycle_lock);
+        // ponytail: 1024 cached frees/AS (~4 MiB BSS overall). Full cache
+        // drops recycling; grow metadata only if retained-mapping churn matters.
+        if (unused == recycle_capacity) return false;
+        auto n = unused;
+        unused = entries[n].next;
+        entries[n].chunk = chunk;
+        entries[n].next = heads[idx];
+        heads[idx] = n;
+        return true;
+    }
     // LEAK #2 REAL FIX: per-AS overflow bump region (COW-private, slot 97).
     // Freed wholesale by destroy_address_space page teardown on reap; reset in
     // release_as so a recycled slot never inherits a dead child's overflow VA.
@@ -273,9 +312,7 @@ as_freelist *slot_for(void *as)
     }
     for (unsigned i = 0; i < max_as_slots; i++) {
         if (!g_as_freelists[i].owner.load(std::memory_order_relaxed)) {
-            for (unsigned c = 0; c < num_classes; c++) {
-                g_as_freelists[i].heads[c].store(nullptr, std::memory_order_relaxed);
-            }
+            g_as_freelists[i].reset_recycle();
             // LEAK #2 REAL FIX: a freshly-claimed slot starts with no overflow
             // region (never inherit a prior owner's VA).
             g_as_freelists[i].ovf_next.store(0, std::memory_order_relaxed);
@@ -358,18 +395,9 @@ void init()
     if (g_ready.load(std::memory_order_acquire)) {
         return;
     }
-    // Reserve the arena VA as a fixed anonymous app-slot mapping, EAGERLY
-    // POPULATED (mmap_populate): every arena page is backed with real RAM at
-    // init, so fork_arena::alloc() NEVER demand-faults on a bump-carved page.
-    // That is load-bearing for correctness, not just latency: malloc ->
-    // fork_arena::alloc can be entered from an IRQs-off / preemption-off
-    // context (e.g. under concurrent PG load, mid-exception), where a demand
-    // fault would trip page_fault's assert(preemptable && irq_if) and abort.
-    // With the whole 512 MiB pre-faulted, alloc's first write hits an already-
-    // present page and cannot fault -- safe from any context.
-    // clone_address_space() still COW-clones the whole vma per child; the child
-    // only faults on WRITE (COW break), which happens from app context with
-    // irqs/preemption on, so that path keeps the original invariant.
+    // Populate eagerly for ordinary application allocation. Fork can later
+    // write-protect these same pages, so population is NOT an atomic-context
+    // safety guarantee: alloc() rejects those contexts before any arena access.
     void *v = mmu::map_anon(reinterpret_cast<void*>(arena_base), arena_size,
                             mmu::mmap_fixed | mmu::mmap_populate, mmu::perm_rw);
     if (reinterpret_cast<uintptr_t>(v) != arena_base) {
@@ -469,13 +497,11 @@ static void *overflow_carve(as_freelist *fl, size_t class_size)
 
 static void *overflow_alloc(as_freelist *fl, size_t class_size)
 {
-    if (void *chunk = overflow_carve(fl, class_size)) {
-        return chunk;
-    }
-    // An eager, already mapped carve is safe here; taking a sleepable growth
-    // mutex or mapping is not. Preserve the identity-heap fallback.
     if (!sched::preemptable() || !arch::irq_enabled()) {
         return nullptr;
+    }
+    if (void *chunk = overflow_carve(fl, class_size)) {
+        return chunk;
     }
     // Cover mutex waiter allocation as well as map_anon's nested allocations.
     // Neither may recurse into this arena; waiters must be AS-coherent too.
@@ -513,6 +539,11 @@ static void *overflow_alloc(as_freelist *fl, size_t class_size)
 
 void *alloc(size_t size, size_t alignment)
 {
+    // Even populated pages may be read-only after fork, including in the
+    // parent. Neither recycled nor fresh chunks are safe to write here.
+    if (!sched::preemptable() || !arch::irq_enabled()) {
+        return nullptr;
+    }
     if (!g_ready.load(std::memory_order_acquire)) {
         return nullptr;
     }
@@ -541,20 +572,10 @@ void *alloc(size_t size, size_t alignment)
     as_freelist *fl = slot_for(mmu::current_address_space());
 
     void *chunk = nullptr;
-    // Lock-free pop from THIS AS's size-class Treiber stack.  Reading
-    // head->next touches an arena page (a previously-freed chunk of THIS AS);
-    // that page is already faulted in and COW-private to this AS, we hold no
-    // lock, so a COW read is fine.  Preemption stays on: no illegal fault.
+    // Only identity metadata is touched under the lock. Header writes below
+    // may COW-fault, but run after pop() releases it.
     if (fl) {
-        free_node *head = fl->heads[idx].load(std::memory_order_acquire);
-        while (head) {
-            free_node *next = head->next;
-            if (fl->heads[idx].compare_exchange_weak(head, next,
-                    std::memory_order_acq_rel, std::memory_order_acquire)) {
-                chunk = head;
-                break;
-            }
-        }
+        chunk = fl->pop(idx);
     }
     if (!chunk) {
         // Carve a fresh class_size chunk off the GLOBAL bump pointer (atomic).
@@ -605,12 +626,18 @@ inline void recover(void *p, uintptr_t &base, unsigned &idx)
 
 void free(void *p)
 {
+    // No header access in atomic context: population does not imply that an
+    // inherited mapping is safely accessible here. Retain until AS teardown.
+    if (!sched::preemptable() || !arch::irq_enabled()) {
+        return;
+    }
     // CHURN FIX (was: an unconditional no-op for every overflow chunk).
     //
     // The C2-safety constraint is unchanged and absolute: a FOREIGN-AS free must
     // not read the chunk header, because that VA may be mapped only in the dead
     // or other child (cross-AS reaper / RCU quiescent / sibling) -> fault.  But
-    // the OWNING AS can safely read its own header, and refusing to let it do so
+    // the OWNING AS can read an intact resident allocation's header, and refusing
+    // to let it do so
     // was what removed all recycling and made a backend's committed RAM track
     // LIFETIME MALLOC CHURN instead of its live heap.
     //
@@ -643,23 +670,15 @@ void free(void *p)
         }
         uintptr_t obase;
         unsigned oidx;
-        recover(p, obase, oidx);  // our own AS's page: present, safe to read
-        auto *on = reinterpret_cast<free_node*>(obase);
-        free_node *ohead = fl->heads[oidx].load(std::memory_order_relaxed);
-        do {
-            on->next = ohead;
-        } while (!fl->heads[oidx].compare_exchange_weak(ohead, on,
-                     std::memory_order_release, std::memory_order_relaxed));
-        // g_ovf_recycled counts BYTES (overflow_alloc adds the region size), and
-        // classes are no longer powers of two, so the size must come from the
-        // table rather than from 1 << idx.
-        g_ovf_recycled.fetch_add(class_size_for(oidx), std::memory_order_relaxed);
+        recover(p, obase, oidx);  // requires an intact resident same-AS allocation
+        if (fl->push(obase, oidx)) {
+            g_ovf_recycled.fetch_add(class_size_for(oidx), std::memory_order_relaxed);
+        }
         return;
     }
     uintptr_t base;
     unsigned idx;
-    recover(p, base, idx);   // reads header (populated page), no lock, no fault
-    auto *n = reinterpret_cast<free_node*>(base);
+    recover(p, base, idx);   // intact resident same-AS header, before locking
     // Push onto THIS address space's free-list.  If the slot table is full,
     // drop the chunk (it leaks arena VA but is never mis-recycled across the
     // COW boundary -- correctness over the space of a full table).
@@ -667,24 +686,20 @@ void free(void *p)
     if (!fl) {
         return;
     }
-    // Lock-free Treiber push.  Writing n->next touches the chunk page, which
-    // after fork is copy-on-write and COW-private to THIS AS: with no lock held
-    // and preemption on, the resulting COW page fault is legal (OSv forbids
-    // faulting non-preemptable).
-    free_node *head = fl->heads[idx].load(std::memory_order_relaxed);
-    do {
-        n->next = head;
-    } while (!fl->heads[idx].compare_exchange_weak(head, n,
-                 std::memory_order_release, std::memory_order_relaxed));
+    // recover() requires an intact resident same-AS allocation. Ordinary fork
+    // preserves readable headers; MADV_DONTNEED, protection changes, unmapping
+    // or foreign pointers do not carry that guarantee. Reading before locking
+    // removes the recycle-lock -> fault edge, not arbitrary caller-held locks.
+    // No write to the allocation's COW page occurs during free().
+    fl->push(base, idx);
 }
 
 size_t usable_size(void *p)
 {
-    // Overflow chunks: usable_size is reached only via same-AS realloc /
-    // malloc_usable_size, so the header (written by this same AS) is present and
-    // safe to read. recover() below reads it. No special case needed -- overflow
-    // chunks carry the identical header. (A cross-AS caller would be a bug
-    // elsewhere; free() -- the only real cross-AS path -- already no-ops above.)
+    // Same-AS realloc / malloc_usable_size requires an intact resident
+    // allocation, including its header. Ordinary fork preserves readability;
+    // absent/protected mappings and foreign pointers are not covered.
+    // Overflow chunks carry the identical header and need no special case.
     uintptr_t base;
     unsigned idx;
     recover(p, base, idx);
@@ -711,9 +726,7 @@ void release_as(void *as)
     SCOPE_LOCK(g_slot_lock);
     for (unsigned i = 0; i < max_as_slots; i++) {
         if (g_as_freelists[i].owner.load(std::memory_order_relaxed) == as) {
-            for (unsigned c = 0; c < num_classes; c++) {
-                g_as_freelists[i].heads[c].store(nullptr, std::memory_order_relaxed);
-            }
+            g_as_freelists[i].reset_recycle();
             // LEAK #2 REAL FIX: reset the per-AS overflow bump. The dead child's
             // overflow region (slot 97) was just unmapped by the page-table
             // teardown; a slot recycled to a NEW AS must NOT inherit the dead VA.

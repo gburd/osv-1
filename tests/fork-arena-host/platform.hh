@@ -24,6 +24,7 @@ std::atomic<int> mode{0}, maps{0};
 std::atomic<bool> published_owner{false}, reader_done{false};
 std::atomic<bool> first_mapping{false}, contender{false}, first_done{false};
 std::atomic<bool> read_head{false}, aba_done{false};
+std::atomic<bool> descriptor_read{false}, resume_pop{false}, blocked{false}, rival_done{false};
 std::atomic<bool> carve_paused{false}, grown{false}, end_visible{false}, freed{false};
 std::mutex vma_lock;
 std::atomic<bool> vma_held{false}, growth_mapping{false};
@@ -46,11 +47,20 @@ void end_published() {
 void pop_read() {
     if (mode == 3 && tid == 1 && !read_head.exchange(true)) wait(aba_done);
 }
+void descriptor_pause() {
+    if (mode == 7 && tid == 1) { descriptor_read = true; wait(resume_pop); }
+}
 }
 namespace fork_arena { extern volatile __thread unsigned force_kernel_heap; }
 struct spinlock {
     std::mutex m;
-    void lock() { m.lock(); }
+    void lock() {
+        if (host::mode == 7 && host::tid == 2) {
+            if (m.try_lock()) return;
+            host::blocked = true;
+        }
+        m.lock();
+    }
     void unlock() { m.unlock(); }
 };
 struct mutex {

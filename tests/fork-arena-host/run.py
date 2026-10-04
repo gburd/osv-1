@@ -4,8 +4,9 @@
 """Supplemental exact-source host checks, NOT OSv scheduler/COW validation.
 
 Only platform includes are substituted. Scheduling hooks live solely in this
-test TU: owner/end publication, pre-carve CAS, Treiber next read, and the platform
-mapping/lock boundary. --source accepts an old source file for RED evidence.
+test TU: owner/end publication, pre-carve CAS, Treiber next/descriptor read,
+and the platform mapping/lock boundary. --source accepts old source for RED.
+--remove-pop-lock is a deliberate negative: descriptor-lock must fail uniqueness.
 """
 import argparse
 import pathlib
@@ -17,18 +18,35 @@ root = pathlib.Path(__file__).resolve().parents[2]
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source', type=pathlib.Path, default=root / 'core/fork_arena.cc')
 p.add_argument('--sanitize', default='')
+p.add_argument('--remove-pop-lock', action='store_true',
+               help='negative control: remove only descriptor pop locking')
 p.add_argument('--mmu-source', type=pathlib.Path, default=root / 'core/mmu.cc')
-p.add_argument('cases', nargs='*', default=['publication', 'collision', 'boundary-cas', 'publish-free', 'boundaries', 'threads', 'null', 'vma-order'])
+p.add_argument('cases', nargs='*', default=['publication', 'collision', 'boundary-cas', 'publish-free', 'boundaries', 'threads', 'null', 'vma-order', 'aba', 'readonly-free', 'atomic-touch', 'recycle-stress', 'cache-bound', 'descriptor-lock'])
 a = p.parse_args()
 source = a.source.read_text()
+if a.remove_pop_lock:
+    site = 'void *pop(unsigned idx)\n    {\n        SCOPE_LOCK(recycle_lock);'
+    assert source.count(site) == 1, 'unknown descriptor pop lock site'
+    source = source.replace(site, site.replace('SCOPE_LOCK(recycle_lock);',
+                           '// Negative control: pop lock removed.'), 1)
+site = 'auto n = heads[idx];'
+if site in source:
+    assert source.count(site) == 1
+    source = source.replace(site, site + '\n        host::descriptor_pause();', 1)
+else:
+    assert 'descriptor-lock' not in a.cases, 'descriptor-lock requires identity descriptors'
 old = 'expect, as, std::memory_order_acq_rel)) {'
 new = 'g_as_freelists[i].owner.store(as, std::memory_order_release);'
 assert (old in source) != (new in source), 'unknown owner publication site'
 site = old if old in source else new
 source = source.replace(site, site + '\n            host::published();', 1)
 site = 'free_node *next = head->next;'
-assert source.count(site) == 1
-source = source.replace(site, site + '\n            host::pop_read();', 1)
+if site in source:
+    source = source.replace(site, site + '\n            host::pop_read();', 1)
+else:
+    site = 'chunk = fl->pop(idx);'
+    assert source.count(site) == 1
+    source = source.replace(site, 'host::pop_read();\n        ' + site, 1)
 site = 'if (fl->ovf_next.compare_exchange_weak(c, c + class_size,'
 assert source.count(site) == 1
 source = source.replace(site, 'host::carve_read();\n        ' + site, 1)

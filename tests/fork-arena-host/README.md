@@ -15,6 +15,8 @@ ulimit -c 0
 python3 tests/fork-arena-host/run.py
 python3 tests/fork-arena-host/run.py --sanitize address,undefined
 python3 tests/fork-arena-host/run.py --sanitize thread
+# Deliberate negative: must fail live-pointer uniqueness (case -6, runner 1).
+python3 tests/fork-arena-host/run.py --remove-pop-lock descriptor-lock
 ```
 
 The tests use the real production fixed addresses. TSan may reject those
@@ -37,7 +39,7 @@ validate OSv mutex waiter allocation or scheduler implementation.
   the larger live allocation.
 - `publish-free`: pause growth just after publishing end; another thread carves
   and frees. The free must see the published mapped high-water and recycle.
-- `boundaries`: failed-map retry, existing carve with IRQs disabled, growth
+- `boundaries`: failed-map retry, carve rejection with IRQs disabled, growth
   fallback with IRQs/preemption disabled, mixed-size growth, exact final-window
   fit, exhaustion, quiescent teardown and slot/address-space-pointer reuse.
 - `threads`: four same-AS threads allocate mixed sizes over many regions; check
@@ -64,17 +66,37 @@ vma-order` with MMU source extracted from `add9441d9`: it must time out, while
 current source completes. Growth mutex acquisition **and unlock** assert that
 identity-heap scope is active.
 
-## Known independent failure — NOT fixed
+## ABA / COW regressions
 
-```sh
-python3 tests/fork-arena-host/run.py aba
-```
+`aba` fails on reviewed phase1 source (`1c17f7339`): slow pop reads A->B,
+second thread keeps B live and returns A, stale CAS republishes live B.
+The identity-cache implementation has no out-of-lock head/link observation;
+the hook pauses before pop instead, and the same competing allocations must
+leave B uniquely owned. This pre-pop control alone does not prove descriptor
+locking. The default `descriptor-lock` pauses after the descriptor index read
+inside the actual locked pop. A rival's failed host `try_lock` reports actual
+contention; the controller resumes the owner only after contention or rival
+completion, with no sleep-based success oracle. Both allocations must complete
+with distinct live pointers, and contention must have occurred.
+`--remove-pop-lock descriptor-lock` removes only pop's lock in the temporary
+translation unit: the rival completes before the suspended reader, which then
+reissues its live chunk and fails the uniqueness assertion. This is an intended
+failing invocation, not a test that converts any nonzero result into success.
+`recycle-stress` checks simultaneous live ownership and
+payload under 80,000 concurrent alloc/free operations.
 
-This intentionally fails on both the base and the FB02/FB03 fix. A slow pop reads
-A->B; a second thread pops A and B (keeping B live) and pushes A; the stale pop
-then republishes B. The next allocation returns the already-live B. Concurrent
-free-list operations still require a separate COW-safe fix. This case is not in
-the green default cases, and must not be represented as an allocator-wide pass.
+`readonly-free` holds the test VMA lock while freeing a read-only page; the
+old in-band link write SIGSEGVs, while fixed free writes identity metadata only.
+The header is intact and resident in this test; depopulated/protected/unmapped
+or arbitrary foreign allocations do not have a general VMA-held free guarantee.
+A second VMA claimant must progress. This is NOT an actual JVM/fileref callback
+or an OSv COW-fault schedule. `atomic-touch` protects the arena page PROT_NONE
+and checks both IRQ-off/preempt-off entry guards precede any header/link access.
+`cache-bound` frees 1025 chunks: exactly 1024 recycle, one is dropped, byte
+accounting counts accepted entries only, live pointers stay unique, and
+quiescent slot reset restores reuse. The fixed cache costs ~4 MiB BSS; dropped
+entries retain their mapping until AS teardown. This is a bounded correctness
+policy, not an unlimited-churn memory guarantee.
 
 ## Guest integration
 
@@ -83,8 +105,10 @@ the green default cases, and must not be represented as an allocator-wide pass.
 malloc, scheduler and MMU, with no injected scheduling hooks. Run on an enabled
 `conf_fork=1` test image with reclaim/recycling enabled, at least 1.5 GiB RAM and
 preferably at least two CPUs. It forces overflow while retaining live allocations,
-checks concurrent mixed-size allocation data, sequential recycling, and repeated
-child teardown. It does **not** force the publication interleavings, and it does
+checks concurrent live-pointer/payload recycling, parent/child COW free and
+IRQ-off/preempt-off direct arena rejection (global and overflow), concurrent
+mixed-size allocation data, sequential recycling, and repeated child teardown.
+Direct arena rejection is NOT a safe-public-malloc-fallback claim. It does **not** force the publication interleavings, and it does
 not claim to validate concurrent destruction of an AS with live threads. The
 allocator's release contract requires all AS users (including growth waiters) to
 have quiesced before the caller destroys page tables and releases the slot.

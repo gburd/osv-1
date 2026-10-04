@@ -34,10 +34,14 @@
 // addresses below phys_mem, so arena pages remain DMA-usable.
 //
 // The allocator is a simple segregated free-list.  ALL of its bookkeeping
-// (per-size-class free-list heads, the bump pointer) lives in kernel BSS, NOT
-// inside arena pages -- so managing the arena never faults an arena page and
-// never recurses back into malloc (the recursive-fault trap the first arena
-// prototype hit during fork's own page-table work).
+// (class heads, bounded recycle descriptors and bump pointer) lives in kernel
+// BSS, NOT inside arena pages. Recycle locks touch only that identity metadata;
+// allocation header writes may COW-fault AFTER unlocking. Free only reads the
+// allocation header, before locking; this requires an intact resident same-AS
+// allocation, not depopulated/protected/unmapped or arbitrary foreign memory.
+// Atomic-context allocation returns nullptr
+// and free drops recycling before any arena access. The 1024-entry/AS cache
+// costs ~4 MiB BSS; excess frees retain mapping space until AS teardown.
 // -----------------------------------------------------------------------------
 namespace fork_arena {
 
@@ -91,10 +95,11 @@ static inline bool contains(const void *p)
 }
 
 // Allocate `size` bytes with `alignment` from the arena; nullptr if it cannot
-// (too large, or arena exhausted -- caller falls back to the normal heap).
+// (atomic context, too large, or exhausted -- caller handles safe fallback).
 void *alloc(size_t size, size_t alignment);
 
-// Free an arena allocation (p must satisfy contains(p)).
+// Free an intact resident same-AS allocation (p must satisfy contains(p)).
+// Range membership alone is not header validity or general VMA-lock safety.
 void free(void *p);
 
 // Reclaim the per-address-space free-list slot for a dying fork child address
@@ -121,7 +126,7 @@ void overflow_stats(unsigned long *committed, unsigned long *recycled,
                     unsigned long *foreign_frees, unsigned long *live_mapped);
 unsigned long overflow_mapped_for(void *as);
 
-// Usable size of an arena allocation (p must satisfy contains(p)).
+// Usable bytes of an intact resident same-AS allocation (contains(p) required).
 size_t usable_size(void *p);
 
 // Largest request the arena will service; larger requests fall through to the
