@@ -38,6 +38,8 @@
 
 #include <osv/device.h>
 #include <osv/uio.h>
+#include <osv/vnode.h>
+#include <fcntl.h>
 #include <osv/debug.hh>
 
 #include <dev/random/randomdev.h>
@@ -63,9 +65,9 @@ random_read(struct device *dev, struct uio *uio, int ioflags)
     char random_buf[PAGE_SIZE];
 
     // Blocking logic
-    if (!random_adaptor->seeded) {
-        error = (*random_adaptor->block)(ioflags);
-    }
+    // Device I/O uses IO_*; the BSD adaptor uses open(2) flags. Always
+    // check readiness under its mutex, rather than racing a seeded load.
+    error = (*random_adaptor->block)((ioflags & IO_NONBLOCK) ? O_NONBLOCK : 0);
 
     if (!error) {
         while (uio->uio_resid > 0 && !error) {
