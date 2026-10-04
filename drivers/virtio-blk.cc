@@ -163,9 +163,13 @@ blk::blk(virtio_device& virtio_dev)
         }
         threads[qid] = t;
     }
-    //
-    // Use 1st thread when only single queue is available
-    auto single_thread = threads[0];
+    // A shared interrupt does not identify the completed queue. Capture the
+    // fully initialized thread list by value, as the handler outlives setup.
+    auto wake_all = [threads] {
+        for (auto* t : threads) {
+            t->wake_with_irq_disabled();
+        }
+    };
 
     // With VIRTIO_BLK_F_MQ, setup_queue() maps queue index i -> MSI-X entry i
     // (1:1), so a completion on queue i raises entry i's interrupt, not queue
@@ -199,28 +203,28 @@ blk::blk(virtio_device& virtio_dev)
         }
     };
 
-    int_factory.create_pci_interrupt = [this,single_thread](pci::device &pci_dev) {
+    int_factory.create_pci_interrupt = [this,wake_all](pci::device &pci_dev) {
         return new pci_interrupt(
             pci_dev,
             [=] { return this->ack_irq(); },
-            [=] { single_thread->wake_with_irq_disabled(); });
+            wake_all);
     };
 #endif
 
 #if CONF_drivers_mmio
 #ifdef __aarch64__
-    int_factory.create_spi_edge_interrupt = [this,single_thread]() {
+    int_factory.create_spi_edge_interrupt = [this,wake_all]() {
         return new spi_interrupt(
             gic::irq_type::IRQ_TYPE_EDGE,
             _dev.get_irq(),
             [=] { return this->ack_irq(); },
-            [=] { single_thread->wake_with_irq_disabled(); });
+            wake_all);
     };
 #else
-    int_factory.create_gsi_edge_interrupt = [this,single_thread]() {
+    int_factory.create_gsi_edge_interrupt = [this,wake_all]() {
         return new gsi_edge_interrupt(
             _dev.get_irq(),
-            [=] { if (this->ack_irq()) single_thread->wake_with_irq_disabled(); });
+            [=] { if (this->ack_irq()) wake_all(); });
     };
 #endif
 #endif
@@ -304,8 +308,8 @@ void blk::read_config()
 /*
  * req_done() — completion thread for single virtqueue.
  *
- * virtio-blk uses one interrupt per queue, so a completion landing on that queue
- * wakes its thread. It sleeps until this queue's used ring is non-empty,
+ * MSI-X wakes the completed queue's thread; shared interrupts wake all threads.
+ * Each thread sleeps until its own queue's used ring is non-empty,
  * then drains it. No lock needs to be held while the queue is drained,
  * as the req_done() for each queue is handled on different cpu, and also
  * is thread-safe when interacting with producer threads calling make_request()
