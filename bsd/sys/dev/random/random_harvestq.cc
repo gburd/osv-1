@@ -31,6 +31,7 @@
 __FBSDID("$FreeBSD$");
 
 #include "opt_random.h"
+#include <atomic>
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -61,12 +62,20 @@ __FBSDID("$FreeBSD$");
 
 #ifdef __OSV__
 #include <stddef.h>
+#include <atomic>
+#include <osv/mutex.h>
+#include <osv/irqlock.hh>
+#include <osv/spinlock.h>
 #include <sys/bus.h>
 #include <lockfree/unordered_ring_mpsc.hh>
 #endif
 
-/* <0 to end the kthread, 0 to let it run, 1 to flush the harvest queues */
-int random_kthread_control = 0;
+// Requests are sampled BEFORE draining. An ack covers only that snapshot,
+// never a request which arrived after the consumer passed a producer's ring.
+static std::atomic<uint64_t> flush_request{0}, flush_ack{0};
+static std::atomic<bool> stopping{true}, exited{false};
+static mutex flush_mutex;
+static np_spinlock admission_lock;
 
 static struct proc *random_kthread_proc;
 
@@ -79,7 +88,9 @@ random_kthread(void *arg)
 	event_proc_f entropy_processor = reinterpret_cast<event_proc_f>(arg);
 
 	/* Process until told to stop */
-	for (; random_kthread_control >= 0;) {
+	for (;;) {
+        const bool stop = stopping.load(std::memory_order_acquire);
+		auto request = flush_request.load(std::memory_order_acquire);
 		/*
 		 * Grab all the entropy events.
 		 * Drain entropy source records into a thread-local
@@ -100,32 +111,29 @@ random_kthread(void *arg)
 		 */
 		live_entropy_sources_feed(1, entropy_processor);
 
-		/*
-		 * If a queue flush was commanded, it has now happened,
-		 * and we can mark this by resetting the command.
-		 */
-
-		if (random_kthread_control == 1)
-			random_kthread_control = 0;
-
-#ifdef __OSV__
-		tsleep(&random_kthread_control, 0, "-", hz/10);
-#else
-		/* Work done, so don't belabour the issue */
-		msleep_spin_sbt(&random_kthread_control, &harvest_mtx,
-		    "-", SBT_1S/10, 0, C_PREL(1));
-#endif
-
+		flush_ack.store(request, std::memory_order_release);
+		if (stop) {
+			break;
+		}
+		bsd_pause("harvest", hz / 10);
 	}
-
-	random_set_wakeup_exit(&random_kthread_control);
+    exited.store(true, std::memory_order_release);
+    kthread_exit();
 	/* NOTREACHED */
 }
 
 void
 random_harvestq_init(event_proc_f cb)
 {
+    static std::atomic<bool> initialized{false};
+    if (initialized.exchange(true)) {
+        panic("harvest queue reinitialization is not supported");
+    }
+    exited.store(false, std::memory_order_relaxed);
+    flush_request.store(0, std::memory_order_relaxed);
+    flush_ack.store(0, std::memory_order_relaxed);
 	ring = new ring_t();
+    stopping.store(false, std::memory_order_release);
 
 	live_entropy_sources_init(NULL);
 
@@ -140,8 +148,27 @@ random_harvestq_init(event_proc_f cb)
 void
 random_harvestq_deinit(void)
 {
+    std::lock_guard<mutex> lock(flush_mutex);
+    // Rendezvous with every admitted producer. Never wait for the worker
+    // with IRQs disabled or while holding admission_lock. The worker samples
+    // stop before its final drain, so accepted records are not discarded.
+    {
+        irq_save_lock_type irq;
+        std::lock_guard<irq_save_lock_type> irq_guard(irq);
+        std::lock_guard<np_spinlock> guard(admission_lock);
+        // All accepted emplaces finished before the worker can see stop.
+        stopping.store(true, std::memory_order_release);
+    }
+    if (!ring) {
+        return;
+    }
+    while (!exited.load(std::memory_order_acquire)) {
+        bsd_pause("harvest exit", hz / 10);
+    }
 	delete ring;
-	live_entropy_sources_deinit(NULL);
+    ring = nullptr;
+    // Registry is process-lifetime: exported source registration/feed calls
+    // must not race destruction of its lock. Device unload is not supported.
 }
 
 /*
@@ -154,12 +181,42 @@ random_harvestq_deinit(void)
  * check a few lines below. This includes the "always-on" sources
  * like the Intel "rdrand" or the VIA Nehamiah "xstore" sources.
  */
-void
-random_harvestq_internal(u_int64_t somecounter, const void *entropy,
+bool
+random_harvestq_try(u_int64_t somecounter, const void *entropy,
     u_int count, u_int bits, enum esource origin)
 {
 	KASSERT(origin >= RANDOM_START && origin < ENTROPYSOURCE,
 	    ("random_harvest_internal: origin %d invalid\n", origin));
 
-	ring->emplace(somecounter, entropy, count, bits, origin);
+    irq_save_lock_type irq;
+    std::lock_guard<irq_save_lock_type> irq_guard(irq);
+    std::lock_guard<np_spinlock> guard(admission_lock);
+    if (stopping.load(std::memory_order_acquire)) {
+        return false;
+    }
+	return ring->emplace(somecounter, entropy, count, bits, origin);
+}
+
+void
+random_harvestq_internal(u_int64_t counter, const void *entropy,
+    u_int count, u_int bits, enum esource origin)
+{
+    // Interrupt harvesting is best effort: full rings drop the event, with
+    // no credit. Never wait in an interrupt for the consumer to make room.
+    (void)random_harvestq_try(counter, entropy, count, bits, origin);
+}
+
+int
+random_harvestq_flush(void)
+{
+    std::lock_guard<mutex> lock(flush_mutex);
+    if (stopping.load(std::memory_order_acquire)) {
+        return ENXIO;
+    }
+    auto request = flush_request.load(std::memory_order_relaxed) + 1;
+    flush_request.store(request, std::memory_order_release);
+    while (flush_ack.load(std::memory_order_acquire) != request) {
+        bsd_pause("harvest flush", hz / 10);
+    }
+    return 0;
 }
