@@ -99,7 +99,9 @@ void free(void *p);
 
 // Reclaim the per-address-space free-list slot for a dying fork child address
 // space.  Called from mmu::destroy_address_space so a later process can reuse
-// the slot.  @as is the opaque mmu::address_space* being destroyed.
+// the slot.  @as is the opaque mmu::address_space* being destroyed. All users
+// of that AS, including allocator calls and growth waiters, must be quiescent
+// before page-table destruction and this call; slot reuse is not a lifetime pin.
 void release_as(void *as);
 
 // Leak-probe (OSV_LEAK_PROBE): bytes carved off the monotonic global bump

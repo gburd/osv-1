@@ -15,6 +15,7 @@
 #include <osv/align.hh>
 #include <osv/debug.hh>
 #include <osv/spinlock.h>
+#include <osv/mutex.h>
 #include <atomic>
 #include <cstring>
 #include <cstdlib>
@@ -234,7 +235,7 @@ struct as_freelist {
     // release_as so a recycled slot never inherits a dead child's overflow VA.
     std::atomic<uintptr_t>  ovf_next{0};      // next byte to carve in current region
     std::atomic<uintptr_t>  ovf_end{0};       // end of current region (0 = none yet)
-    spinlock                ovf_lock;         // guards mapping a fresh region (rare)
+    mutex                   ovf_lock;       // serializes growth, never the fast carve
     // CHURN FIX: bytes of this AS's overflow WINDOW mapped so far.  Doubles as
     // the map cursor (windows are filled monotonically) and as the high-water
     // that free() range-checks a candidate pointer against -- both reads are
@@ -249,6 +250,10 @@ spinlock g_slot_lock;   // guards slot acquisition only (rare: once per AS)
 // only if the table is full (caller then runs bump-only).
 as_freelist *slot_for(void *as)
 {
+    // nullptr is the free-slot sentinel, never an address-space identity.
+    if (!as) {
+        return nullptr;
+    }
     // note: O(max_as_slots) linear scan per alloc/free; owners pack from
     // index 0 so the common case is a short scan. Swap for a hash keyed on
     // (address_space*) if the process count ever makes this measurable.
@@ -267,9 +272,7 @@ as_freelist *slot_for(void *as)
         }
     }
     for (unsigned i = 0; i < max_as_slots; i++) {
-        void *expect = nullptr;
-        if (g_as_freelists[i].owner.compare_exchange_strong(
-                expect, as, std::memory_order_acq_rel)) {
+        if (!g_as_freelists[i].owner.load(std::memory_order_relaxed)) {
             for (unsigned c = 0; c < num_classes; c++) {
                 g_as_freelists[i].heads[c].store(nullptr, std::memory_order_relaxed);
             }
@@ -280,6 +283,8 @@ as_freelist *slot_for(void *as)
             // CHURN FIX: and no mapped window (the previous owner's mappings
             // died with its page tables; this AS must map its own).
             g_as_freelists[i].ovf_mapped.store(0, std::memory_order_relaxed);
+            // g_slot_lock serializes writers; publish only AFTER initialization.
+            g_as_freelists[i].owner.store(as, std::memory_order_release);
             return &g_as_freelists[i];
         }
     }
@@ -443,86 +448,67 @@ bool ready()
     return g_ready.load(std::memory_order_acquire);
 }
 
-// LEAK #2 REAL FIX: carve a class_size chunk from address space @fl's private
-// overflow region. Lock-free bump within the current region; when it is full,
-// map a fresh COW-private ovf_region_sz region (slot 97) under the per-AS
-// ovf_lock. map_anon runs with no arena lock held and preemption on (app-thread
-// context), so no illegal fault; mmap_populate keeps it eager so a bump-carved
-// page is already backed (alloc never demand-faults from an IRQs-off context).
-static void *overflow_alloc(as_freelist *fl, size_t class_size)
+// Read end before next: observing a newly published end also observes its
+// initial next. next is strictly increasing across regions, including when a
+// large request abandons a small tail. Thus a stale CAS cannot succeed after
+// growth, and an old end cannot authorize a carve in a newer region.
+static void *overflow_carve(as_freelist *fl, size_t class_size)
 {
-    // CHURN FIX: this AS's own disjoint VA window, so an overflow pointer's
-    // owner is recoverable by arithmetic in free() (see ovf_window_sz).
-    const unsigned slot = (unsigned)(fl - &g_as_freelists[0]);
-    const uintptr_t win_base = ovf_slot_base + (uintptr_t)slot * ovf_window_sz;
-    const uintptr_t win_end  = win_base + ovf_window_sz;
     for (;;) {
         uintptr_t end = fl->ovf_end.load(std::memory_order_acquire);
         uintptr_t c = fl->ovf_next.load(std::memory_order_relaxed);
-        if (end && c + class_size <= end) {
-            if (fl->ovf_next.compare_exchange_weak(c, c + class_size,
-                    std::memory_order_acq_rel, std::memory_order_relaxed)) {
-                return reinterpret_cast<void*>(c);
-            }
-            continue;   // lost the race, retry
-        }
-        // Current region full (or none). Map a fresh COW-private region. Do the
-        // map_anon OUTSIDE fl->ovf_lock (map_anon takes the vma-list rwlock and
-        // allocates a vma -> nested malloc; holding ovf_lock across that risks a
-        // lock-order inversion). Only the publish step is under the lock.
-        //
-        // EAGER-POPULATE INVARIANT (load-bearing): the arena's alloc() may be
-        // entered from an IRQs-off / preemption-off context, where a demand
-        // fault would abort. The already-mapped bump above is safe there (the
-        // region is mmap_populate eager, so a carved page is already backed).
-        // But MAPPING a fresh region calls map_anon -> takes a mutex / may sleep
-        // -> only legal when preemptable with IRQs on. In a non-preemptable
-        // context we therefore do NOT map; we return nullptr so the caller falls
-        // back to the identity heap for this ONE allocation (a bounded miss,
-        // not per-fork). This preserves the eager-populate correctness property.
-        if (!sched::preemptable() || !arch::irq_enabled()) {
+        if (!end || c > end || class_size > end - c) {
             return nullptr;
         }
-        size_t rsz = ovf_region_sz;
-        if (class_size > rsz) {
-            rsz = align_up(class_size, ovf_region_sz);   // class_size <= max_alloc (2 MiB)
+        if (fl->ovf_next.compare_exchange_weak(c, c + class_size,
+                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            return reinterpret_cast<void*>(c);
         }
-        // CHURN FIX: map the next region INSIDE this AS's window, at a fixed VA
-        // (mmap_fixed), so ovf_owner_slot() of every chunk resolves to `slot`.
-        uintptr_t want = win_base + fl->ovf_mapped.load(std::memory_order_relaxed);
-        if (want + rsz > win_end) {
-            return nullptr;   // window exhausted: caller uses the identity heap
-        }
-        void *v = mmu::map_anon(reinterpret_cast<void*>(want), rsz,
-                                mmu::mmap_fixed | mmu::mmap_populate, mmu::perm_rw);
-        uintptr_t base = reinterpret_cast<uintptr_t>(v);
-        if (!v || base < win_base || base + rsz > win_end) {
-            // map failed, or landed outside OUR window (ovf_owner_slot would
-            // misattribute it, breaking the same-AS-only recycling invariant).
-            // Bail: caller falls back to the identity heap for this one
-            // allocation (bounded miss; still correct, just not reclaimed).
-            if (v) {
-                mmu::munmap(v, rsz);
-            }
-            return nullptr;
-        }
-        {
-            SCOPE_LOCK(fl->ovf_lock);
-            uintptr_t cend = fl->ovf_end.load(std::memory_order_acquire);
-            uintptr_t cnext = fl->ovf_next.load(std::memory_order_relaxed);
-            if (cend && cnext + class_size <= cend) {
-                // someone else's region has room; use it -- discard ours below
-            } else {
-                fl->ovf_next.store(base + class_size, std::memory_order_relaxed);
-                fl->ovf_end.store(base + rsz, std::memory_order_release);
-                fl->ovf_mapped.store(base + rsz - win_base, std::memory_order_release);
-                // FOOTPRINT PROBE: mmap_populate commits this eagerly -- real RAM.
-                g_ovf_committed.fetch_add(rsz, std::memory_order_relaxed);
-                return reinterpret_cast<void*>(base);
-            }
-        }
-        mmu::munmap(v, rsz);   // discard our redundant region, retry the bump
     }
+}
+
+static void *overflow_alloc(as_freelist *fl, size_t class_size)
+{
+    if (void *chunk = overflow_carve(fl, class_size)) {
+        return chunk;
+    }
+    // An eager, already mapped carve is safe here; taking a sleepable growth
+    // mutex or mapping is not. Preserve the identity-heap fallback.
+    if (!sched::preemptable() || !arch::irq_enabled()) {
+        return nullptr;
+    }
+    // Cover mutex waiter allocation as well as map_anon's nested allocations.
+    // Neither may recurse into this arena; waiters must be AS-coherent too.
+    kernel_heap_scope kh;
+    SCOPE_LOCK(fl->ovf_lock);
+    if (void *chunk = overflow_carve(fl, class_size)) {
+        return chunk;
+    }
+
+    const unsigned slot = unsigned(fl - &g_as_freelists[0]);
+    const uintptr_t win_base = ovf_slot_base + uintptr_t(slot) * ovf_window_sz;
+    size_t rsz = align_up(class_size, ovf_region_sz);
+    uintptr_t mapped = fl->ovf_mapped.load(std::memory_order_relaxed);
+    if (rsz > ovf_window_sz - mapped) {
+        return nullptr;
+    }
+    uintptr_t want = win_base + mapped;
+    // Serialize selection, mapping AND publication. mmap_fixed replaces any
+    // old mapping at want; racing maps cannot safely be discarded afterwards.
+    void *v = mmu::map_anon(reinterpret_cast<void*>(want), rsz,
+                            mmu::mmap_fixed | mmu::mmap_populate, mmu::perm_rw);
+    if (reinterpret_cast<uintptr_t>(v) != want) {
+        if (v) {
+            mmu::munmap(v, rsz);
+        }
+        return nullptr; // unchanged cursor, so a failed mapping can be retried
+    }
+    fl->ovf_next.store(want + class_size, std::memory_order_relaxed);
+    // Publish the free() range check before enabling fast carves via end.
+    fl->ovf_mapped.store(mapped + rsz, std::memory_order_release);
+    fl->ovf_end.store(want + rsz, std::memory_order_release);
+    g_ovf_committed.fetch_add(rsz, std::memory_order_relaxed);
+    return v;
 }
 
 void *alloc(size_t size, size_t alignment)
@@ -716,9 +702,12 @@ void release_as(void *as)
     // the dying AS and its physical pages are freed with the page tables, so
     // nothing here dereferences the child's now-gone memory -- we only clear
     // the shared BSS slot).  No teardown needed for the shared bump pointer.
-    if (!g_ready.load(std::memory_order_acquire)) {
+    if (!as || !g_ready.load(std::memory_order_acquire)) {
         return;
     }
+    // The caller must have quiesced ALL users of this AS, including growth
+    // mutex waiters. Its page tables have already been destroyed. The writer
+    // lock prevents a new owner from claiming this slot until reset completes.
     SCOPE_LOCK(g_slot_lock);
     for (unsigned i = 0; i < max_as_slots; i++) {
         if (g_as_freelists[i].owner.load(std::memory_order_relaxed) == as) {
