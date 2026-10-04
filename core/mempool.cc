@@ -2397,6 +2397,13 @@ static inline void* std_malloc(size_t size, size_t alignment)
                                        memory::alloc_page());
         trace_memory_malloc_page(ret, size, mmu::page_size, alignment);
     } else {
+#if CONF_fork
+        // The large fallback may map COW pages or wait for memory. Arena
+        // rejection does not make it safe in IRQ-off/nonpreemptable context.
+        if (smp_allocator && (!sched::preemptable() || !arch::irq_enabled())) {
+            return libc_error_ptr<void *>(ENOMEM);
+        }
+#endif
         ret = memory::malloc_large(size, alignment, true, false);
     }
 #if CONF_memory_tracker
@@ -2670,12 +2677,14 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
     if (!is_power_of_two(alignment)) {
         return EINVAL;
     }
+    int saved_errno = errno;
 #if CONF_memory_debug == 0
     void* ret = std_malloc(size, alignment);
 #else
     void* ret = dbg::malloc(size, alignment);
 #endif
     trace_memory_malloc(ret, size, alignment);
+    errno = saved_errno; // POSIX returns the error number without changing errno.
     if (!ret) {
         return ENOMEM;
     }

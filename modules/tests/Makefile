@@ -196,7 +196,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-fork-serial.so \
 	tst-fork-sigchld-latch.so \
 	tst-fork-arena-freelist.so \
-	tst-fork-arena-concurrency.so \
+	tst-fork-arena-concurrency.so tst-fork-atomic-malloc.so \
 	tst-fork-irq-cow.so \
 	tst-fork-shared-race.so \
 	tst-fork-timer-park-stress.so \
@@ -476,3 +476,5 @@ clean:
 ifneq ($(MAKECMDGOALS),clean)
 include $(shell test -d $(out)/tests && find $(out)/tests -name '*.d')
 endif
+
+$(out)/tests/tst-fork-atomic-malloc.o: CXXFLAGS += -fno-builtin
