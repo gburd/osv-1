@@ -14,6 +14,8 @@
 #include <vector>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <string>
+#include <sys/sysmacros.h>
 
 namespace host {
 thread_local int tid = 0;
@@ -23,6 +25,8 @@ std::atomic<bool> published_owner{false}, reader_done{false};
 std::atomic<bool> first_mapping{false}, contender{false}, first_done{false};
 std::atomic<bool> read_head{false}, aba_done{false};
 std::atomic<bool> carve_paused{false}, grown{false}, end_visible{false}, freed{false};
+std::mutex vma_lock;
+std::atomic<bool> vma_held{false}, growth_mapping{false};
 bool fail_map = false;
 void wait(std::atomic<bool>& flag) {
     while (!flag.load()) std::this_thread::yield();
@@ -58,7 +62,10 @@ struct mutex {
         if (host::mode == 2 && host::tid == 2) host::contender = true;
         m.lock();
     }
-    void unlock() { m.unlock(); }
+    void unlock() {
+        assert(fork_arena::force_kernel_heap); // includes wake/waiter destruction
+        m.unlock();
+    }
 };
 #define JOIN_(a,b) a##b
 #define JOIN(a,b) JOIN_(a,b)
@@ -81,6 +88,11 @@ void* map_anon(const void* want, size_t size, int flags, int perm) {
             host::contender = true;
             host::wait(host::first_done);
         }
+    }
+    std::unique_lock<std::mutex> vma_guard(host::vma_lock, std::defer_lock);
+    if (host::mode == 6) {
+        host::growth_mapping = true;
+        vma_guard.lock();
     }
     ++host::maps;
     if (host::fail_map) { host::fail_map = false; return nullptr; }

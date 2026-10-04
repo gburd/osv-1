@@ -42,6 +42,11 @@ validate OSv mutex waiter allocation or scheduler implementation.
   fit, exhaustion, quiescent teardown and slot/address-space-pointer reuse.
 - `threads`: four same-AS threads allocate mixed sizes over many regions; check
   every live byte and pointer uniqueness, then sequential free/recycling.
+- `vma-order`: compile the actual `procfs_maps()` body with a test VMA-lock
+  facade and formatting allocator routed through the real arena. Force a VMA
+  reader to allocate while a grower waits for VMA write access; completion and
+  formatted output must remain correct. Platform locks are substituted: this
+  is a lock-order witness, not guest scheduler proof.
 - `null`: a null AS must not match the free-slot sentinel.
 
 For the original regressions, extract the immutable base and run the same tests:
@@ -54,6 +59,10 @@ python3 tests/fork-arena-host/run.py --source /tmp/arena-before.cc publication c
 These four cases must fail on the base; `boundary-cas` and `boundaries` also test
 properties that already held before the fix. A crash in `collision` on the base
 is expected: its losing mapper unmaps the published allocation before returning.
+For R1, keep the fixed arena source but pass `--mmu-source /tmp/mmu-before.cc
+vma-order` with MMU source extracted from `add9441d9`: it must time out, while
+current source completes. Growth mutex acquisition **and unlock** assert that
+identity-heap scope is active.
 
 ## Known independent failure — NOT fixed
 

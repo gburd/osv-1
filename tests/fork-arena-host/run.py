@@ -17,7 +17,8 @@ root = pathlib.Path(__file__).resolve().parents[2]
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source', type=pathlib.Path, default=root / 'core/fork_arena.cc')
 p.add_argument('--sanitize', default='')
-p.add_argument('cases', nargs='*', default=['publication', 'collision', 'boundary-cas', 'publish-free', 'boundaries', 'threads', 'null'])
+p.add_argument('--mmu-source', type=pathlib.Path, default=root / 'core/mmu.cc')
+p.add_argument('cases', nargs='*', default=['publication', 'collision', 'boundary-cas', 'publish-free', 'boundaries', 'threads', 'null', 'vma-order'])
 a = p.parse_args()
 source = a.source.read_text()
 old = 'expect, as, std::memory_order_acq_rel)) {'
@@ -34,6 +35,10 @@ source = source.replace(site, 'host::carve_read();\n        ' + site, 1)
 site = re.search(r'fl->ovf_end.store\([^;]+std::memory_order_release\);', source)
 assert site
 source = source[:site.end()] + '\n    host::end_published();' + source[site.end():]
+mmu_source = a.mmu_source.read_text()
+start = mmu_source.index('std::string procfs_maps()')
+end = mmu_source.index('\n}\n', start) + 2
+procfs = mmu_source[start:end]
 strip = lambda s: re.sub(r'^#include[^\n]*', '', s, flags=re.M)
 with tempfile.TemporaryDirectory(prefix='fork-arena-host-') as tmp:
     tu = pathlib.Path(tmp) / 'arena.cc'
@@ -41,6 +46,8 @@ with tempfile.TemporaryDirectory(prefix='fork-arena-host-') as tmp:
     tu.write_text((root / 'tests/fork-arena-host/platform.hh').read_text() + '\n' +
                   strip((root / 'include/osv/fork_arena.hh').read_text()) + '\n' +
                   '#line 1 "core/fork_arena.cc"\n' + strip(source) + '\n' +
+                  (root / 'tests/fork-arena-host/vma.hh').read_text() + '\n' +
+                  'namespace mmu {\n' + procfs + '\n}\n' +
                   (root / 'tests/fork-arena-host/check.cc').read_text())
     cmd = ['g++', '-std=gnu++17', '-g', '-O1', '-Wall', '-Wextra', '-Werror',
            '-pthread', str(tu), '-o', str(exe)]
@@ -50,7 +57,11 @@ with tempfile.TemporaryDirectory(prefix='fork-arena-host-') as tmp:
     subprocess.run(cmd, check=True)
     failed = False
     for case in a.cases:
-        result = subprocess.run([str(exe), case], timeout=20)
-        print(case, 'exit', result.returncode, flush=True)
-        failed |= result.returncode != 0
+        try:
+            result = subprocess.run([str(exe), case], timeout=10)
+            print(case, 'exit', result.returncode, flush=True)
+            failed |= result.returncode != 0
+        except subprocess.TimeoutExpired:
+            print(case, 'FAIL: timeout (possible lock inversion)', flush=True)
+            failed = True
     raise SystemExit(int(failed))

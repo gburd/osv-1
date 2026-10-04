@@ -1867,6 +1867,12 @@ public:
         return true;
     }
     void intermediate_page_post(hw_ptep<1> ptep, uintptr_t offset) {
+#if CONF_fork
+        // std::function may allocate before rcu_defer is entered. Its closure
+        // is consumed by a kernel RCU thread and must not grow the arena under
+        // the VMA lock on munmap/MADV_DONTNEED.
+        fork_arena::kernel_heap_scope kh;
+#endif
         osv::rcu_defer([](void *page) { memory::free_page(page); }, phys_to_virt(ptep.read().addr()));
         ptep.write(make_empty_pte<1>());
     }
@@ -2923,6 +2929,12 @@ void* mremap(void* old_addr, size_t old_size, size_t new_size, unsigned flags)
         // through to the move path.
         bool grew = false;
         {
+#if CONF_fork
+            // The new VMA/page provider belongs to kernel mapping metadata and
+            // can be destroyed by the AS0 reaper. Never allocate it from the
+            // arena while holding the VMA lock (arena growth takes that lock).
+            fork_arena::kernel_heap_scope kh;
+#endif
             PREVENT_STACK_PAGE_FAULT
             WITH_LOCK(vma_list_mutex.for_write()) {
                 if (range_is_free(old_end, old_end + grow)) {
@@ -3598,6 +3610,11 @@ jvm_balloon_vma::~jvm_balloon_vma()
 
 ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
 {
+#if CONF_fork
+    // Only balloon VMAs/range bookkeeping are allocated here; the Java heap
+    // pages are supplied by the caller, not allocated through malloc.
+    fork_arena::kernel_heap_scope kh;
+#endif
     auto addr = align_up(jvm_addr, align);
     auto start = reinterpret_cast<uintptr_t>(addr);
 
@@ -3758,6 +3775,11 @@ void file_vma::split(uintptr_t edge)
 
 error file_vma::sync(uintptr_t start, uintptr_t end)
 {
+#if CONF_fork
+    // dirty_page_sync's queue and filesystem writeback buffers are kernel
+    // bookkeeping, not the mapped user pages. Callers hold the VMA lock.
+    fork_arena::kernel_heap_scope kh;
+#endif
     if (!has_flags(mmap_shared))
         return make_error(ENOMEM);
 
@@ -4011,6 +4033,12 @@ error mincore(const void *addr, size_t length, unsigned char *vec)
 
 std::string procfs_maps()
 {
+#if CONF_fork
+    // The procfs snapshot is kernel file data, not a COW application object.
+    // Formatting under the VMA read lock must not enter arena growth (which
+    // takes the VMA write lock). Keep the returned string identity-backed too.
+    fork_arena::kernel_heap_scope kh;
+#endif
     std::string output;
     WITH_LOCK(vma_list_mutex.for_read()) {
         for (auto& vma : vma_list) {

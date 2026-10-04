@@ -189,6 +189,19 @@ static void aba()
     assert(alloc(32, 16) != live); // Known independent Treiber ABA, NOT fixed.
 }
 
+static void vma_order()
+{
+    slot_for(mmu::current_address_space());
+    host::mode = 6;
+    std::string maps;
+    std::thread reader([&] { maps = mmu::procfs_maps(); });
+    host::wait(host::vma_held);
+    std::thread grower([] { assert(alloc(64, 16)); });
+    reader.join();
+    grower.join();
+    assert(maps == "1000-2000 rw-p 00000000 00:00 0\n");
+}
+
 int main(int argc, char** argv)
 {
     assert(argc == 2);
@@ -200,6 +213,7 @@ int main(int argc, char** argv)
     else if (!strcmp(argv[1], "boundaries")) boundaries();
     else if (!strcmp(argv[1], "threads")) threads();
     else if (!strcmp(argv[1], "null")) assert(slot_for(nullptr) == nullptr);
+    else if (!strcmp(argv[1], "vma-order")) vma_order();
     else if (!strcmp(argv[1], "aba")) aba();
     else return 2;
     puts("PASS");
