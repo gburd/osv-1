@@ -219,6 +219,16 @@ internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
 	tst-threadcomplete.so tst-tracepoint.so tst-unordered-ring-mpsc.so \
 	tst-vfs.so tst-wait-for.so tst-without-namespace.so
 
+# The 9P client (fs/9p) is in the kernel only with conf_fs_9p=1 and its TCP
+# transport only with conf_fs_9p_tcp=1 (conf/kconfig/fs). Like conf_zfs, they
+# reach this Makefile via the environment (scripts/build exports every
+# name=value build argument). The tests call p9:: functions in the kernel,
+# so they are also internal-API tests.
+ifeq ($(conf_fs_9p),1)
+tests += tst-9p-wire.so
+internal-api-tests += tst-9p-wire.so
+endif
+
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
 endif
