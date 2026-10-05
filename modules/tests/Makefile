@@ -66,6 +66,12 @@ $(out)/tests/string_utils.o: $(src)/core/string_utils.cc
 $(out)/tests/tst-string-utils.so: $(out)/tests/tst-string-utils.o $(out)/tests/string_utils.o
 	$(call quiet, $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(out)/tests/string_utils.o $(LIBS), LD tests/tst-string-utils.so)
 
+$(out)/tests/9p_codec.o: $(src)/fs/9p/codec.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX fs/9p/codec.cc => tests/9p_codec.o)
+$(out)/tests/tst-9p-wire.so: $(out)/tests/tst-9p-wire.o $(out)/tests/9p_codec.o
+	$(call quiet, $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(out)/tests/9p_codec.o $(LIBS), LD tests/tst-9p-wire.so)
+
 $(out)/tests/tst-reloc.o: CFLAGS:=$(subst -fPIC,-fpie,$(CFLAGS))
 $(out)/tests/tst-reloc.so: $(src)/tests/tst-reloc.c
 	$(call quiet, $(CC) $(CFLAGS) $(LDFLAGS) -pie -o $@ $< $(LIBS), LD tests/tst-reloc.so)
@@ -196,7 +202,8 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-fs-bench.so tst-pthread-create.so \
 	misc-futex-perf.so misc-syscall-perf.so tst-brk.so tst-reloc.so \
 	misc-vdso-perf.so tst-string-utils.so tst-elf-circular-reloc.so \
-	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so
+	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so \
+	tst-9p-wire.so
 #	tst-f128.so \
 
 # The OpenZFS-userspace-API tests only build/run under conf_zfs=openzfs (they
