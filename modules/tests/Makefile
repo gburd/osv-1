@@ -217,7 +217,7 @@ internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
 	tst-rcu-hashtable.so tst-rcu-list.so tst-run.so tst-sampler.so \
 	tst-sem-timed-wait.so tst-small-malloc.so tst-solaris-taskq.so \
 	tst-threadcomplete.so tst-tracepoint.so tst-unordered-ring-mpsc.so \
-	tst-vfs.so tst-wait-for.so tst-without-namespace.so
+	tst-vfs.so tst-rename-failure.so tst-wait-for.so tst-without-namespace.so
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
@@ -311,7 +311,7 @@ $(out)/tests/tst-tls-gold.so: \
 	$(makedir)
 	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -D__SHARED_OBJECT__=1 -shared -o $@ $< tests/libtls_gold.so, CXX tests/tst-tls.cc)
 
-common-boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
+common-boost-tests := tst-vfs.so tst-rename-failure.so tst-libc-locking.so misc-fs-stress.so \
 	misc-bdev-write.so misc-bdev-wlatency.so misc-bdev-rw.so \
 	tst-promise.so tst-dlfcn.so tst-stat.so tst-wait-for.so \
 	tst-bsd-tcp1.so tst-bsd-tcp1-zsnd.so tst-bsd-tcp1-zrcv.so \
