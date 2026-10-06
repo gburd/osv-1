@@ -243,6 +243,8 @@ endif
 ifeq ($(conf_fs_9p),1)
 tests += tst-9p-wire.so
 internal-api-tests += tst-9p-wire.so
+tests += tst-9p-session-state.so
+internal-api-tests += tst-9p-session-state.so
 endif
 
 ifeq ($(arch),x64)
