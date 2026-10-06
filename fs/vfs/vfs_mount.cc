@@ -144,6 +144,7 @@ sys_mount(const char *dev, const char *dir, const char *fsname, int flags, const
         goto err1;
     }
     mp->m_count = 0;
+    mp->m_lookups = 0;
     mp->m_op = fs->vs_op;
     mp->m_flags = flags;
     mp->m_dev = device;
@@ -268,6 +269,30 @@ found:
         goto out;
     }
 
+    /*
+     * Refuse while the mount has users. A lookup between vfs_findroot()
+     * and its first dentry reference holds m_lookups. Open files, the
+     * working directory, file mappings that keep their file, submounts
+     * (through m_covered) and any other held dentry reference the root
+     * dentry through the dentry parent chain, so m_root->d_refcnt is
+     * above the mount's own reference. Raising it from 1 requires a
+     * vfs_findroot() pin, which needs mount_lock, so a value of 1 read
+     * here with no pins cannot change under us.
+     *
+     * Not every holder has a dentry: the page cache keeps a bare vnode
+     * reference for dirty shared pages after munmap() and close(). Only
+     * filesystems that check m_count themselves (bsd ZFS, NFS) refuse
+     * that case; ext, openzfs and virtiofs do not.
+     *
+     * MNT_FORCE keeps its existing meaning: unmount_rootfs() relies on it
+     * at shutdown, when loaded objects still hold their files open.
+     */
+    if (!(flags & MNT_FORCE) &&
+        (mp->m_lookups != 0 || dentry_refcnt(mp->m_root) > 1)) {
+        error = EBUSY;
+        goto out;
+    }
+
     if ((error = VFS_UNMOUNT(mp, flags)) != 0)
         goto out;
     mount_list.remove(mp);
@@ -387,6 +412,10 @@ count_match(const char *path, char *mount_root)
  * @path: full path.
  * @mp: mount point to return.
  * @root: pointer to root directory in path.
+ *
+ * On success the mount is pinned against unmount until the caller
+ * calls vfs_putroot(). Callers hold a dentry of the mount before
+ * releasing the pin if they keep using it.
  */
 int
 vfs_findroot(const char *path, struct mount **mp, char **root)
@@ -411,8 +440,20 @@ vfs_findroot(const char *path, struct mount **mp, char **root)
     *root = (char *)(path + max_len);
     if (**root == '/')
         (*root)++;
+    m->m_lookups++;
     *mp = m;
     return 0;
+}
+
+/*
+ * Release a pin taken by vfs_findroot().
+ */
+void
+vfs_putroot(struct mount *mp)
+{
+    SCOPE_LOCK(mount_lock);
+    assert(mp->m_lookups > 0);
+    mp->m_lookups--;
 }
 
 /*
