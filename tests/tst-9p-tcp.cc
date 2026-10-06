@@ -26,6 +26,15 @@
 #include <thread>
 #include <vector>
 
+#ifdef __OSV__
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <osv/sched.hh>
+#endif
+
 using p9::bytes;
 using p9::frame;
 using namespace std::chrono;
@@ -95,10 +104,13 @@ public:
     mutex mtx;
     condvar cv;
 
+    // Released while a transport thread is still inside it: fail now,
+    // before that thread touches freed memory.
     ~script() override
     {
         if (inside) {
             destroyed_inside = true;
+            require(false, "stream released only after the receiver exits");
         }
     }
     int read(uint8_t* p, size_t n, size_t& done) override
@@ -148,16 +160,21 @@ public:
         }
         return 0;
     }
+    // A wait woken by close() also returns close_lag later.
     int wait(bool rd, p9::deadline d) override
     {
         if (!rd && wpause.count()) {
             std::this_thread::sleep_for(wpause);
         }
+        ++inside;
+        int rc = 0;
+        bool lag = false;
         WITH_LOCK(mtx) {
             while (!closed
                    && (rd ? in.empty() && !eof && !reset : wblock)) {
                 if (osv::clock::uptime::now() >= d) {
-                    return ETIMEDOUT;
+                    rc = ETIMEDOUT;
+                    break;
                 }
                 if (d == p9::deadline::max()) {
                     cv.wait(&mtx);
@@ -165,8 +182,13 @@ public:
                     cv.wait(&mtx, d);
                 }
             }
+            lag = closed;
         }
-        return 0;
+        if (lag) {
+            std::this_thread::sleep_for(close_lag);
+        }
+        --inside;
+        return rc;
     }
     void close() override
     {
@@ -551,6 +573,8 @@ static void failures()
              hdr[1] = uint8_t((msize + 1) >> 8);
              s.give(hdr);
          }},
+        {"stream EINPROGRESS", EIO,
+         [](script& s, const std::vector<frame>&) { s.end(EINPROGRESS); }},
         {"unknown tag", EPROTO,
          [](script& s, const std::vector<frame>& f) {
              frame a = answer(f[0]);
@@ -640,14 +664,308 @@ static void shutdown_joins()
     std::puts("PASS: shutdown wakes and joins");
 }
 
-int main()
+// Destroying the transport directly, with the receiver blocked in the
+// stream, joins the receiver before the stream is released.
+static void destroy_joins()
 {
-    fragmentation();
-    interleaving();
-    send_deadline();
-    failures();
-    flush_retires();
-    shutdown_joins();
+    destroyed_inside = false;
+    script* s = new script;
+    s->close_lag = milliseconds(200);
+    auto t = p9::stream_transport(std::unique_ptr<p9::stream>(s));
+    auto d = after(milliseconds(2000));
+    while (s->inside == 0 && osv::clock::uptime::now() < d) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    require(s->inside == 1, "receiver blocked in the stream");
+    t.reset();
+    require(!destroyed_inside, "stream released only after the join");
+    std::puts("PASS: destroy joins before release");
+}
+
+#ifdef __OSV__
+// Receiver kernel threads that have not terminated.
+static unsigned live_receivers()
+{
+    unsigned n = 0;
+    sched::with_all_threads([&](sched::thread& t) {
+        n += t.name() == "9p-rx"
+            && t.get_status() != sched::thread::status::terminated;
+    });
+    return n;
+}
+
+// Real loopback TCP: a listener (application sockets, playing server)
+// and the kernel transport from connect_tcp().
+struct listener {
+    int fd = -1;
+    sockaddr_in addr{};
+    explicit listener(int backlog = 4)
+    {
+        fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        require(fd >= 0, "listener socket");
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        require(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr)
+                == 0, "bind loopback");
+        socklen_t l = sizeof addr;
+        require(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &l)
+                == 0, "getsockname");
+        require(::listen(fd, backlog) == 0, "listen");
+    }
+    ~listener()
+    {
+        ::close(fd);
+    }
+    const sockaddr* sa() const
+    {
+        return reinterpret_cast<const sockaddr*>(&addr);
+    }
+    int accept_within(milliseconds ms)
+    {
+        pollfd p{fd, POLLIN, 0};
+        if (::poll(&p, 1, int(ms.count())) != 1) {
+            return -1;
+        }
+        return ::accept(fd, nullptr, nullptr);
+    }
+};
+
+static bool read_all(int fd, uint8_t* p, size_t n)
+{
+    while (n) {
+        ssize_t k = ::read(fd, p, n);
+        if (k <= 0) {
+            return false;
+        }
+        p += k;
+        n -= size_t(k);
+    }
+    return true;
+}
+
+static bool write_all(int fd, const bytes& b)
+{
+    return ::write(fd, b.data(), b.size()) == ssize_t(b.size());
+}
+
+// Read one T-frame from a server-side socket.
+static bool read_frame(int fd, frame& f)
+{
+    uint8_t hdr[4];
+    if (!read_all(fd, hdr, 4)) {
+        return false;
+    }
+    uint32_t size = le32(hdr);
+    if (size < 7 || size > 65536) {
+        return false;
+    }
+    bytes b(hdr, hdr + 4);
+    b.resize(size);
+    return read_all(fd, b.data() + 4, size - 4)
+        && p9::decode(b.data(), b.size(), 65536, f) == 0;
+}
+
+static void connect_errors()
+{
+    std::unique_ptr<p9::transport> t;
+    sockaddr_in bad{};
+    bad.sin_family = AF_INET6;
+    require(p9::connect_tcp(reinterpret_cast<sockaddr*>(&bad), sizeof bad,
+                            after(milliseconds(1000)), t) == EAFNOSUPPORT,
+            "non-INET address refused");
+    require(p9::connect_tcp(nullptr, 0, after(milliseconds(1000)), t)
+            == EINVAL, "null address refused");
+    require(p9::connect_tcp(reinterpret_cast<sockaddr*>(&bad), 4,
+                            after(milliseconds(1000)), t) == EINVAL,
+            "short address refused");
+    // A closed loopback port answers the SYN with RST.
+    sockaddr_in closed{};
+    {
+        listener l;
+        closed = l.addr;
+    }
+    auto t0 = osv::clock::uptime::now();
+    int rc = p9::connect_tcp(reinterpret_cast<sockaddr*>(&closed),
+                             sizeof closed, after(milliseconds(5000)), t);
+    require(rc == ECONNREFUSED, "closed port refused");
+    require(ms_since(t0) < 2000 && !t, "refusal is prompt, no transport");
+    std::puts("PASS: connect errors");
+}
+
+// 192.168.122.250 is inside run.py's user-mode network but unassigned:
+// nothing answers ARP, so the handshake never completes and connect_tcp
+// must give up at its deadline (TCP itself would wait 75 s).
+static void connect_timeout()
+{
+    sockaddr_in silent{};
+    silent.sin_family = AF_INET;
+    silent.sin_port = htons(564);
+    silent.sin_addr.s_addr = inet_addr("192.168.122.250");
+    std::unique_ptr<p9::transport> t;
+    auto t0 = osv::clock::uptime::now();
+    int rc = p9::connect_tcp(reinterpret_cast<sockaddr*>(&silent),
+                             sizeof silent, after(milliseconds(500)), t);
+    long took = ms_since(t0);
+    if (rc != ETIMEDOUT) {
+        std::fprintf(stderr, "connect_timeout: rc %d after %ld ms\n", rc,
+                     took);
+    }
+    require(rc == ETIMEDOUT, "unanswered connect times out");
+    require(took >= 450 && took < 1500, "connect stops at its deadline");
+    require(!t, "no transport after a timeout");
+    std::puts("PASS: connect deadline");
+}
+
+// The real socket path: negotiate, attach, read, then the peer closes in
+// the middle of a reply.
+static void loopback_session()
+{
+    listener l;
+    std::unique_ptr<p9::transport> t;
+    require(p9::connect_tcp(l.sa(), sizeof l.addr, after(milliseconds(5000)),
+                            t) == 0, "connect loopback");
+    int c = l.accept_within(milliseconds(5000));
+    require(c >= 0, "server accepted");
+    std::atomic<bool> cut{false};
+    std::thread srv([&] {
+        frame f;
+        bool half = false;
+        while (read_frame(c, f)) {
+            bytes w = wire_of(answer(f));
+            if (half) {
+                continue; // write side already shut
+            }
+            if (f.type == p9::Tread && cut) {
+                // Half a reply, then end of stream.
+                require(::write(c, w.data(), 9) == 9, "half reply sent");
+                ::shutdown(c, SHUT_WR);
+                half = true;
+                continue;
+            }
+            // Split the reply over two segments.
+            require(::write(c, w.data(), 3) == 3, "first fragment sent");
+            std::this_thread::sleep_for(milliseconds(2));
+            require(write_all(c, bytes(w.begin() + 3, w.end())),
+                    "rest sent");
+        }
+    });
+    p9::session s(std::move(t));
+    require(s.negotiate(msize, after(milliseconds(5000))) == 0,
+            "negotiate over TCP");
+    require(s.msize() == msize, "msize from Rversion");
+    uint32_t fid;
+    bytes qid;
+    require(s.attach("u", "/x", 0, fid, qid, after(milliseconds(5000))) == 0,
+            "attach over TCP");
+    for (int i = 0; i < 20; i++) {
+        caller r(s, fid, milliseconds(5000));
+        require(r.finish() && read_ok(r), "read over TCP");
+    }
+    cut = true;
+    caller a(s, fid, milliseconds(10000));
+    caller b(s, fid, milliseconds(10000));
+    require(a.finish() && b.finish(), "waiters woken by EOF mid-frame");
+    require(a.rc == ECONNRESET && b.rc == ECONNRESET,
+            "EOF mid-frame fails the session");
+    require(s.shutdown(after(milliseconds(5000))) == 0, "shutdown after EOF");
+    ::close(c);
+    srv.join();
+    std::puts("PASS: loopback session");
+}
+
+// Shutdown with a receiver blocked in a real socket wait and a sender
+// blocked on a full send buffer: both wake, the receiver is joined.
+static void loopback_shutdown()
+{
+    listener l;
+    std::unique_ptr<p9::transport> t;
+    require(p9::connect_tcp(l.sa(), sizeof l.addr, after(milliseconds(5000)),
+                            t) == 0, "connect loopback");
+    int c = l.accept_within(milliseconds(5000));
+    require(c >= 0, "server accepted");
+    std::thread srv([&] {
+        frame f;
+        // Answer version (granting 64 KiB) and attach, then stop reading.
+        for (int i = 0; i < 2 && read_frame(c, f); i++) {
+            frame r = answer(f);
+            if (f.type == p9::Tversion) {
+                r.body[0] = 0;
+                r.body[1] = 0;
+                r.body[2] = 1; // msize 65536, little endian
+                r.body[3] = 0;
+            }
+            require(write_all(c, wire_of(r)), "reply sent");
+        }
+    });
+    auto s = std::unique_ptr<p9::session>(new p9::session(std::move(t)));
+    require(s->negotiate(65536, after(milliseconds(5000))) == 0,
+            "negotiate 64 KiB");
+    uint32_t fid;
+    bytes qid;
+    require(s->attach("u", "/x", 0, fid, qid, after(milliseconds(5000)))
+            == 0, "attach");
+    srv.join();
+    // Fill the socket buffers with large Twrites nobody reads.
+    std::vector<std::thread> ws;
+    std::atomic<unsigned> back{0};
+    std::atomic<unsigned> shut{0};
+    for (int i = 0; i < 8; i++) {
+        ws.emplace_back([&] {
+            bytes b;
+            put32(b, fid);
+            put32(b, 0);
+            put32(b, 0);
+            put32(b, 60000);
+            b.resize(b.size() + 60000, 0x5a);
+            frame rep;
+            int rc = s->rpc(p9::Twrite, b, rep, after(milliseconds(20000)));
+            shut += rc == ESHUTDOWN;
+            ++back;
+        });
+    }
+    std::this_thread::sleep_for(milliseconds(500));
+    require(back == 0, "writers blocked on a full stream");
+    require(live_receivers() == 1, "one receiver kernel thread");
+    auto t0 = osv::clock::uptime::now();
+    // EBUSY may be transient here: a writer woken with ESHUTDOWN may not
+    // yet have relocked the session to mark its request unsent (N2b
+    // shutdown() contract: call again).
+    int rc = s->shutdown(after(milliseconds(5000)));
+    for (int i = 0; rc == EBUSY && i < 100; i++) {
+        std::this_thread::sleep_for(milliseconds(10));
+        rc = s->shutdown(after(milliseconds(1000)));
+    }
+    require(rc == 0, "shutdown");
+    require(live_receivers() == 0, "socket receiver joined by shutdown");
+    require(ms_since(t0) < 3000, "shutdown wakes blocked socket I/O");
+    for (auto& w : ws) {
+        w.join();
+    }
+    require(back == 8 && shut == 8, "every writer returned ESHUTDOWN");
+    s.reset();
+    ::close(c);
+    std::puts("PASS: loopback shutdown");
+}
+#endif
+
+// "socket" as the only argument runs just the real-socket groups.
+int main(int argc, char** argv)
+{
+    if (argc < 2 || std::string(argv[1]) != "socket") {
+        fragmentation();
+        interleaving();
+        send_deadline();
+        failures();
+        flush_retires();
+        shutdown_joins();
+        destroy_joins();
+    }
+#ifdef __OSV__
+    connect_errors();
+    connect_timeout();
+    loopback_session();
+    loopback_shutdown();
+#endif
     std::printf("SUMMARY: %u tcp checks, 0 failures\n", checks.load());
     return 0;
 }
