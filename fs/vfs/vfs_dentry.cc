@@ -321,10 +321,16 @@ drele(struct dentry *dp)
             // Remove dp from its parent's children list.
             LIST_REMOVE(dp, d_children_link);
         }
-        drele(dp->d_parent);
     }
 
+    // Release the vnode before the parent: the parent chain is what keeps
+    // the mount from being unmounted (see sys_umount2()), and vrele() still
+    // uses the mount.
     vrele(dp->d_vnode);
+
+    if (dp->d_parent) {
+        drele(dp->d_parent);
+    }
 
     free(dp->d_path);
     free(dp);
