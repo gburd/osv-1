@@ -78,6 +78,13 @@ $(out)/tests/9p_session_state.o: $(src)/fs/9p/session_state.cc
 $(out)/tests/tst-9p-session-state.so: $(out)/tests/tst-9p-session-state.o $(out)/tests/9p_session_state.o
 	$(call quiet, $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(out)/tests/9p_session_state.o $(LIBS), LD tests/tst-9p-session-state.so)
 
+$(out)/tests/9p_session.o: $(src)/fs/9p/session.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX fs/9p/session.cc => tests/9p_session.o)
+9p-session-objs := $(addprefix $(out)/tests/,9p_session.o 9p_session_state.o 9p_codec.o)
+$(out)/tests/tst-9p-session.so: $(out)/tests/tst-9p-session.o $(9p-session-objs)
+	$(call quiet, $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(9p-session-objs) $(LIBS), LD tests/tst-9p-session.so)
+
 $(out)/tests/tst-reloc.o: CFLAGS:=$(subst -fPIC,-fpie,$(CFLAGS))
 $(out)/tests/tst-reloc.so: $(src)/tests/tst-reloc.c
 	$(call quiet, $(CC) $(CFLAGS) $(LDFLAGS) -pie -o $@ $< $(LIBS), LD tests/tst-reloc.so)
@@ -209,7 +216,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	misc-futex-perf.so misc-syscall-perf.so tst-brk.so tst-reloc.so \
 	misc-vdso-perf.so tst-string-utils.so tst-elf-circular-reloc.so \
 	lib-circular-reloc1.so lib-circular-reloc2.so tst-rwlock.so \
-	tst-9p-wire.so tst-9p-session-state.so
+	tst-9p-wire.so tst-9p-session-state.so tst-9p-session.so
 #	tst-f128.so \
 
 # The OpenZFS-userspace-API tests only build/run under conf_zfs=openzfs (they
