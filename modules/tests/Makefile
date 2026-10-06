@@ -151,6 +151,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-epoll-pwait2.so \
 	tst-splice.so \
 	tst-fs-syscalls.so \
+	tst-vfs-mount-pins.so \
 	tst-prctl.so \
 	tst-mmap-file-cow.so \
 	tst-membarrier.so \
@@ -218,6 +219,7 @@ internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
 	tst-sem-timed-wait.so tst-small-malloc.so tst-solaris-taskq.so \
 	tst-threadcomplete.so tst-tracepoint.so tst-unordered-ring-mpsc.so \
 	tst-vfs.so tst-wait-for.so tst-without-namespace.so
+internal-api-tests += tst-vfs-mount-pins.so
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
