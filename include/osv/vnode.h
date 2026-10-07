@@ -159,6 +159,8 @@ typedef int (*vnop_cache_t) (struct vnode *, struct file *, struct uio *);
 typedef int (*vnop_fallocate_t) (struct vnode *, int, loff_t, loff_t);
 typedef int (*vnop_readlink_t)  (struct vnode *, struct uio *);
 typedef int (*vnop_symlink_t)   (struct vnode *, char *, char *);
+typedef int (*vnop_create_open_t) (struct vnode *, const char *, int, mode_t,
+				    struct vnode **, void **);
 
 /*
  * vnode operations
@@ -187,6 +189,7 @@ struct vnops {
 	vnop_fallocate_t	vop_fallocate;
 	vnop_readlink_t		vop_readlink;
 	vnop_symlink_t		vop_symlink;
+	vnop_create_open_t	vop_create_open;	/* optional */
 };
 
 /*
