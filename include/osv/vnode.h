@@ -189,7 +189,17 @@ struct vnops {
 	vnop_fallocate_t	vop_fallocate;
 	vnop_readlink_t		vop_readlink;
 	vnop_symlink_t		vop_symlink;
-	vnop_create_open_t	vop_create_open;	/* optional */
+	/*
+	 * Optional. Create `name` in the locked directory and open it, in one
+	 * step. flags are fflags() with O_CREAT; without O_EXCL an existing
+	 * file is opened instead. On success *vpp is the created vnode, locked
+	 * and referenced, and *datap the open context that becomes the file's
+	 * f_data; VOP_OPEN is not called. If the VFS then fails, it calls
+	 * VOP_CLOSE once, with f_data set and no f_dentry. A filesystem that
+	 * provides it applies O_TRUNC itself, here and in VOP_OPEN: the VFS
+	 * does not truncate before an open the filesystem may refuse.
+	 */
+	vnop_create_open_t	vop_create_open;
 };
 
 /*
