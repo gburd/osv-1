@@ -18,6 +18,9 @@
 //     filesystem refuses leaves the size unchanged.
 // (l) A filesystem without the hook keeps the legacy create, truncate and
 //     open order.
+// (z) Only on a kernel built with the test-only injection that makes
+//     dentry_alloc() fail for names containing "p3-enomem" (selected with
+//     argument "z"): the open context is closed exactly once.
 
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -346,10 +349,33 @@ static void test_legacy(const std::string& dir)
     report(put(f, "again") && get(f) == "again", "(l) create/truncate/write");
 }
 
+static void test_dentry_enomem(const std::string& dir)
+{
+    reset();
+    int fd = open((dir + "/p3-enomem").c_str(), O_CREAT | O_RDWR, 0644);
+    int err = errno;
+    report(fd < 0 && err == ENOMEM, "(z) failed dentry allocation is ENOMEM");
+    report(n_create_open == 1 && n_open == 0,
+           "(z) created once, not opened again");
+    report(n_close_ctx == 1, "(z) open context closed exactly once (got " +
+           std::to_string(n_close_ctx) + ")");
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+
 int main(int argc, char **argv)
 {
     mkdir("/tmp", 0755);
     const std::string hook = "/tmp/vfs-remote-h", legacy = "/tmp/vfs-remote-l";
+    if (argc > 1 && !strcmp(argv[1], "z")) {
+        if (mount_fixture(hook, true)) {
+            test_dentry_enomem(hook);
+            unmount_fixture(hook);
+        }
+        printf("SUMMARY: %d tests, %d failures\n", tests, fails);
+        return fails ? 1 : 0;
+    }
     if (mount_fixture(hook, true)) {
         test_create_open(hook);
         test_deferred_trunc(hook);
