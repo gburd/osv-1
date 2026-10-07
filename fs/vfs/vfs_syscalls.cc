@@ -112,38 +112,40 @@ out:
  * vop_create_open. The descriptor gets the object that was created, even if
  * its name has been replaced since, and the open context the filesystem
  * returned, without a second open. Called with ddp held and its vnode
- * locked; releases neither.
+ * locked; releases both.
  */
 static int
 create_open(struct dentry *ddp, char *filename, int flags, mode_t mode,
 	    struct file **fpp)
 {
 	struct vnode *dvp = ddp->d_vnode, *vp;
-	struct dentry *dp;
+	struct dentry *dp, *stale = nullptr;
 	char node[PATH_MAX];
 	void *data = nullptr;
 	file *fp;
 	int error;
 
 	/* Name it as namei() would: the parent's path in its mount. */
+	error = ENAMETOOLONG;
 	if (snprintf(node, sizeof(node), "%s/%s",
 		     strcmp(ddp->d_path, "/") ? ddp->d_path : "",
 		     filename) >= (int)sizeof(node))
-		return ENAMETOOLONG;
+		goto out;
 
 	try {
 		fileref f = make_file<vfs_file>(flags & ~(O_CREAT | O_TRUNC));
 		fp = f.get();
 		fhold(fp);
 	} catch (int err) {
-		return err;
+		error = err;
+		goto out;
 	}
 
 	error = dvp->v_op->vop_create_open(dvp, filename, flags, mode, &vp,
 					   &data);
 	if (error) {
 		delete fp;
-		return error;
+		goto out;
 	}
 	fp->f_data = data;
 
@@ -157,24 +159,29 @@ create_open(struct dentry *ddp, char *filename, int flags, mode_t mode,
 		 * this dentry between dentry_alloc() and dentry_remove(); an
 		 * unhashed dentry_alloc() variant closes that if it matters.
 		 */
-		drele(dp);
+		stale = dp;
 		dp = dentry_alloc(ddp, vp, node);
 		if (dp)
 			dentry_remove(dp);
 	} else if (!dp) {
 		dp = dentry_alloc(ddp, vp, node);
 	}
-	if (!dp) {
+	if (dp) {
+		fp->f_dentry = dentry_ref(dp, false);
+		*fpp = fp;
+	} else {
 		/* Opened but not nameable: close it once, here. */
 		VOP_CLOSE(vp, fp);
-		vput(vp);
 		delete fp;
-		return ENOMEM;
+		error = ENOMEM;
 	}
-	fp->f_dentry = dentry_ref(dp, false);
 	vput(vp);
-	*fpp = fp;
-	return 0;
+out:
+	vn_unlock(dvp);
+	if (stale)
+		drele(stale);
+	drele(ddp);
+	return error;
 }
 
 OSV_LIBSOLARIS_API int
@@ -205,13 +212,9 @@ sys_open(char *path, int flags, mode_t mode, struct file **fpp)
 			}
 			mode &= ~S_IFMT;
 			mode |= S_IFREG;
-			if (ddp->d_vnode->v_op->vop_create_open) {
-				error = create_open(ddp, filename, flags, mode,
-						    fpp);
-				vn_unlock(ddp->d_vnode);
-				drele(ddp);
-				return error;
-			}
+			if (ddp->d_vnode->v_op->vop_create_open)
+				return create_open(ddp, filename, flags, mode,
+						   fpp);
 			error = VOP_CREATE(ddp->d_vnode, filename, mode);
 			vn_unlock(ddp->d_vnode);
 			drele(ddp);
