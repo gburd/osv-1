@@ -65,7 +65,9 @@ static struct vnops *ram;                   // ramfs vnops being wrapped
 static struct vnops hook_vnops, legacy_vnops;
 static struct vfsops hook_vfsops, legacy_vfsops;
 
-static bool race, deny_open;
+static bool race, hold, deny_open;
+static std::string hold_path;
+static int holder_fd = -1;
 static int create_err;
 static int n_create_open, n_open, n_close_ctx;
 static uint64_t created_ino;
@@ -73,7 +75,8 @@ static open_ctx *last_ctx;
 
 static void reset()
 {
-    race = deny_open = false;
+    race = hold = deny_open = false;
+    holder_fd = -1;
     create_err = 0;
     n_create_open = n_open = n_close_ctx = 0;
     created_ino = 0;
@@ -81,9 +84,11 @@ static void reset()
 }
 
 // Called right after the object `name` is created in dvp. Records it and,
-// if `race`, acts as an external client: renames it to "moved" and creates
-// a different object under `name`. Returns the created vnode (locked and
-// referenced) in *vpp if vpp is non-null.
+// if `race`, acts as an external client: renames it to "<name>.old" and
+// creates a different object under `name`. If `hold`, a local open of
+// hold_path then takes a dentry for whatever the name now maps to.
+// Returns the created vnode (locked and referenced) in *vpp if vpp is
+// non-null.
 static int after_create(struct vnode *dvp, char *name, mode_t mode,
                         struct vnode **vpp)
 {
@@ -94,11 +99,16 @@ static int after_create(struct vnode *dvp, char *name, mode_t mode,
     }
     created_ino = vp->v_ino;
     if (race) {
-        char moved[] = "moved";
+        char moved[NAME_MAX + 1];
+        snprintf(moved, sizeof(moved), "%s.old", name);
         error = ram->vop_rename(dvp, vp, name, dvp, nullptr, moved);
         if (!error) {
             error = ram->vop_create(dvp, name, mode);
         }
+    }
+    if (!error && hold) {
+        holder_fd = open(hold_path.c_str(), O_RDONLY);
+        error = holder_fd < 0 ? errno : 0;
     }
     if (error || !vpp) {
         vput(vp);
@@ -162,10 +172,13 @@ static int legacy_open(struct file *fp)
     return deny_open ? EACCES : ram->vop_open(fp);
 }
 
+// A file opened by the hook carries its context; a file the VFS could not
+// name (no dentry) can only have been opened by the hook. Count both, so a
+// second close of the same file is visible rather than a crash in ramfs.
 static int fix_close(struct vnode *vp, struct file *fp)
 {
     auto c = static_cast<open_ctx *>(fp->f_data);
-    if (c && c->magic == ctx_magic) {
+    if ((c && c->magic == ctx_magic) || !file_dentry(fp)) {
         ++n_close_ctx;
         fp->f_data = nullptr;
         delete c;
@@ -270,14 +283,87 @@ static void test_create_open(const std::string& dir)
     if (fget(fd, &fp) == 0) {
         report(last_ctx && fp->f_data == last_ctx,
                "(c) open context is the file's f_data");
+        report(!strcmp(fp->f_dentry->d_path, "/f"),
+               "(c) dentry path /f (got " +
+               std::string(fp->f_dentry->d_path) + ")");
         fdrop(fp);
     }
     report(write(fd, "mine", 4) == 4, "(c) write through fd");
     report(close(fd) == 0 && n_close_ctx == 1,
            "(c) close releases the context once (got " +
            std::to_string(n_close_ctx) + ")");
-    report(get(dir + "/moved") == "mine",
-           "(c) data landed in the created object, now named moved");
+    report(get(dir + "/f.old") == "mine",
+           "(c) data landed in the created object, now named f.old");
+
+    // A local open of the replacement holds a dentry for the name before
+    // the create returns: the new fd still gets the created object, and the
+    // name keeps mapping to the replacement.
+    reset();
+    race = hold = true;
+    hold_path = dir + "/h";
+    fd = open(hold_path.c_str(), O_CREAT | O_RDWR, 0644);
+    race = hold = false;
+    struct stat hst = {}, pst = {};
+    st = {};
+    report(fd >= 0 && holder_fd >= 0 && fstat(fd, &st) == 0 &&
+           fstat(holder_fd, &hst) == 0 && st.st_ino == created_ino &&
+           hst.st_ino != created_ino,
+           "(c) held name: fd keeps the created object (ino " +
+           std::to_string(st.st_ino) + ", created " +
+           std::to_string(created_ino) + ", holder " +
+           std::to_string(hst.st_ino) + ")");
+    report(stat(hold_path.c_str(), &pst) == 0 && hst.st_ino &&
+           pst.st_ino == hst.st_ino,
+           "(c) held name still maps to the replacement (ino " +
+           std::to_string(pst.st_ino) + ")");
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (holder_fd >= 0) {
+        close(holder_fd);
+    }
+
+    // A local open of the created object itself holds its dentry: the new
+    // fd shares that dentry.
+    reset();
+    hold = true;
+    hold_path = dir + "/s";
+    fd = open(hold_path.c_str(), O_CREAT | O_RDWR, 0644);
+    hold = false;
+    struct file *hfp;
+    if (fd >= 0 && holder_fd >= 0 && fget(fd, &fp) == 0) {
+        if (fget(holder_fd, &hfp) == 0) {
+            report(fp->f_dentry.get() == hfp->f_dentry.get() &&
+                   n_create_open == 1,
+                   "(c) held name, same object: fd shares the dentry");
+            fdrop(hfp);
+        }
+        fdrop(fp);
+    } else {
+        report(false, "(c) held name, same object: open");
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (holder_fd >= 0) {
+        close(holder_fd);
+    }
+
+    // In a subdirectory the dentry is named below it.
+    reset();
+    mkdir((dir + "/sub").c_str(), 0755);
+    fd = open((dir + "/sub/g").c_str(), O_CREAT | O_RDWR, 0644);
+    if (fd >= 0 && fget(fd, &fp) == 0) {
+        report(n_create_open == 1 && !strcmp(fp->f_dentry->d_path, "/sub/g"),
+               "(c) subdirectory dentry path /sub/g (got " +
+               std::string(fp->f_dentry->d_path) + ")");
+        fdrop(fp);
+    } else {
+        report(false, "(c) subdirectory create");
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
 
     // A refused create returns its error and leaves nothing to close.
     reset();
@@ -292,13 +378,13 @@ static void test_create_open(const std::string& dir)
 
     // Existing file: no create, ordinary open; O_EXCL still EEXIST.
     reset();
-    fd = open((dir + "/moved").c_str(), O_CREAT | O_RDONLY, 0644);
+    fd = open((dir + "/f.old").c_str(), O_CREAT | O_RDONLY, 0644);
     report(fd >= 0 && n_create_open == 0 && n_open == 1,
            "(c) O_CREAT on existing file opens without create_open");
     if (fd >= 0) {
         close(fd);
     }
-    report(fails_with(open((dir + "/moved").c_str(),
+    report(fails_with(open((dir + "/f.old").c_str(),
                            O_CREAT | O_EXCL | O_RDWR, 0644), EEXIST) &&
            n_create_open == 0, "(c) O_EXCL on existing file is EEXIST");
 }
