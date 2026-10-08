@@ -297,23 +297,24 @@ static void check_no_leak(const std::string& what)
            std::to_string(l) + ", pins " + std::to_string(p) + ")");
 }
 
-// Whether the name cache holds `path` (mount-relative) for the dentry of
-// fd, or for nothing (fd -1).
-static bool cache_holds(const char *path, int fd)
+// Whether the name cache maps `path` (mount-relative) to fd's dentry. A
+// dentry is hashed only while referenced, so a replaced dentry that stayed
+// hashed is found here once the lookup that replaced it is done.
+static bool cache_is(const char *path, int fd)
 {
     char p[PATH_MAX];
     strlcpy(p, path, sizeof(p));
     struct dentry *dp = dentry_lookup(fix_mp, p);
-    bool ok = !dp;
+    bool is = false;
     struct file *fp;
-    if (dp && fd >= 0 && fget(fd, &fp) == 0) {
-        ok = dp == fp->f_dentry.get();
+    if (dp && fget(fd, &fp) == 0) {
+        is = dp == fp->f_dentry.get();
         fdrop(fp);
     }
     if (dp) {
         drele(dp);
     }
-    return ok;
+    return is;
 }
 
 static void unmount_fixture(const std::string& dir)
@@ -673,7 +674,7 @@ static void test_names(const std::string& dir, bool nc)
     ino_t fino = ino_of(wfd);
     report(ok && fino == held, tag + "held fd keeps the old object" +
            ino_msg(fino, held));
-    report(cache_holds("/w", nc ? -1 : wfd), tag + (nc ?
+    report(cache_is("/w", wfd) == !nc, tag + (nc ?
            "replaced dentry is unhashed, its holder keeps it" :
            "held dentry is still cached"));
     report(get(w) == (nc ? "" : "old"), tag + "open by name reads " +
