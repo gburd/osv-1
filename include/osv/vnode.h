@@ -217,12 +217,13 @@ struct vnops {
 	 * vop_write whenever the VFS has the file, so a filesystem can use
 	 * the context of that open (fp->f_data) rather than one shared by
 	 * every open of the vnode. uio and ioflag (IO_APPEND, IO_SYNC) are as
-	 * for vop_write. It returns 0 or a positive errno; on success the VFS
+	 * for vop_write. It returns 0 or a positive errno. On success the VFS
 	 * advances a non-positioned write's shared f_offset by the bytes the
-	 * uio moved, so a short write counts only what was written. vp is
-	 * locked, except for a positioned write to a VBLK vnode. Writes with
-	 * no open file (page cache writeback of a mapped page) still call
-	 * vop_write, which must remain valid.
+	 * uio moved, so a short write counts only what was written; on error
+	 * f_offset is unchanged. vp is locked, except for a positioned write
+	 * to a VBLK vnode. Writes with no open file (writeback of a page
+	 * mapped from a vop_cache filesystem) still call vop_write, which
+	 * must remain valid.
 	 */
 	vnop_write_file_t	vop_write_file;
 };
