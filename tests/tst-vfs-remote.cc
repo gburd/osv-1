@@ -791,6 +791,10 @@ static void test_mount_root(const std::string& dir)
     ok = stat((dir + "/").c_str(), &st) == 0;
     report(ok && st.st_ino == lst.st_ino && st.st_dev == lst.st_dev,
            "(g) stat of the mount point is its root");
+    // test_names() left a directory "d"; a trailing slash names it.
+    ok = lstat((dir + "/d/").c_str(), &lst) == 0;
+    report(ok && S_ISDIR(lst.st_mode) && lst.st_ino == ino_at(dir + "/d"),
+           "(g) lstat with a trailing slash is the directory");
     check_no_leak("(g)");
 }
 
