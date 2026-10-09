@@ -230,6 +230,8 @@ tests += tst-ramfs-unlink-race.so
 tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa.so
+tests += tst-vfs-lock-order.so
+internal-api-tests += tst-vfs-lock-order.so
 tests += tst-random-flush.so
 internal-api-tests += tst-random-flush.so
 
