@@ -137,6 +137,7 @@ endif
 
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
 ext-only-tests += tst-ext4-rw.so
+ext-only-tests += tst-ext-readlink.so  # re-added (union-merge drop, #1449)
 
 specific-fs-tests := $($(fs_type)-only-tests)
 
@@ -233,6 +234,18 @@ tests += tst-random-flush.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
 internal-api-tests += tst-umount-release.so
+
+# Registrations re-added after the union merge driver silently dropped them
+# when these PRs branched off an older master and their tests += region had
+# since evolved. integ-only; the PRs still need rebasing onto current master.
+tests += tst-numa-mempolicy.so          # #1438 (was an in-place edit of the tst-numa.so line)
+tests += tst-signalfd.so                # #1439 (was a member of the tests := list)
+tests += tst-inotify.so                 # #1440
+tests += tst-random-vfs.so              # #1525
+internal-api-tests += tst-random-vfs.so # #1525
+internal-api-tests += tst-rename-failure.so  # #1527
+tests += tst-virtio-lifecycle.so        # #1534
+internal-api-tests += tst-virtio-lifecycle.so  # #1534
 ifeq ($(conf_zfs),openzfs)
 $(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
@@ -327,6 +340,7 @@ common-boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
 	tst-rcu-hashtable.so tst-unordered-ring-mpsc.so \
 	tst-seek.so tst-ctype.so tst-wctype.so tst-string.so tst-time.so tst-dax.so \
 	tst-net_if_test.so
+common-boost-tests += tst-rename-failure.so  # re-added (union-merge drop, #1527)
 
 boost-tests := $(common-boost-tests)
 
