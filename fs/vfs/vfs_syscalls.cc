@@ -973,6 +973,8 @@ sys_rename(char *src, char *dest)
 	}
 
 	error = VOP_RENAME(dvp1, vp1, sname, dvp2, vp2, dname);
+	if (error)
+		goto err3;
 
 	if (!error) {
 		int is_dir = (vp1->v_type == VDIR) ? 1 : 0;
