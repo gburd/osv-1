@@ -1105,7 +1105,6 @@ libc += internal/intscan.o
 libc += internal/libc.o
 libc += internal/shgetc.o
 
-musl += ctype/__ctype_get_mb_cur_max.o
 musl += ctype/__ctype_tolower_loc.o
 musl += ctype/__ctype_toupper_loc.o
 musl += ctype/isalnum.o
@@ -1473,24 +1472,18 @@ musl += signal/siginterrupt.o
 musl += signal/sigrtmin.o
 musl += signal/sigrtmax.o
 
-musl += multibyte/btowc.o
+libc += multibyte/multibyte.o
 musl += multibyte/internal.o
 musl += multibyte/mblen.o
 musl += multibyte/mbrlen.o
-musl += multibyte/mbrtowc.o
 musl += multibyte/mbsinit.o
-musl += multibyte/mbsnrtowcs.o
 libc += multibyte/__mbsnrtowcs_chk.o
-musl += multibyte/mbsrtowcs.o
 libc += multibyte/__mbsrtowcs_chk.o
 musl += multibyte/mbstowcs.o
 libc += multibyte/__mbstowcs_chk.o
-musl += multibyte/mbtowc.o
-musl += multibyte/wcrtomb.o
 musl += multibyte/wcsnrtombs.o
 musl += multibyte/wcsrtombs.o
 musl += multibyte/wcstombs.o
-musl += multibyte/wctob.o
 musl += multibyte/wctomb.o
 
 $(out)/libc/multibyte/mbsrtowcs.o: CFLAGS += -Imusl/src/multibyte
@@ -1899,6 +1892,9 @@ musl += regex/regcomp.o
 $(out)/musl/src/regex/regcomp.o: CFLAGS += -UNDEBUG
 musl += regex/regexec.o
 $(out)/musl/src/regex/regexec.o: CFLAGS += -UNDEBUG
+# In the C locale glibc's regex and fnmatch take each high byte as one character.
+$(out)/musl/src/regex/fnmatch.o $(out)/musl/src/regex/regcomp.o \
+$(out)/musl/src/regex/regexec.o: CFLAGS += -Dmbtowc=__osv_mbtowc_cu
 musl += regex/regerror.o
 musl += regex/tre-mem.o
 $(out)/musl/src/regex/tre-mem.o: CFLAGS += -UNDEBUG

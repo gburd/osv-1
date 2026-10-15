@@ -231,6 +231,7 @@ tests += tst-close-range.so
 tests += tst-numa.so
 tests += tst-random-flush.so
 tests += tst-locale-builtin.so
+tests += tst-locale-ctype.so
 internal-api-tests += tst-random-flush.so
 
 # Tests with special compilation parameters needed...

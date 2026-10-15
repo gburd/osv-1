@@ -5,7 +5,8 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-// The built-in locales behave as glibc's do with no locale data installed.
+// OSv's locales behave as glibc's do with the distribution's standard C.utf8
+// installed (Debian/Ubuntu libc-bin, Fedora glibc) and no other locale.
 //
 // Every expectation below was taken from glibc 2.42, and this test passes
 // there too (build it on Linux with g++ -std=c++17 and run it with LOCPATH
@@ -298,10 +299,21 @@ static void test_newlocale_api()
         freelocale(z);
     }
     // A base is updated and the C object is never modified.
+    if (!c) {
+        report(false, "newlocale(C) failed");
+        return;
+    }
     locale_t u = newlocale(LC_CTYPE_MASK, "C.UTF-8", c);
     report(u && u != c && !strcmp(nl_langinfo_l(CODESET, c), "ANSI_X3.4-1968"),
            "newlocale with the C object as base copies it");
+    if (!u) {
+        return;
+    }
     locale_t u2 = newlocale(LC_NUMERIC_MASK, "C.utf8", u);
+    if (!u2) {
+        report(false, "newlocale(C.utf8, base) failed");
+        return;
+    }
     report(u2 && !strcmp(nl_langinfo_l(_NL_LOCALE_NAME(LC_NUMERIC), u2), "C.utf8") &&
            !strcmp(nl_langinfo_l(_NL_LOCALE_NAME(LC_CTYPE), u2), "C.UTF-8"),
            "newlocale keeps the base's other categories");
@@ -314,9 +326,7 @@ static void test_newlocale_api()
     if (d) {
         freelocale(d);
     }
-    if (u2) {
-        freelocale(u2);
-    }
+    freelocale(u2);
 
     // glibc's own extra categories work through setlocale too.
     setlocale(LC_ALL, "C");
@@ -333,6 +343,10 @@ static void test_uselocale()
     report(uselocale(nullptr) == LC_GLOBAL_LOCALE, "a thread starts on the global locale");
     setlocale(LC_ALL, "C");
     locale_t u = newlocale(LC_ALL_MASK, "C.UTF-8", nullptr);
+    if (!u) {
+        report(false, "newlocale(C.UTF-8) failed");
+        return;
+    }
     locale_t old = uselocale(u);
     report(old == LC_GLOBAL_LOCALE, "uselocale returns LC_GLOBAL_LOCALE");
     report(!strcmp(nl_langinfo(CODESET), "UTF-8"), "nl_langinfo follows the thread locale");
@@ -355,6 +369,10 @@ static void test_langinfo()
 {
     locale_t c = newlocale(LC_ALL_MASK, "C", nullptr);
     locale_t u = newlocale(LC_ALL_MASK, "C.UTF-8", nullptr);
+    if (!c || !u) {
+        report(false, "newlocale(C / C.UTF-8) failed");
+        return;
+    }
     struct { nl_item item; const char *c; const char *u; } strs[] = {
         { RADIXCHAR, ".", "." },
         { THOUSEP, "", "" },
@@ -446,6 +464,13 @@ static void test_cxx()
 
 int main()
 {
+    // The "" name cases expect C: start from an environment that names no
+    // locale (many Linux hosts set LANG=C.UTF-8).
+    for (const char *v : { "LC_ALL", "LANG", "LANGUAGE", "LC_CTYPE", "LC_NUMERIC", "LC_TIME",
+                           "LC_COLLATE", "LC_MONETARY", "LC_MESSAGES", "LC_PAPER", "LC_NAME",
+                           "LC_ADDRESS", "LC_TELEPHONE", "LC_MEASUREMENT", "LC_IDENTIFICATION" }) {
+        unsetenv(v);
+    }
     test_names();
     test_codeset();
     test_composite();
