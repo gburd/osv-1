@@ -14,6 +14,26 @@ encodes wide characters 0x200000..0x7fffffff as 5- and 6-byte sequences, while O
 and `wctomb()` fail with EILSEQ there, because musl's stdio converts into 4-byte (MB_LEN_MAX)
 buffers. Those values are never Unicode. The decoder accepts the 5- and 6-byte forms as glibc does.
 
+Wide stdio (`libc/stdio/fputwc.c`, `fputws.c`, `fgetwc.c`, `ungetwc.c`, `vswprintf.c`, `vswscanf.c`,
+`open_wmemstream.c`, OSv copies of musl's) follows glibc too, and `tests/tst-locale-ctype.cc` checks
+it against glibc's answers. A byte-backed stream converts in the locale bound at its first wide
+operation: output of a character that locale cannot encode writes its C transliteration
+(`__osv_c_translit`, generated from glibc) in C, or '?', and succeeds; input of an invalid sequence is
+WEOF with EILSEQ and an error, with the bytes left unread (a sequence truncated by end of file is
+consumed); `ungetwc()` of any character succeeds. The wide-buffer streams (`swprintf()`,
+`swscanf()`, `open_wmemstream()`, flagged F_WBUF in `stdio_impl.h`) never convert, so any wchar_t
+value round-trips. Known differences from glibc:
+- `fputwc(WEOF)` on a byte-backed stream writes '?' and returns WEOF (glibc writes nothing and
+  returns 0), because musl's `vfwprintf()` passes WEOF for a `%c` it cannot convert and glibc writes
+  '?' there.
+- `ftell()` after `ungetwc()` subtracts the pushed-back bytes (as musl's does; 5 for a character the
+  stream's locale cannot encode), where glibc gives 0 on an unread stream and -1 otherwise.
+- Wide calls on a byte-oriented stream (`fgetwc()`, `fputwc()`, `fputws()`, `fwprintf()`) work
+  instead of failing.
+- A stream bound to C writes the C transliteration even when LC_CTYPE is C.UTF-8 at the call (glibc
+  uses the current locale's, so 0xe9 becomes 'e').
+- `fgetws()` leaves errno EAGAIN on success.
+
 The other files in this folder provide a minimal implementation of the rest of the locale functionality. Unfortunately musl 1.1.24 had enhanced
 its implementation to support categories (for example new 'cat' field in locale struct)
 and does not quite fit OSv minimal need. For now, we have made minimal changes to existing

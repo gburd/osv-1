@@ -26,6 +26,18 @@
 // tst-locale-ctype-sample.h by scripts/locale-oracle/gen-ctype-sample.py.
 // wctype() and wctrans() descriptors are bound to the LC_CTYPE current at
 // the call; iswctype_l() and towctrans_l() ignore their locale argument.
+//
+// Wide stdio (B3), one check per row of the glibc oracle (wio.c, p3.c) in C
+// and C.UTF-8: byte-backed wide output writes the C transliteration or '?'
+// and succeeds; byte-backed wide input of an invalid sequence is WEOF with
+// EILSEQ and an error, its bytes pushed back; swprintf, swscanf and
+// open_wmemstream never convert. Known differences (rows not checked here,
+// see libc/locale/README.md): ftell() after ungetwc(); fputwc(WEOF) writes
+// '?' and returns WEOF (glibc: nothing, 0); wide calls on a byte-oriented
+// stream (fgetwc, fputwc, fputws, fwprintf) work instead of failing; on a
+// stream bound to C while LC_CTYPE is C.UTF-8, the C transliteration is used
+// (glibc: the current locale's, so 0xe9 is 'e'); fgetws leaves errno EAGAIN
+// on success.
 
 #include <cerrno>
 #include <clocale>
@@ -654,6 +666,225 @@ static void test_wide_descriptors()
     freelocale(u);
 }
 
+static FILE *tmp()
+{
+    FILE *f = tmpfile();
+    if (!f) {
+        perror("tmpfile");
+        exit(1);
+    }
+    return f;
+}
+
+// A fresh stream (no orientation) reading the bytes s[0..n).
+static FILE *wio_in(const char *s, size_t n)
+{
+    FILE *f = tmp();
+    if (write(fileno(f), s, n) != ssize_t(n) || lseek(fileno(f), 0, SEEK_SET) != 0) {
+        perror("wio_in");
+        exit(1);
+    }
+    return f;
+}
+
+// What the stream wrote, as hex; closes it.
+static std::string wio_out(FILE *f)
+{
+    fflush(f);
+    char b[64];
+    ssize_t n = pread(fileno(f), b, sizeof(b), 0);
+    fclose(f);
+    return n < 0 ? "error" : hex(b, n);
+}
+
+static void test_wio(const char *loc, bool u)
+{
+    if (!setlocale(LC_ALL, loc)) {
+        report(false, std::string("setlocale ") + loc);
+        return;
+    }
+    std::string L = std::string(loc) + " ";
+    FILE *f;
+    wint_t q, q2, q3, q4;
+    int r, e, fe;
+
+    // Byte-backed wide output.
+    struct { wchar_t in[4]; const char *c, *utf8; } outs[] = {
+        { L"\u00e9", "3f", "c3a9" }, { L"\u4e00", "3f", "e4b880" }, { L"A\u00e9" "B", "413f42", "41c3a942" },
+    };
+    for (auto &o : outs) {
+        f = tmp();
+        bool ok = true;
+        errno = 0;
+        for (const wchar_t *p = o.in; ok && *p; p++) {
+            ok = fputwc(*p, f) == wint_t(*p);
+        }
+        ok = ok && errno == 0 && !ferror(f);
+        std::string got = wio_out(f);
+        report(ok && got == (u ? o.utf8 : o.c), L + "fputwc of " + std::to_string(wcslen(o.in)) +
+               " -> " + got);
+    }
+    f = tmp(); errno = 0; r = fputws(L"a\u00e9z", f); e = errno; fe = ferror(f);
+    report(r == 1 && !e && !fe && wio_out(f) == (u ? "61c3a97a" : "613f7a"), L + "fputws(a e9 z)");
+    f = tmp(); errno = 0; r = fwprintf(f, L"%lc", (wint_t)0xe9); e = errno;
+    report(r == 1 && !e && wio_out(f) == (u ? "c3a9" : "3f"), L + "fwprintf(%lc e9)");
+    f = tmp(); errno = 0; r = fwprintf(f, L"%s", "\xc3\xa9"); e = errno; fe = ferror(f);
+    report((u ? r == 1 && !e : r == -1 && e == EILSEQ) && !fe && wio_out(f) == (u ? "c3a9" : ""),
+           L + "fwprintf(%s c3a9)");
+    f = tmp(); errno = 0; r = fwprintf(f, L"<%c>", 0xe9); e = errno;
+    report(r == 3 && !e && wio_out(f) == "3c3f3e", L + "fwprintf(<%c e9>)");
+    f = tmp(); report(fputws(L"", f) == 1, L + "fputws(\"\")"); fclose(f);
+    f = tmp(); fputc('x', f); q = putwc('y', f);
+    report(q == 'y' && wio_out(f) == "7879", L + "byte-oriented putwc(y)");
+
+    // Byte-backed wide input.
+    if ((f = wio_in("\xc3\xa9z", 3))) {
+        errno = 0; q = fgetwc(f); e = errno; fe = ferror(f); q2 = fgetwc(f);
+        report(u ? q == 0xe9 && !e && !fe && q2 == 'z' : q == WEOF && e == EILSEQ && fe && q2 == WEOF,
+               L + "fgetwc(c3 a9 z)");
+        fclose(f);
+    }
+    if ((f = wio_in("\xc3\xa9z", 3))) {
+        q = fgetwc(f); clearerr(f); q2 = fgetwc(f); q3 = fgetwc(f);
+        report(u ? q == 0xe9 && q2 == 'z' && q3 == WEOF && ftell(f) == 3
+                 : q == WEOF && q2 == WEOF && q3 == WEOF && ftell(f) == 0, L + "fgetwc(c3a9z) clearerr ftell");
+        fclose(f);
+    }
+    if ((f = wio_in("\xe9z", 2))) {
+        errno = 0; q = fgetwc(f); e = errno; fe = ferror(f); q2 = fgetwc(f);
+        report(q == WEOF && e == EILSEQ && fe && q2 == WEOF, L + "fgetwc(e9 z)");
+        fclose(f);
+    }
+    if ((f = wio_in("\xc3", 1))) {
+        errno = 0; q = fgetwc(f); e = errno; fe = ferror(f); int eo = feof(f);
+        clearerr(f); q2 = fgetwc(f);
+        // C pushes 0xc3 back; C.UTF-8 consumes it, so the next read is at EOF.
+        report(q == WEOF && e == EILSEQ && fe && !eo && q2 == WEOF && (feof(f) != 0) == u,
+               L + "fgetwc(c3 EOF)");
+        fclose(f);
+    }
+    if ((f = wio_in("a\xe9z", 3))) {
+        q = fgetwc(f); errno = 0; q2 = fgetwc(f); e = errno; fe = ferror(f);
+        clearerr(f); errno = 0; q3 = fgetwc(f);
+        report(q == 'a' && q2 == WEOF && e == EILSEQ && fe && q3 == WEOF && errno == EILSEQ && ftell(f) == 1,
+               L + "fgetwc(a e9 z) clearerr ftell");
+        fclose(f);
+    }
+    if ((f = wio_in("z", 1))) {
+        errno = 0; q = ungetwc(0xe9, f); e = errno; q2 = fgetwc(f); q3 = fgetwc(f);
+        report(q == 0xe9 && !e && q2 == 0xe9 && q3 == 'z', L + "ungetwc(e9)");
+        fclose(f);
+    }
+    if ((f = wio_in("z", 1))) {
+        errno = 0; q = ungetwc(0x4e00, f); e = errno; q2 = fgetwc(f);
+        report(q == 0x4e00 && !e && q2 == 0x4e00, L + "ungetwc(4e00)");
+        fclose(f);
+    }
+    if ((f = wio_in("ab", 2))) {
+        errno = 0; q = ungetwc(0xe9, f); q2 = ungetwc(0x4e00, f); q3 = ungetwc('q', f); q4 = ungetwc(0x20ac, f);
+        bool ok = q == 0xe9 && q2 == 0x4e00 && q3 == 'q' && q4 == 0x20ac && !errno;
+        const wint_t want[] = { 0x20ac, 'q', 0x4e00, 0xe9, 'a', 'b' };
+        for (wint_t w : want) {
+            ok = ok && fgetwc(f) == w;
+        }
+        report(ok, L + "4x ungetwc");
+        fclose(f);
+    }
+    if ((f = wio_in("abc", 3))) {
+        fgetwc(f); ungetwc(0xe9, f); fseek(f, 0, SEEK_SET);
+        report(fgetwc(f) == 'a', L + "ungetwc(e9) then fseek(0)");
+        fclose(f);
+    }
+    if ((f = wio_in("abc", 3))) {
+        fgetwc(f); ungetwc(0xe9, f);
+        report(ungetwc(WEOF, f) == WEOF, L + "ungetwc(WEOF)");
+        fclose(f);
+    }
+    if ((f = wio_in("ab", 2))) {
+        fgetc(f); errno = 0; q = ungetwc('x', f); e = errno;
+        report(q == 'x' && !e && fgetc(f) == 'x', L + "byte-oriented ungetwc");
+        fclose(f);
+    }
+    if ((f = wio_in("ab", 2))) {
+        int before = fwide(f, 0);
+        fgetwc(f);
+        report(before == 0 && fwide(f, 0) == 1, L + "fwide after fgetwc");
+        fclose(f);
+    }
+    if ((f = wio_in("a\xc3\xa9\n", 4))) {
+        wchar_t wb[8];
+        errno = 0; wchar_t *p = fgetws(wb, 8, f); e = errno;
+        // errno on success is not checked: musl's fgetws leaves EAGAIN.
+        report(u ? p && wb[0] == 'a' && wb[1] == 0xe9 : !p && e == EILSEQ, L + "fgetws(a c3a9)");
+        fclose(f);
+    }
+    if ((f = wio_in("\xc3\xa9 ", 3))) {
+        wchar_t ws[8] = {};
+        errno = 0; r = fwscanf(f, L"%ls", ws); e = errno;
+        report(u ? r == 1 && !e && ws[0] == 0xe9 : r == -1 && e == EILSEQ && !ws[0], L + "fwscanf(%ls c3a9)");
+        fclose(f);
+    }
+
+    // Wide-buffer streams never convert.
+    wchar_t ws[8] = {};
+    errno = 0; r = swprintf(ws, 8, L"%lc%lc", (wint_t)0xd800, (wint_t)0x7fffffff);
+    report(r == 2 && !errno && ws[0] == 0xd800 && ws[1] == 0x7fffffff, L + "swprintf(d800 7fffffff)");
+    r = swprintf(ws, 8, L"%ls", L"\uff41\u00e9");
+    report(r == 2 && ws[0] == 0xff41 && ws[1] == 0xe9, L + "swprintf(%ls ff41 e9)");
+    errno = 0; r = swprintf(ws, 8, L"%s", "\xc3\xa9");
+    report(u ? r == 1 && ws[0] == 0xe9 : r == -1 && errno == EILSEQ, L + "swprintf(%s c3a9)");
+    wchar_t *mb = nullptr;
+    size_t ms = 0;
+    if ((f = open_wmemstream(&mb, &ms))) {
+        fputwc(0xd800, f); fputwc(wchar_t(0x80000000u), f); fputwc(WEOF, f); fclose(f);
+        report(ms == 3 && mb[0] == 0xd800 && wint_t(mb[1]) == 0x80000000u && wint_t(mb[2]) == WEOF,
+               L + "wmemstream(d800 80000000 WEOF)");
+        free(mb);
+    }
+    wchar_t wb[4] = {};
+    r = swscanf(L"\xd800\x4e00 ", L"%ls", wb);
+    report(r == 1 && wb[0] == 0xd800 && wb[1] == 0x4e00, L + "swscanf(%ls d800 4e00)");
+    // The allocating forms, past their first 31-element buffer.
+    std::wstring big(40, wchar_t(0x4e00));
+    big += L" ab";
+    wchar_t *mp = nullptr;
+    char *cp = nullptr;
+    r = swscanf(big.c_str(), L"%mls %ms", &mp, &cp);
+    report(r == 2 && mp && wcslen(mp) == 40 && mp[39] == 0x4e00 && cp && !strcmp(cp, "ab"),
+           L + "swscanf(%mls %ms)");
+    free(mp);
+    free(cp);
+    setlocale(LC_ALL, "C");
+}
+
+// A byte-backed wide stream's conversion is bound at its first wide operation.
+static void test_wio_bind()
+{
+    locale_t u = newlocale(LC_ALL_MASK, "C.UTF-8", nullptr);
+    if (!u) {
+        report(false, "newlocale C.UTF-8");
+        return;
+    }
+    setlocale(LC_ALL, "C.UTF-8");
+    FILE *f = tmp();
+    fwide(f, 1);
+    setlocale(LC_ALL, "C");
+    errno = 0;
+    wint_t q = fputwc(0xe9, f);
+    report(q == 0xe9 && !errno && wio_out(f) == "c3a9", "bind: oriented in C.UTF-8, written in C");
+    f = tmp();
+    setlocale(LC_ALL, "C.UTF-8");
+    q = fputwc(0xe9, f);
+    report(q == 0xe9 && wio_out(f) == "c3a9", "bind: opened in C, first wide op in C.UTF-8");
+    setlocale(LC_ALL, "C");
+    uselocale(u);
+    f = tmp();
+    q = fputwc(0xe9, f);
+    uselocale(LC_GLOBAL_LOCALE);
+    report(q == 0xe9 && wio_out(f) == "c3a9", "bind: uselocale(C.UTF-8) thread, global C");
+    freelocale(u);
+}
+
 int main()
 {
     test_c();
@@ -664,6 +895,9 @@ int main()
     test_wide_sample("C", false);
     test_wide_sample("C.UTF-8", true);
     test_wide_descriptors();
+    test_wio("C", false);
+    test_wio("C.UTF-8", true);
+    test_wio_bind();
     printf("SUMMARY: %d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;
 }
