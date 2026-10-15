@@ -38,3 +38,7 @@ To regenerate, on a host with glibc and its C.UTF-8 locale:
 `libc/locale/ctype-utf8.cc`, `./check-tables ctype` prints the dump format and must have the sha256
 above, and `./check-tables translit` must equal `tr-glibc-C.txt` without its `ferror=0` line. A
 changed glibc gives a different dump; compare with `ctype-summary.py --compare A B`.
+
+`gen-ctype-sample.py ../../libc/locale/ctype-utf8.inc d-glibc-C.txt d-glibc-C.UTF-8.txt >
+../../tests/tst-locale-ctype-sample.h` writes the expected values tst-locale-ctype checks: 0..0x2ff,
+every run boundary of the generated tables, and 0x110000, 0x7fffffff and WEOF, in C and C.UTF-8.

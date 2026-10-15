@@ -19,6 +19,13 @@
 // as 5 or 6 bytes, while OSv's fails with EILSEQ, because musl's stdio
 // converts into 4-byte (MB_LEN_MAX) buffers and such values are never
 // Unicode. Those checks accept either answer.
+//
+// Wide classes, case maps and widths (B2): C has the C.UTF-8 answer below
+// 0x80, and above it no class, the identity map and width -1. The expected
+// values for a fixed sample of code points are glibc's, generated into
+// tst-locale-ctype-sample.h by scripts/locale-oracle/gen-ctype-sample.py.
+// wctype() and wctrans() descriptors are bound to the LC_CTYPE current at
+// the call; iswctype_l() and towctrans_l() ignore their locale argument.
 
 #include <cerrno>
 #include <clocale>
@@ -36,6 +43,9 @@
 #include <regex.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <wctype.h>
+
+#include "tst-locale-ctype-sample.h"
 
 static int tests, fails;
 
@@ -499,6 +509,151 @@ static void test_locale_objects()
     }
 }
 
+static const struct wclass {
+    const char *name;
+    int (*f)(wint_t);
+    int (*fl)(wint_t, locale_t);
+} wclasses[12] = {
+    {"alnum", iswalnum, iswalnum_l}, {"alpha", iswalpha, iswalpha_l},
+    {"blank", iswblank, iswblank_l}, {"cntrl", iswcntrl, iswcntrl_l},
+    {"digit", iswdigit, iswdigit_l}, {"graph", iswgraph, iswgraph_l},
+    {"lower", iswlower, iswlower_l}, {"print", iswprint, iswprint_l},
+    {"punct", iswpunct, iswpunct_l}, {"space", iswspace, iswspace_l},
+    {"upper", iswupper, iswupper_l}, {"xdigit", iswxdigit, iswxdigit_l},
+};
+
+// Mismatches of one property over the sample, reported once.
+struct tally {
+    int bad = 0;
+    unsigned first = 0;
+    void add(bool ok, unsigned cp)
+    {
+        if (!ok && !bad++) {
+            first = cp;
+        }
+    }
+    void report_as(const std::string &what) const
+    {
+        char b[64];
+        snprintf(b, sizeof(b), ": %d mismatches, first at %#x", bad, first);
+        report(!bad, what + " over " + std::to_string(sizeof(ctype_sample) / sizeof(*ctype_sample)) +
+               " code points" + (bad ? b : ""));
+    }
+};
+
+// The sample in locale name: the plain functions and descriptors with name
+// current, then the _l functions with name's object while the other locale
+// is current (iswctype_l and towctrans_l get the other object, ignored).
+static void test_wide_sample(const char *name, bool utf8)
+{
+    const char *other = utf8 ? "C" : "C.UTF-8";
+    locale_t l = newlocale(LC_ALL_MASK, name, nullptr);
+    locale_t lo = newlocale(LC_ALL_MASK, other, nullptr);
+    if (!l || !lo || !setlocale(LC_ALL, name)) {
+        report(false, std::string("locale ") + name);
+        return;
+    }
+    tally cls[12], cls_l[12], up, up_l, low, low_l, width, ws;
+    wctype_t t[12], t_l[12];
+    for (int i = 0; i < 12; i++) {
+        t[i] = wctype(wclasses[i].name);
+        t_l[i] = wctype_l(wclasses[i].name, l);
+    }
+    wctrans_t tu = wctrans("toupper"), tl = wctrans("tolower");
+    wctrans_t tu_l = wctrans_l("toupper", l), tl_l = wctrans_l("tolower", l);
+    for (int pass = 0; pass < 2; pass++) {
+        setlocale(LC_ALL, pass ? other : name);
+        for (auto &r : ctype_sample) {
+            wint_t wc = r.cp;
+            unsigned bits = utf8 ? r.ubits : r.cbits;
+            wint_t eu = wc + (utf8 ? r.uup : r.cup), el = wc + (utf8 ? r.ulo : r.clo);
+            int w = int(utf8 ? r.w >> 2 : r.w & 3) - 1;
+            for (int i = 0; i < 12; i++) {
+                bool e = bits >> i & 1;
+                if (pass) {
+                    cls_l[i].add(!!wclasses[i].fl(wc, l) == e && !!iswctype_l(wc, t_l[i], lo) == e, r.cp);
+                } else {
+                    cls[i].add(!!wclasses[i].f(wc) == e && !!iswctype(wc, t[i]) == e, r.cp);
+                }
+            }
+            if (pass) {
+                up_l.add(towupper_l(wc, l) == eu && towctrans_l(wc, tu_l, lo) == eu, r.cp);
+                low_l.add(towlower_l(wc, l) == el && towctrans_l(wc, tl_l, lo) == el, r.cp);
+            } else {
+                up.add(towupper(wc) == eu && towctrans(wc, tu) == eu, r.cp);
+                low.add(towlower(wc) == el && towctrans(wc, tl) == el, r.cp);
+                width.add(wcwidth(wchar_t(wc)) == w, r.cp);
+                wchar_t s2[2] = {wchar_t(wc), L'a'};
+                ws.add(wcswidth(s2, 2) == (w < 0 || !wc ? (wc ? -1 : 0) : w + 1), r.cp);
+            }
+        }
+    }
+    std::string n = name;
+    for (int i = 0; i < 12; i++) {
+        cls[i].report_as(n + " isw" + wclasses[i].name + "/iswctype");
+        cls_l[i].report_as(n + " isw" + wclasses[i].name + "_l/iswctype_l");
+    }
+    up.report_as(n + " towupper/towctrans");
+    up_l.report_as(n + " towupper_l/towctrans_l");
+    low.report_as(n + " towlower/towctrans");
+    low_l.report_as(n + " towlower_l/towctrans_l");
+    width.report_as(n + " wcwidth");
+    ws.report_as(n + " wcswidth");
+    freelocale(l);
+    freelocale(lo);
+    setlocale(LC_ALL, "C");
+}
+
+// Descriptor binding and invalid names.
+static void test_wide_descriptors()
+{
+    setlocale(LC_ALL, "C");
+    locale_t c = newlocale(LC_ALL_MASK, "C", nullptr);
+    locale_t u = newlocale(LC_ALL_MASK, "C.UTF-8", nullptr);
+    if (!c || !u) {
+        report(false, "newlocale C / C.UTF-8");
+        return;
+    }
+    wctype_t ac = wctype("alpha");
+    wctrans_t uc = wctrans("toupper");
+    report(!iswalpha(0xe9) && towupper(0xe9) == 0xe9 && wcwidth(0xe9) == -1, "C: 0xe9 no class, identity, width -1");
+    report(iswalpha_l(0xe9, u) && towupper_l(0xe9, u) == 0xc9 && !iswalpha_l(0xe9, c),
+           "C: isw*_l and tow*_l follow their locale");
+    setlocale(LC_ALL, "C.UTF-8");
+    wctype_t au = wctype("alpha");
+    wctrans_t uu = wctrans("toupper");
+    report(iswalpha(0xe9) && towupper(0xe9) == 0xc9 && wcwidth(0xe9) == 1, "C.UTF-8: 0xe9 alpha, upper 0xc9, width 1");
+    report(!iswctype(0xe9, ac) && towctrans(0xe9, uc) == 0xe9, "C descriptors stay C under C.UTF-8");
+    report(iswctype(L'a', ac) && towctrans(L'a', uc) == L'A', "C descriptors keep ASCII under C.UTF-8");
+    setlocale(LC_ALL, "C");
+    report(iswctype(0xe9, au) && towctrans(0xe9, uu) == 0xc9, "C.UTF-8 descriptors stay UTF-8 under C");
+    report(!iswctype_l(0xe9, ac, u) && towctrans_l(0xe9, uc, u) == 0xe9, "iswctype_l/towctrans_l ignore a UTF-8 locale");
+    report(iswctype_l(0xe9, au, c) && towctrans_l(0xe9, uu, c) == 0xc9, "iswctype_l/towctrans_l ignore a C locale");
+    report(iswctype(0xe9, wctype_l("alpha", u)) && towctrans(0xe9, wctrans_l("toupper", u)) == 0xc9,
+           "wctype_l/wctrans_l bind their UTF-8 locale");
+    setlocale(LC_ALL, "C.UTF-8");
+    report(!iswctype(0xe9, wctype_l("alpha", c)) && towctrans(0xe9, wctrans_l("toupper", c)) == 0xe9,
+           "wctype_l/wctrans_l bind their C locale");
+    setlocale(LC_ALL, "C");
+    uselocale(u);
+    wctype_t at = wctype("alpha");
+    uselocale(LC_GLOBAL_LOCALE);
+    report(iswctype(0xe9, at), "wctype under uselocale(C.UTF-8) binds UTF-8");
+    report(!wctype("bogus") && !wctype("") && !wctype("Alpha") && !wctype_l("bogus", u),
+           "wctype of an invalid name is 0");
+    report(!wctrans("bogus") && !wctrans("") && !wctrans("TOUPPER") && !wctrans_l("bogus", u),
+           "wctrans of an invalid name is NULL");
+    report(!iswctype(L'a', 0) && towctrans(L'a', nullptr) == L'a', "null descriptors: no class, identity");
+    report(wcswidth(L"ab\0c", 4) == 2 && wcswidth(L"abc", 2) == 2 && wcswidth(L"", 5) == 0,
+           "wcswidth stops at n and at L'\\0'");
+    setlocale(LC_ALL, "C.UTF-8");
+    report(wcswidth(L"e\u0301\u4e00", 3) == 3 && wcswidth(L"a\x7f", 2) == -1, "C.UTF-8 wcswidth");
+    setlocale(LC_ALL, "C");
+    report(wcswidth(L"a\u00e9", 2) == -1, "C wcswidth of non-ASCII is -1");
+    freelocale(c);
+    freelocale(u);
+}
+
 int main()
 {
     test_c();
@@ -506,6 +661,9 @@ int main()
     test_mbsnrtowcs_bound();
     test_wide_stream();
     test_locale_objects();
+    test_wide_sample("C", false);
+    test_wide_sample("C.UTF-8", true);
+    test_wide_descriptors();
     printf("SUMMARY: %d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;
 }
