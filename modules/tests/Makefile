@@ -306,6 +306,10 @@ internal-api-tests += tst-random-vfs.so
 # CONF-gated; the app links kernel symbols pmu::available()/program()/read()).
 ifeq ($(conf_pmu),1)
 tests += tst-pmu.so
+tests += tst-umount-release.so
+internal-api-tests += tst-umount-release.so
+ifeq ($(conf_zfs),openzfs)
+$(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
 
 # Tests with special compilation parameters needed...
