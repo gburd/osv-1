@@ -293,7 +293,9 @@ tests += tst-locale-builtin.so
 tests += tst-locale-ctype.so
 tests += misc-ctype-dump.so
 tests += tst-dentry-rename-child.so
+tests += tst-random-vfs.so
 internal-api-tests += tst-random-flush.so
+internal-api-tests += tst-random-vfs.so
 
 # PMU readout controls -- only built when conf_pmu=1 (the facility is
 # CONF-gated; the app links kernel symbols pmu::available()/program()/read()).
