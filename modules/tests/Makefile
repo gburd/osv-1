@@ -286,6 +286,7 @@ tests += tst-virtio-lifecycle.so
 internal-api-tests += tst-virtio-lifecycle.so
 
 tests += tst-libaio.so
+tests += tst-ramfs-unlink-race.so
 tests += tst-rlimit.so
 tests += misc-ext4-headers.so
 tests += tst-close-range.so
