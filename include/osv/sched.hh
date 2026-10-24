@@ -34,6 +34,7 @@
 #include <osv/fork_arena.hh>
 #endif
 #include <string.h>
+#include <osv/kernel_config_sched_wake_pull.h>
 
 typedef float runtime_t;
 
@@ -109,24 +110,53 @@ extern "C" {
 
 namespace bi = boost::intrusive;
 
-const unsigned max_cpus = sizeof(unsigned long) * 8;
+// Maximum number of CPUs OSv supports. Bounds cpu_set (below), the per-CPU
+// worker arrays, the ZFS per-CPU arrays (via MAXCPU, which must track this),
+// and the boot-time cpu count check in loader.cc. Larger than one machine word,
+// so cpu_set spans multiple words.
+const unsigned max_cpus = 256;
 
 class cpu_set {
+    static constexpr unsigned bits_per_word = sizeof(unsigned long) * 8;
+    static constexpr unsigned nwords = (max_cpus + bits_per_word - 1) / bits_per_word;
 public:
-    explicit cpu_set() : _mask() {}
-    cpu_set(const cpu_set& other) : _mask(other._mask.load(std::memory_order_relaxed)) {}
+    explicit cpu_set() {
+        for (auto& w : _words) {
+            w.store(0, std::memory_order_relaxed);
+        }
+    }
+    cpu_set(const cpu_set& other) {
+        for (unsigned i = 0; i < nwords; i++) {
+            _words[i].store(other._words[i].load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+        }
+    }
     void set(unsigned c) {
-        _mask.fetch_or(1UL << c, std::memory_order_release);
+        _words[c / bits_per_word].fetch_or(1UL << (c % bits_per_word),
+                                           std::memory_order_release);
     }
     bool test_and_set(unsigned c) {
-        unsigned bit = 1UL << c;
-        return _mask.fetch_or(bit, std::memory_order_release) & bit;
+        unsigned long bit = 1UL << (c % bits_per_word);
+        return _words[c / bits_per_word].fetch_or(bit, std::memory_order_release) & bit;
     }
+    // Set bit c and return whether c's WORD was non-empty beforehand. The
+    // wakeup path uses !test_all_and_set(c) to mean "this word was empty, send
+    // an IPI". We deliberately report only c's own word, not the whole set:
+    // the fetch_or here and the matching exchange in fetch_clear() are then the
+    // same single atomic on one word, so the per-word drain cannot race the
+    // per-word test (the invariant the original single-word cpu_set relied on).
+    // Scanning the other words instead would reintroduce a lost-wakeup race:
+    // this word's bit could be set-and-reported-non-empty against another
+    // word's bit that the target has already drained past, stranding the
+    // wakeup with no IPI. The cost of reporting per-word is at most one extra
+    // IPI per word (so none below 64 CPUs, where the whole set is one word).
     bool test_all_and_set(unsigned c) {
-        return _mask.fetch_or(1UL << c, std::memory_order_release);
+        unsigned long bit = 1UL << (c % bits_per_word);
+        return _words[c / bits_per_word].fetch_or(bit, std::memory_order_release) != 0;
     }
     void clear(unsigned c) {
-        _mask.fetch_and(~(1UL << c), std::memory_order_release);
+        _words[c / bits_per_word].fetch_and(~(1UL << (c % bits_per_word)),
+                                            std::memory_order_release);
     }
     class iterator;
     iterator begin() {
@@ -137,14 +167,21 @@ public:
     }
     cpu_set fetch_clear() {
         cpu_set ret;
-        if (_mask.load(std::memory_order_relaxed)) {
-            ret._mask.store(_mask.exchange(0, std::memory_order_acquire),
-                            std::memory_order_relaxed);
+        for (unsigned i = 0; i < nwords; i++) {
+            if (_words[i].load(std::memory_order_relaxed)) {
+                ret._words[i].store(_words[i].exchange(0, std::memory_order_acquire),
+                                    std::memory_order_relaxed);
+            }
         }
         return ret;
     }
     operator bool() const {
-        return _mask.load(std::memory_order_relaxed);
+        for (unsigned i = 0; i < nwords; i++) {
+            if (_words[i].load(std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
     }
     class iterator {
     public:
@@ -183,20 +220,24 @@ public:
         }
     private:
         void advance() {
-            unsigned long tmp = _set._mask.load(std::memory_order_relaxed);
-            tmp &= ~((1UL << _idx) - 1);
-            if (tmp) {
-                _idx = __builtin_ctzl(tmp);
-            } else {
-                _idx = max_cpus;
+            unsigned w = _idx / bits_per_word;
+            unsigned b = _idx % bits_per_word;
+            for (; w < nwords; w++, b = 0) {
+                unsigned long tmp = _set._words[w].load(std::memory_order_relaxed);
+                tmp &= ~((1UL << b) - 1);
+                if (tmp) {
+                    _idx = w * bits_per_word + __builtin_ctzl(tmp);
+                    return;
+                }
             }
+            _idx = max_cpus;
         }
     private:
         cpu_set& _set;
         unsigned _idx;
     };
 private:
-    std::atomic<unsigned long> _mask;
+    std::atomic<unsigned long> _words[nwords];
 };
 
 class timer_base {
@@ -1085,6 +1126,14 @@ struct cpu : private timer_base::client {
     timer_list timers;
     timer_base preemption_timer;
     thread* idle_thread;
+    // Adaptive idle-spin window: how many spin iterations this CPU polls
+    // incoming_wakeups before halting.  Written only by this CPU in do_idle
+    // (jumped to the cap on a caught wake, walked down after a run of genuine
+    // halts), so no atomic needed.  0 = uninitialized; seeded to the cap on
+    // first idle entry.  idle_halt_streak counts consecutive genuine halts so a
+    // single stray halt on a busy CPU does not collapse the window.
+    unsigned idle_spin_window = 0;
+    unsigned idle_halt_streak = 0;
     // if true, cpu is now polling incoming_wakeups_mask
     std::atomic<bool> idle_poll = { false };
     // there is a data dependency between next two fields
@@ -1128,6 +1177,18 @@ struct cpu : private timer_base::client {
     // park_wakeup_timer callback: wake all due parked threads.
     void park_timer_fired();
 #endif
+
+#if CONF_sched_wake_pull
+    // Idle-CPU PULL (work-stealing) request slot.  When this CPU goes idle it
+    // may ask the most-loaded CPU to donate a runnable thread: it stores its
+    // own cpu* here on the victim and IPIs the victim.  The victim's IPI
+    // handler (running in the victim's own context, so it is same-CPU-safe --
+    // identical bookkeeping to load_balance()'s source-side migration) reads
+    // this and pushes one migratable thread into the requester's
+    // incoming_wakeups.  Single-slot: at most one outstanding donate request
+    // per victim, which self-throttles the pull rate.
+    std::atomic<cpu*> pull_donate_to = { nullptr };
+#endif
     static cpu* current();
     void init_on_cpu();
     static void schedule();
@@ -1139,6 +1200,14 @@ struct cpu : private timer_base::client {
     void idle_poll_end();
     void send_wakeup_ipi();
     void load_balance();
+#if CONF_sched_wake_pull
+    // Idle path: if this CPU is idle, request one thread from the busiest CPU
+    // (see pull_donate_to).  Returns true if a request was sent.
+    bool try_pull_from_busiest();
+    // IPI handler on the victim CPU: donate one migratable runnable thread to
+    // the CPU recorded in pull_donate_to.  Runs in the victim's own context.
+    void donate_to_puller();
+#endif
     unsigned load();
     /**
      * Try to reschedule.

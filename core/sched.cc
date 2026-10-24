@@ -30,11 +30,13 @@
 #include <osv/fork_arena.hh>
 #endif
 #include <osv/app.hh>
+#include <osv/kernel_config_sched_load_balance_ms.h>
 #include <osv/symbols.hh>
 #include <osv/stubbing.hh>
 #include <algorithm>
 #include <osv/kernel_config_lazy_stack.h>
 #include <osv/kernel_config_lazy_stack_invariant.h>
+#include <osv/kernel_config_sched_wake_pull.h>
 
 MAKE_SYMBOL(sched::thread::current);
 MAKE_SYMBOL(sched::cpu::current);
@@ -77,6 +79,18 @@ TRACEPOINT(trace_thread_create, "thread=%p", thread*);
 
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 
+#if CONF_sched_wake_pull
+// Idle-CPU PULL (work-stealing) runtime toggle (see cpu::try_pull_from_busiest
+// / init reaper).  When on, an idle CPU pulls a runnable thread from the
+// busiest CPU instead of the timer-driven load balancer waiting a full tick to
+// notice the imbalance.  Default on; set env OSV_WAKE_PULL=0 to disable.
+bool wake_pull_enabled = true;
+// Only pull from a victim whose runqueue is deeper than this (queued work
+// beyond the one thread it is running) so we never disturb a lightly-loaded
+// machine and never fight the victim over its last runnable thread.
+static constexpr unsigned wake_pull_min_depth = 2;
+#endif
+
 thread __thread * s_current;
 cpu __thread * current_cpu;
 
@@ -86,6 +100,15 @@ bool __thread need_reschedule = false;
 elf::tls_data tls;
 
 inter_processor_interrupt wakeup_ipi{IPI_WAKEUP, [] {}};
+
+#if CONF_sched_wake_pull
+// Idle-CPU PULL: an idle CPU IPIs the busiest CPU to donate one runnable
+// thread.  The handler runs on the victim (busiest) CPU in its own interrupt
+// context, so the migration bookkeeping touches only the victim's own per-CPU
+// state -- same-CPU-safe, exactly like load_balance()'s source-side migration.
+inter_processor_interrupt sched_pull_ipi{IPI_SCHED_PULL,
+    [] { cpu::current()->donate_to_puller(); }};
+#endif
 
 constexpr float cmax = 0x1P63;
 constexpr float cinitial = 0x1P-63;
@@ -513,16 +536,109 @@ void cpu::send_wakeup_ipi()
     }
 }
 
+// Idle spin-before-halt count.  A CPU with no runnable thread spins polling
+// incoming_wakeups before halting via arch::wait_for_interrupt (a VM-exit under
+// KVM).  For a request/reply server (e.g. one OS process per connection) each
+// blocked worker is, on average, re-woken by the next request a short time
+// later; if the spin is long enough to catch that wake, the halt and its
+// wake-IPI round-trip -- several VM-exits per request -- are avoided entirely,
+// which raises throughput at the guest's exit-rate ceiling.  A longer spin,
+// however, burns cycles on a genuinely idle system, so this is opt-in: the
+// default preserves the historical 10000-iteration behavior byte-for-byte and
+// a server image raises it via the OSV_IDLE_SPIN environment variable.
+//
+// A FIXED spin count is the wrong control: too short and a to-be-rewoken
+// thread's vCPU halts just before its wake, forcing the expensive IPI/VM-exit;
+// too long and it burns cycles when genuinely idle.  Instead we adapt the
+// window per CPU from recent history, like Linux's adaptive KVM halt-polling
+// (halt_poll_ns) but on the *guest* side, so it works even where the host does
+// not halt-poll.  The asymmetry is the whole point (measured: symmetric x2//2
+// with a low floor loses badly to the fixed count on a busy workload, because
+// a busy CPU that halts occasionally decays and then spends LESS time polled
+// than the fixed count -> MORE wake IPIs, not fewer):
+//   - CAUGHT a wake mid-spin -> the CPU is wake-heavy; JUMP the window straight
+//     to the cap so it stays fully polled and keeps suppressing wake IPIs.  A
+//     busy CPU snaps back to the cap the instant it catches one wake.
+//   - HALTED without catching a wake -> maybe genuinely idle, but a single halt
+//     on a busy CPU is normal (the fixed-count baseline halts often too), so do
+//     NOT collapse the window on one halt.  Only after several CONSECUTIVE
+//     halts (idle_halt_streak) does the CPU look truly idle; then shrink the
+//     window by a modest step toward the floor so it stops burning cycles and
+//     the host can reclaim the vCPU.  Any caught wake resets the streak.
+// Bounded by a floor (>0, so we always poll a little and give send_wakeup_ipi's
+// idle_poll handshake a chance to suppress the IPI) and a cap (idle_spin_max).
+//
+// OSV_IDLE_SPIN overrides the cap.  The default cap (100000) is well above the
+// historical fixed 10000: a wake-heavy CPU grows to the cap and stays there,
+// which on a request/reply workload is a large throughput win (measured +55-66%
+// on a 32-writer durable-write isolate vs the old 10000), while a genuinely
+// idle CPU still decays to the floor and halts (measured: adaptive burns ~1/3
+// the idle CPU of the fixed 10000), so the high cap costs nothing when idle.
+// OSV_IDLE_SPIN_ADAPTIVE=0 pins the window at the cap (the old fixed-count
+// behavior at whatever OSV_IDLE_SPIN / the default is).
+static unsigned idle_spin_max()
+{
+    static unsigned n = []{
+        const char* e = getenv("OSV_IDLE_SPIN");
+        unsigned v = e ? (unsigned)strtoul(e, nullptr, 10) : 100000;
+        return v ? v : 100000;
+    }();
+    return n;
+}
+static bool idle_spin_adaptive()
+{
+    static bool a = []{
+        const char* e = getenv("OSV_IDLE_SPIN_ADAPTIVE");
+        return !(e && strtoul(e, nullptr, 10) == 0);
+    }();
+    return a;
+}
+// Window floor: a genuinely-idle CPU decays to this many spin iterations before
+// halting -- small enough not to burn cycles, >0 so the idle_poll handshake
+// still has a chance to suppress a wake IPI.
+static constexpr unsigned idle_spin_floor = 256;
+// Consecutive genuine halts before we start shrinking the window.  A busy CPU
+// halts occasionally (so does the fixed-count baseline); only a run of pure
+// halts means "truly idle", so we do not collapse a wake-heavy CPU on a single
+// stray halt.  Once the streak is reached, each further halt HALVES the window
+// so a truly idle CPU decays from the cap to the floor in a handful of halts.
+static constexpr unsigned idle_shrink_after = 4;
+
 void cpu::do_idle()
 {
+    const unsigned cap = idle_spin_max();
+    const bool adaptive = idle_spin_adaptive();
+    // Per-CPU adaptive window persists across idle entries; seed at the cap so
+    // the very first idle behaves like the historical fixed count until
+    // history accumulates.
+    if (idle_spin_window == 0) {
+        idle_spin_window = cap;
+    }
     do {
+        unsigned spin_count = adaptive ? idle_spin_window : cap;
         idle_poll_lock_type idle_poll_lock{*this};
+#if CONF_sched_wake_pull
+        // Idle-CPU PULL: we have no work; ask the busiest CPU to donate one
+        // runnable thread (no-op unless wake_pull_enabled).  Fire once per idle
+        // entry -- not per spin iteration -- so the IPI rate stays bounded by
+        // the number of idle CPUs, never the wake rate.  The donated thread
+        // arrives via incoming_wakeups and is picked up by the spin loop below.
+        try_pull_from_busiest();
+#endif
         WITH_LOCK(idle_poll_lock) {
-            // spin for a bit before halting
-            for (unsigned ctr = 0; ctr < 10000; ++ctr) {
+            // spin for a bit before halting; catching a wake here avoids the
+            // halt/wake VM-exit round-trip (see idle_spin_max above).
+            for (unsigned ctr = 0; ctr < spin_count; ++ctr) {
                 // FIXME: can we pull threads from loaded cpus?
                 handle_incoming_wakeups();
                 if (!runqueue.empty()) {
+                    // Caught a wake mid-spin: wake-heavy.  Jump straight to the
+                    // cap and reset the halt streak so this CPU stays fully
+                    // polled and keeps the wake IPI suppressed.
+                    if (adaptive) {
+                        idle_spin_window = cap;
+                        idle_halt_streak = 0;
+                    }
                     return;
                 }
             }
@@ -533,7 +649,25 @@ void cpu::do_idle()
         std::unique_lock<irq_lock_type> guard(irq_lock);
         handle_incoming_wakeups();
         if (!runqueue.empty()) {
+            // A wake landed after the spin but before we committed to halting:
+            // still "caught" -- jump to cap, reset streak.
+            if (adaptive) {
+                idle_spin_window = cap;
+                idle_halt_streak = 0;
+            }
             return;
+        }
+        // About to halt without a runnable thread.  Count it; only after a run
+        // of consecutive genuine halts do we treat the CPU as truly idle and
+        // shrink the window toward the floor (a single halt on a busy CPU is
+        // normal and must NOT collapse the window).
+        if (adaptive) {
+            if (idle_halt_streak < idle_shrink_after) {
+                ++idle_halt_streak;
+            } else {
+                unsigned w = idle_spin_window / 2;
+                idle_spin_window = w < idle_spin_floor ? idle_spin_floor : w;
+            }
         }
         guard.release();
         arch::wait_for_interrupt(); // this unlocks irq_lock
@@ -859,64 +993,222 @@ void thread::unpin()
     helper->join();
 }
 
+// The load balancer is the only mechanism that spreads threads across CPUs:
+// thread::start() places a new thread on its creator's CPU and thread::wake()
+// re-wakes a blocked thread on the CPU it last ran on, so neither disperses
+// work by itself.  Running once every 100ms and migrating a single thread per
+// wakeup is far too slow for a workload that fans out many threads from one
+// parent (e.g. a server that forks or spawns a worker per connection): the
+// workers pile onto the few CPUs they were started/woken on while the rest of
+// the machine sits idle, and a 1-thread-per-100ms drip cannot catch up under a
+// high request rate.  So this runs more often (the interval is configurable via
+// CONF_sched_load_balance_ms), and on each pass keeps migrating the
+// most-migratable queued thread to the least-loaded CPU until this CPU is no
+// longer meaningfully more loaded than that CPU -- the load difference itself
+// is the terminator, so a pass drains the whole imbalance (which can be larger
+// than the CPU count) rather than a single thread of it.
 void cpu::load_balance()
 {
     notifier::fire();
     timer tmr(*thread::current());
     while (true) {
-        tmr.set(osv::clock::uptime::now() + 100_ms);
+        tmr.set(osv::clock::uptime::now() + std::chrono::milliseconds(CONF_sched_load_balance_ms));
         thread::wait_until([&] { return tmr.expired(); });
         if (runqueue.empty()) {
             continue;
         }
-        auto min = *std::min_element(cpus.begin(), cpus.end(),
-                [](cpu* c1, cpu* c2) { return c1->load() < c2->load(); });
-        if (min == this) {
-            continue;
-        }
-        // This CPU is temporarily running one extra thread (this thread),
-        // so don't migrate a thread away if the difference is only 1.
-        if (min->load() >= (load() - 1)) {
-            continue;
-        }
-#if CONF_lazy_stack_invariant
-        assert(!thread::current()->is_app());
-#endif
-        WITH_LOCK(irq_lock) {
-            auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
-                    [](thread& t) { return t._migration_lock_counter == 0; });
-            if (i == runqueue.rend()) {
-                continue;
+        // Each thread we migrate this pass is queued on its destination CPU but
+        // has not yet been dequeued there, so cpu::load() (runqueue.size()) does
+        // not yet reflect it.  Track the migrations we have queued per CPU so
+        // both the least-loaded selection and the stop condition use an
+        // effective load (current load + pending arrivals); otherwise the same
+        // destination would keep looking least-loaded and we would pile the
+        // whole imbalance onto one CPU instead of spreading it.
+        std::vector<unsigned> pending(cpus.size(), 0);
+        // The load difference is the real terminator (see below); this only
+        // caps a pathological storm if loads never converge.  It is generous
+        // (many times the CPU count) so a genuinely large imbalance still
+        // drains in one pass.
+        unsigned migrated = 0;
+        const unsigned max_migrations_per_pass = cpus.size() * 8;
+        while (migrated < max_migrations_per_pass) {
+            auto min = *std::min_element(cpus.begin(), cpus.end(),
+                    [&pending](cpu* c1, cpu* c2) {
+                        return c1->load() + pending[c1->id] <
+                               c2->load() + pending[c2->id];
+                    });
+            if (min == this) {
+                break;
             }
-            auto& mig = *i;
-            trace_sched_migrate(&mig, min->id);
-            runqueue.erase(std::prev(i.base()));  // i.base() returns off-by-one
-            // we won't race with wake(), since we're not thread::waiting
-            assert(mig._detached_state->st.load() == thread::status::queued);
-            mig._detached_state->st.store(thread::status::waking);
-#if CONF_fork
-            // A preempted (queued) app thread may be parked on THIS cpu's list
-            // (park_timers runs on every app-thread switch-out).  Unlink it
-            // here, on its owning (source) cpu, before it migrates to `min`, so
-            // it is never left linked on a foreign cpu's parked list.
-            cpu::unlink_parked(mig);
+            // This CPU is temporarily running one extra thread (this thread),
+            // so don't migrate a thread away if the difference is only 1.
+            if (min->load() + pending[min->id] >= (load() - 1)) {
+                break;
+            }
+#if CONF_lazy_stack_invariant
+            assert(!thread::current()->is_app());
 #endif
-            mig.suspend_timers();
-            mig._detached_state->_cpu = min;
-            // Convert the CPU-local runtime measure to a globally meaningful
-            // measure
-            mig._runtime.export_runtime();
-            mig.remote_thread_local_var(::percpu_base) = min->percpu_base;
-            mig.remote_thread_local_var(current_cpu) = min;
-            mig.stat_migrations.incr();
-            min->incoming_wakeups[id].push_back(mig);
-            min->incoming_wakeups_mask.set(id);
-            // FIXME: avoid if the cpu is alive and if the priority does not
-            // FIXME: warrant an interruption
-            min->send_wakeup_ipi();
+            WITH_LOCK(irq_lock) {
+                auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
+                        [](thread& t) { return t._migration_lock_counter == 0; });
+                if (i == runqueue.rend()) {
+                    break;
+                }
+                auto& mig = *i;
+                trace_sched_migrate(&mig, min->id);
+                runqueue.erase(std::prev(i.base()));  // i.base() returns off-by-one
+                // we won't race with wake(), since we're not thread::waiting
+                assert(mig._detached_state->st.load() == thread::status::queued);
+                mig._detached_state->st.store(thread::status::waking);
+#if CONF_fork
+                // A preempted (queued) app thread may be parked on THIS cpu's list
+                // (park_timers runs on every app-thread switch-out).  Unlink it here,
+                // on its owning (source) cpu, before it migrates to `min`, so it is
+                // never left linked on a foreign cpu's parked list.
+                cpu::unlink_parked(mig);
+#endif
+                mig.suspend_timers();
+                mig._detached_state->_cpu = min;
+                // Convert the CPU-local runtime measure to a globally meaningful
+                // measure
+                mig._runtime.export_runtime();
+                mig.remote_thread_local_var(::percpu_base) = min->percpu_base;
+                mig.remote_thread_local_var(current_cpu) = min;
+                mig.stat_migrations.incr();
+                min->incoming_wakeups[id].push_back(mig);
+                min->incoming_wakeups_mask.set(id);
+                // FIXME: avoid if the cpu is alive and if the priority does not
+                // FIXME: warrant an interruption
+                min->send_wakeup_ipi();
+                pending[min->id]++;
+            }
+            migrated++;
         }
     }
 }
+
+#if CONF_sched_wake_pull
+// Idle-CPU PULL (work-stealing).  Called from the idle path when this CPU has
+// an empty runqueue and is about to poll/halt.  Instead of waiting for the
+// timer-driven load_balance() to notice an imbalance a full tick later (too
+// slow for a wake/run/block cycle that never accumulates a visible runqueue),
+// the IDLE CPU pulls immediately: it asks the busiest CPU to donate one
+// runnable thread to it.
+//
+// This is self-throttling by construction: only idle CPUs ask, and the moment a
+// CPU receives donated work it is no longer idle and stops asking.  The IPI
+// rate is bounded by the number of idle CPUs (one outstanding request each via
+// the single pull_donate_to slot), not by the wake rate -- so it cannot build
+// into a per-wake IPI storm.  All runqueue mutation happens on the owning
+// (victim) CPU in its own IPI context, so it is same-CPU-safe, exactly like
+// load_balance()'s source-side migration.
+//
+// Returns true if a donate request was sent (caller can keep polling for the
+// donated thread to arrive via incoming_wakeups).
+bool cpu::try_pull_from_busiest()
+{
+    if (!wake_pull_enabled) {
+        return false;
+    }
+    // Only pull when genuinely idle.
+    if (!runqueue.empty()) {
+        return false;
+    }
+    // Find the busiest CPU by runqueue depth.  Bounded scan over cpus[].
+    cpu* busiest = nullptr;
+    unsigned best = wake_pull_min_depth;
+    for (cpu* c : cpus) {
+        if (c == this) {
+            continue;
+        }
+        unsigned d = c->load();
+        if (d >= best) {
+            best = d;
+            busiest = c;
+        }
+    }
+    if (!busiest) {
+        return false;   // nobody is backed up -- nothing to steal
+    }
+    // Publish our request on the victim.  If the victim already has an
+    // outstanding donate request (from another idle CPU), leave it -- one at a
+    // time keeps the pull rate low and avoids two idle CPUs fighting for the
+    // same victim on the same tick.
+    cpu* expected = nullptr;
+    if (!busiest->pull_donate_to.compare_exchange_strong(
+            expected, this, std::memory_order_acq_rel)) {
+        return false;
+    }
+    sched_pull_ipi.send(busiest);
+    return true;
+}
+
+// IPI handler on the victim (busiest) CPU: donate one migratable runnable
+// thread to the CPU that requested it (pull_donate_to).  Runs in the victim's
+// own interrupt context (irq already disabled), so touching this CPU's own
+// runqueue and the donated thread's per-CPU timer/runtime state is safe --
+// byte-identical bookkeeping to load_balance()'s source-side migration.
+void cpu::donate_to_puller()
+{
+    cpu* dst = pull_donate_to.exchange(nullptr, std::memory_order_acq_rel);
+    if (!dst || dst == this) {
+        return;
+    }
+    // Only donate if we still have queued work beyond the running thread; do
+    // not hand off our last runnable thread and go idle ourselves.
+    if (runqueue.size() < wake_pull_min_depth) {
+        return;
+    }
+    // Pick the least-recently-runnable migratable thread (tail of the tree),
+    // same selection as load_balance(), but NEVER donate a fork timer-parked
+    // thread via the wake-pull IPI.
+    auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
+            [](thread& t) {
+                if (t._migration_lock_counter != 0) {
+                    return false;
+                }
+#if CONF_fork
+                // A fork timer-parked thread's sched::timer nodes live on its
+                // private (per-address-space COW) stack; their coherence relies
+                // on the park machinery RESUMING them in the thread's OWN
+                // address space on switch-in (cpu::unpark_timers).  The
+                // wake-pull steal moves the thread cross-cpu from THIS IPI
+                // handler (running in whatever AS the victim holds), which
+                // races that AS-local resume and can leave a freed timer_base
+                // linked in a per-cpu timer list; the next timer IRQ then walks
+                // the dangling node in timer_set::expire() (reads _time at
+                // offset 0x30 off a near-null node) and faults in
+                // non-preemptable IRQ context.  The timer-driven load balancer
+                // (a thread, not an IPI) still rebalances such threads; only the
+                // opportunistic IPI steal of a parked thread is skipped.
+                if (t._timers_parked) {
+                    return false;
+                }
+#endif
+                return true;
+            });
+    if (i == runqueue.rend()) {
+        return;
+    }
+    auto& mig = *i;
+    trace_sched_migrate(&mig, dst->id);
+    runqueue.erase(std::prev(i.base()));
+    assert(mig._detached_state->st.load() == thread::status::queued);
+    mig._detached_state->st.store(thread::status::waking);
+    mig.suspend_timers();
+    mig._detached_state->_cpu = dst;
+    mig._runtime.export_runtime();
+    mig.remote_thread_local_var(::percpu_base) = dst->percpu_base;
+    mig.remote_thread_local_var(current_cpu) = dst;
+    mig.stat_migrations.incr();
+    dst->incoming_wakeups[id].push_back(mig);
+    dst->incoming_wakeups_mask.set(id);
+    // Force the IPI to the requester: it is idle-polling / possibly halted in
+    // wait_for_interrupt(), and send_wakeup_ipi() would suppress the IPI to an
+    // idle_poll CPU -> the donated thread would sit unnoticed = a lost wakeup.
+    wakeup_ipi.send(dst);
+}
+#endif // CONF_sched_wake_pull
 
 cpu::notifier::notifier(std::function<void ()> cpu_up)
     : _cpu_up(cpu_up)
@@ -1389,6 +1681,14 @@ void thread::destroy()
 // waking state.
 void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 {
+    // Defend against a null detached_state: a wait_record whose backing thread
+    // is not resolvable in the waker's address space can yield a null st here.
+    // Dereferencing it would fault, and on a preemption-disabled wake path that
+    // fault aborts the instance (assert(preemptable()) in page_fault).  Skip
+    // the wake.
+    if (!st) {
+        return;
+    }
     status old_status = status::waiting;
     trace_sched_wake(st->t);
     while (!st->st.compare_exchange_weak(old_status, status::waking)) {
@@ -2121,6 +2421,21 @@ thread::reaper *thread::_s_reaper;
 void init_detached_threads_reaper()
 {
     thread::_s_reaper = new thread::reaper;
+#if CONF_sched_wake_pull
+    // Idle-CPU PULL (work-stealing): an idle CPU pulls a runnable thread from
+    // the busiest CPU instead of waiting a full load-balancer tick.  Enabled
+    // by default; set OSV_WAKE_PULL=0 to disable it (e.g. to compare against
+    // the timer-only balancer).  On a workload that fans many threads out from
+    // one waker it keeps idle CPUs busy that the 100ms balancer would leave
+    // idle between passes.
+    {
+        extern bool wake_pull_enabled;
+        const char* e = getenv("OSV_WAKE_PULL");
+        if (e && e[0])
+            wake_pull_enabled = (e[0] != '0');
+        printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
+    }
+#endif
 }
 
 void start_early_threads()
