@@ -147,6 +147,11 @@ inline int net::txq::xmit(mbuf* buff)
     return _xmitter.xmit(buff);
 }
 
+void net::txq::wake_tx_reaper()
+{
+    _xmitter.wake_for_reap();
+}
+
 inline bool net::txq::kick_hw()
 {
     bool kicked = vqueue->kick();
@@ -225,6 +230,16 @@ bool net::ack_irq()
     } else {
         return false;
     }
+}
+
+void net::wake_tx_reaper()
+{
+    // Wake queue 0's Tx xmitter worker to reap HW completions. On virtio-MMIO
+    // the single shared IRQ (net::ack_irq) services only Rx; without this the
+    // xmitter can sleep through Tx completions (a lost-wake window that the
+    // virtio-PCI per-queue Tx MSI-X vector otherwise masks), the ring's free
+    // descriptors never replenish, and Tx stalls under load.
+    _txqs[0]->wake_tx_reaper();
 }
 
 void net::init()
@@ -327,13 +342,25 @@ net::net(virtio_device& dev)
             gic::irq_type::IRQ_TYPE_EDGE,
             _dev.get_irq(),
             [=] { return this->ack_irq(); },
-            [=] { poll_task->wake_with_irq_disabled(); });
+            [=] {
+                poll_task->wake_with_irq_disabled();
+                this->wake_tx_reaper();
+            });
     };
 #else
     int_factory.create_gsi_edge_interrupt = [this,poll_task]() {
         return new gsi_edge_interrupt(
             _dev.get_irq(),
-            [=] { if (this->ack_irq()) poll_task->wake_with_irq_disabled(); });
+            [=] {
+                if (this->ack_irq()) {
+                    poll_task->wake_with_irq_disabled();
+                }
+                // The shared MMIO IRQ also carries Tx completions, which
+                // ack_irq() does not service (it only quiesces Rx). Wake the Tx
+                // reaper (IRQ-safe) so completions are reclaimed; virtio-PCI
+                // gets this from its dedicated per-queue Tx MSI-X vector.
+                this->wake_tx_reaper();
+            });
     };
 #endif
 #endif

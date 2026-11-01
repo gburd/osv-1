@@ -231,6 +231,9 @@ public:
     static void do_free_large_buffer(void* buffer);
 
     bool ack_irq();
+    // Wake the Tx reaper (xmitter worker) for queue 0 so Tx completions are
+    // reclaimed on transports (virtio-MMIO) whose shared IRQ services only Rx.
+    void wake_tx_reaper();
 
     static hw_driver* probe(hw_device* dev);
 
@@ -396,6 +399,15 @@ private:
          * @return TRUE if the vring has been actually indicated.
          */
         bool kick_hw();
+
+        // Reap completed HW Tx descriptors (public wrapper around gc()).
+        // Called by the xmitter worker each wake so a transport whose
+        // completion IRQ does not drive the xmitter (virtio-MMIO) still
+        // reclaims completions. Runs under the xmitter running-lock.
+        void reap_tx() { gc(); }
+
+        // Wake this queue's xmitter worker to reap Tx completions (MMIO IRQ).
+        void wake_tx_reaper();
 
         int xmit(mbuf* m_head);
 

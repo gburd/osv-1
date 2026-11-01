@@ -255,6 +255,22 @@ public:
         }
     }
 
+    //
+    // Wake a Tx worker to reap HW completions. Used by transports whose
+    // completion interrupt does not otherwise drive the xmitter (virtio-MMIO:
+    // the single shared IRQ services only Rx). Idempotent and cheap: it sets
+    // the PENDING flag and wakes one worker, which will grab the running lock,
+    // reap completions (_txq->reap_tx()), drain any queued packets, and sleep
+    // again if there is nothing to do. Safe to call from interrupt context.
+    //
+    void wake_for_reap() {
+        // Called from interrupt context (virtio-MMIO shared IRQ): must not take
+        // a sleeping lock. Set PENDING and wake CPU0's worker with the IRQ-safe
+        // primitive (the same one the Rx poll thread uses from its IRQ).
+        test_and_set_pending();
+        _worker.for_cpu(sched::cpus[0])->me->wake_with_irq_disabled();
+    }
+
     /**
      * A main transmit function: will try to bypass the per-CPU queue if
      * possible and will push the frame into that queue otherwise.
@@ -384,6 +400,13 @@ private:
             // and check the _mg.pop() again.
             //
             clear_pending_weak();
+
+            // Reap completed HW Tx descriptors every wake. On a transport
+            // without a dedicated Tx completion interrupt (virtio-MMIO) an
+            // IRQ-driven wake_for_reap() wake arrives with an empty packet
+            // queue, so this is the only place idle-queue completions are
+            // reclaimed (replenishing the ring free-descriptor accounting).
+            _txq->reap_tx();
 
             // Check if there are elements in the heap
             if (!_mg.pop(_xmit_it)) {

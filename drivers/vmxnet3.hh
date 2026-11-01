@@ -168,6 +168,7 @@ public:
     void kick_pending();
     void kick_pending_with_thresh();
     bool kick_hw();
+    void reap_tx() { gc(); }
     int xmit_prep(mbuf* m_head, void*& cooky);
     int try_xmit_one_locked(void* cooky);
     void xmit_one_locked(void *req);
