@@ -176,18 +176,3 @@ bdev_write(struct device *dev, struct uio *uio, int ioflags)
 
 	return 0;
 }
-
-
-int
-physio(struct device *dev, struct uio *uio, int ioflags)
-{
-	if (uio->uio_offset + uio->uio_resid > dev->size)
-		return EIO;
-	if (uio->uio_offset < 0)
-		return EINVAL;
-	if (uio->uio_resid == 0)
-		return 0;
-
-	return bdev_strategy_rw(dev, uio,
-	    uio->uio_rw == UIO_READ ? BIO_READ : BIO_WRITE);
-}
