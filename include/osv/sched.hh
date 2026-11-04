@@ -17,6 +17,7 @@
 #include <boost/intrusive/set.hpp>
 #include <boost/intrusive/list.hpp>
 #include <osv/mutex.h>
+#include <osv/spinlock.h>
 #include <atomic>
 #include "osv/lockless-queue.hh"
 #include <array>
@@ -906,6 +907,14 @@ private:
     };
     std::unique_ptr<detached_state> _detached_state;
     attr _attr;
+    // ttwu remote-enqueue (CONF_sched_ttwu / OSV_TTWU=1): when a cross-CPU waker
+    // inserts this thread directly onto the target CPU's runqueue, it must NOT
+    // touch the target CPU's per-CPU timer_set (owned by that CPU).  So it
+    // enqueues WITHOUT resume_timers and sets this flag; the target CPU drains
+    // it in reschedule_from_interrupt (resume_timers in the target's own
+    // context).  Plain bool, only ever set by the waker under the target's
+    // runqueue_lock and cleared by the target under the same lock -> no race.
+    bool _resume_timers_pending = false;
     int _migration_lock_counter;
     // _migration_lock_counter being set may be temporary, but if _pinned
     // is true, it was permanently incremented by 1 by sched::thread::pin().
@@ -1129,6 +1138,29 @@ struct cpu : private timer_base::client {
     struct arch_cpu arch;
     thread* bringup_thread;
     runqueue_type runqueue;
+    // ttwu remote-enqueue (CONF_sched_ttwu / OSV_TTWU=1): the runqueue is
+    // normally touched ONLY by its owning CPU (with preemption/IRQs off), which
+    // is why it has no lock -- the incoming_wakeups[] SPSC queues exist to keep
+    // it that way.  The ttwu fast path is the FIRST cross-CPU runqueue writer:
+    // a remote waker does runqueue.insert_equal() directly.  This np_spinlock
+    // (no-preempt: every runqueue access already runs preempt-off) serializes
+    // the owning CPU's accesses against a remote inserter.  Lock discipline: a
+    // CPU holds AT MOST ONE runqueue_lock at a time (its own OR one remote,
+    // never nested) -> no ABBA.  It is a RUNTIME no-op when OSV_TTWU is off:
+    // the owning-CPU lock/unlock pair is uncontended (no remote inserter ever
+    // takes it) so it is a couple of local atomics, but to keep the default
+    // path byte-identical we take it only when ttwu is enabled (see
+    // sched_ttwu_enabled()).
+    np_spinlock_t runqueue_lock;
+    // ttwu: the thread currently running on this CPU (Linux's rq->curr).  Set
+    // by reschedule_from_interrupt under runqueue_lock when it switches in a
+    // thread.  A remote ttwu waker reads it UNDER this CPU's runqueue_lock to
+    // decide whether the wakee is still this CPU's current thread (the
+    // "woken-while-current" / prepare_wait window): if so the remote enqueue
+    // is unsafe (only the owning CPU can repair that case, via the SPSC
+    // drain's `&t==current()` special case), so the waker falls back to SPSC.
+    // Only meaningful when ttwu is enabled.
+    thread* running_thread = nullptr;
     timer_list timers;
     timer_base preemption_timer;
     thread* idle_thread;
