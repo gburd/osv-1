@@ -323,6 +323,13 @@ void general_protection(exception_frame* ef)
     if (fixup_fault(ef)) {
         return;
     }
+    {
+        auto t = sched::thread::current();
+        auto si = t ? t->get_stack_info() : sched::thread::stack_info();
+        debug_ll("DIAG-GPF rip=0x%lx rsp=0x%lx rbp=0x%lx tid=%u app=%d stack=[%p,+0x%lx) exdepth=%u\n",
+                 ef->rip, ef->rsp, ef->rbp, t ? t->id() : 0, t ? (int)t->is_app() : -1,
+                 si.begin, (unsigned long)si.size, sched::exception_depth);
+    }
 
     dump_registers(ef);
 

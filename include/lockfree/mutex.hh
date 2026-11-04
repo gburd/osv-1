@@ -87,6 +87,8 @@ public:
     void unlock();
 
     bool owned() const;
+
+    int getdepth_dummy_count() const { return count.load(std::memory_order_relaxed); }
     sched::thread *get_owner();
     // getdepth() should only be used by the thread holding the lock
     inline unsigned int getdepth() const { return depth; }

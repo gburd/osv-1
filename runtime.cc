@@ -102,6 +102,9 @@ static void print_backtrace(void)
     debug_ll("\n[backtrace]\n");
 
     len = backtrace_safe(addrs, 128);
+    for (int i = 0; i < len; i++) {
+        debug_ll("RAW-BT 0x%016lx\n", (unsigned long)addrs[i]);
+    }
 
     /* Start with i=1 to skip abort(const char *)  */
     for (int i = 1; i < len; i++) {

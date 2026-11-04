@@ -43,6 +43,25 @@ bool fork_child_needs_heap_wait_record()
 }
 #endif
 
+#include <osv/debug.hh>
+#include <osv/execinfo.hh>
+static __thread int diag_lf_depth;
+static __thread int diag_lf_reported;
+static __thread void *diag_lf_m[64];
+static void diag_lfrec(lockfree::mutex *m, int depth)
+{
+    auto t = sched::thread::current();
+    auto si = t ? t->get_stack_info() : sched::thread::stack_info();
+    void *rsp; asm volatile("mov %%rsp, %0" : "=r"(rsp));
+    debug_ll("DIAG-LFREC depth=%d m=%p count=%d tid=%u app=%d as=%p stack=[%p,+0x%lx) rsp=%p preempt=%u\n",
+             depth, m, (int)m->getdepth_dummy_count(), t ? t->id() : 0, t ? (int)t->is_app() : -1,
+             t ? (void*)t->address_space() : nullptr, si.begin, (unsigned long)si.size, rsp,
+             sched::get_preempt_counter());
+    for (int i = 0; i < depth && i < 64; i++) debug_ll("  DIAG-LFREC-level %d m=%p\n", i + 1, diag_lf_m[i]);
+    void *pcs[24]; int n = backtrace_safe(pcs, 24);
+    for (int i = 0; i < n; i++) debug_ll("  DIAG-LFREC-bt %p\n", pcs[i]);
+}
+
 namespace lockfree {
 
 TRACEPOINT(trace_mutex_lock, "%p", mutex *);
@@ -84,10 +103,20 @@ void mutex::lock()
     // Note "waiter" is on the stack, so we must not return before making sure
     // it was popped from waitqueue (by another thread or by us.)
 #if CONF_fork
+    int diag_d = ++diag_lf_depth;
+    if (diag_d <= 64) diag_lf_m[diag_d - 1] = this;
+    if (diag_d == 4 || diag_d == 16) {
+        if (!(diag_lf_reported & diag_d)) { diag_lf_reported |= diag_d; diag_lfrec(this, diag_d); }
+    }
+    if (diag_d >= 32) {
+        diag_lf_depth = 0;
+        abort("DIAG-LFREC-ABORT: lockfree::mutex::lock slow-path nesting depth %d m=%p\n", diag_d, this);
+    }
     // A fork child (non-AS0) gets a heap-allocated wait_record so it stays
     // coherent when the parent, in a different address space, dereferences it
     // off this shared kernel mutex.  AS0 keeps the on-stack fast path.
     coherent_wait_record waiter_holder(current);
+    diag_lf_depth--;
     wait_record &waiter = waiter_holder.get();
 #else
     wait_record waiter(current);

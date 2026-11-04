@@ -2622,6 +2622,23 @@ TRACEPOINT(trace_mmu_vm_stack_fault, "thread=%d, addr=%p, page_no=%d", unsigned 
 
 static void vm_sigsegv(uintptr_t addr, exception_frame* ef)
 {
+    {
+        auto t = sched::thread::current();
+        auto si = t ? t->get_stack_info() : sched::thread::stack_info();
+        debug_ll("DIAG-SEGV addr=0x%lx rip=0x%lx rsp=0x%lx rbp=0x%lx err=0x%x tid=%u app=%d as=%p stack=[%p,+0x%lx) preempt=%u exdepth=%u\n",
+                 addr, ef->rip, ef->rsp, ef->rbp, ef->get_error(), t ? t->id() : 0, t ? (int)t->is_app() : -1,
+                 t ? (void*)t->address_space() : nullptr, si.begin, (unsigned long)si.size,
+                 sched::get_preempt_counter(), sched::exception_depth);
+        // raw frame-pointer walk of the FAULTING context
+        uintptr_t fp = ef->rbp;
+        for (int i = 0; i < 24 && fp; i++) {
+            uintptr_t nfp, ret;
+            if (!safe_load(reinterpret_cast<uintptr_t*>(fp), nfp) ||
+                !safe_load(reinterpret_cast<uintptr_t*>(fp + 8), ret)) break;
+            debug_ll("  DIAG-SEGV-fp %p ret=0x%lx\n", (void*)fp, ret);
+            fp = nfp;
+        }
+    }
     void *pc = ef->get_pc();
     if (pc >= text_start && pc < text_end) {
         debug_ll("page fault outside application, addr: 0x%016lx\n", addr);
