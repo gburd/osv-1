@@ -2659,6 +2659,21 @@ static void vm_sigbus(uintptr_t addr, exception_frame* ef)
     osv::handle_mmap_fault(addr, SIGBUS, ef);
 }
 
+// The fault path takes the vma lock for read.  If this thread already holds it
+// for write, rlock() waits for this thread to release it: a silent deadlock
+// with every CPU idle.  A fault there is always a kernel bug (a NULL or stale
+// pointer dereferenced while the vma tree is being changed), so report it.
+static void vm_fault_check_not_wlocked(rwlock_t &lock, uintptr_t addr,
+                                       exception_frame* ef)
+{
+    if (lock.wowned()) {
+        debug_ll("page fault while holding the vma list lock for write, "
+                 "addr: 0x%016lx, pc: %p\n", addr, ef->get_pc());
+        dump_registers(ef);
+        abort();
+    }
+}
+
 // --- fork COW write-fault resolver ----------------------------------------
 #if CONF_fork
 //
@@ -2821,6 +2836,7 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
         }
 
         cow_raced = false;
+        vm_fault_check_not_wlocked(*as->vmas_mutex, addr, ef);
         WITH_LOCK(as->vmas_mutex->for_read()) {
             // A fork may have COW-protected the leaf again since we checked it
             // (another thread resolved the first COW fault, then a fork ran).
@@ -2844,6 +2860,7 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
     } while (cow_raced);
     trace_mmu_vm_fault_ret(addr, ef->get_error());
 #else // !CONF_fork -- original single-address-space fault path
+    vm_fault_check_not_wlocked(vma_list_mutex, addr, ef);
     WITH_LOCK(vma_list_mutex.for_read()) {
         auto vma = find_intersecting_vma(addr);
         if (vma == vma_list.end() || access_fault(*vma, ef->get_error())) {
