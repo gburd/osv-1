@@ -2,9 +2,38 @@
 
 Local steering doc. Not tracked.
 
-## M1 - apples-to-apples parity with Linux: ACHIEVED
+## Current evidence status (2026-10-04)
 
-OSv/PG on ZFS + local NVMe now beats Linux/PG on the same workload at peak.
+The historical HammerDB comparison below is **not apples-to-apples parity
+proof**: it compares different PostgreSQL versions and client counts. Its
+1.73x headline is withdrawn as a parity claim. Historical figures are retained
+only as a record, not as the current performance conclusion.
+
+The later same-executable musl PostgreSQL read-only pgbench campaign has
+recomputed OSv/Linux ratios of 0.9470–1.0017 for simple mode through 32 clients,
+and 0.8934–0.9729 for prepared mode through 64 clients. Prepared throughput is
+lower throughout that band, not an OSv throughput win. The audit found unmatched
+CPU/memory budgets, virtualization/network paths, and filesystems: OSv ran as a
+32-vCPU guest; Linux ran natively in a container able to use the 128-logical-CPU
+host. OSv used OpenZFS on an EBS-backed image, not local instance-store NVMe.
+This is **not isolated OS parity proof**. Original full binary hashes, exact PG
+source pin, and some executed configurations are missing. Arithmetic is
+reproducible; exact independent execution is currently blocked. See
+`.local/A2A-PARITY-REPRODUCE.md` and `.local/cliff-audit/ASSESSMENT.md`.
+
+The 32/64-vCPU follow-up recorded negative scaling for simple queries on its
+tested configuration. NUMA was not isolated as a cause; prepared-mode 64-vCPU
+measurements were not completed. The idle-host wedge is a separate unresolved
+correctness investigation, with cross-AS/epoll ownership a hypothesis rather
+than a demonstrated root cause. Neither investigation is closed.
+
+Current work and evidence ownership: `.local/REVALIDATION-PLAN.md`.
+Reproduction guide: `.local/A2A-PARITY-REPRODUCE.md` (explicitly lists blockers).
+The dated status sections below are historical, not current readiness claims.
+
+## Historical M1 comparison (not matched parity evidence)
+
+OSv/PG and Linux/PG were measured with the following unmatched configurations:
 
 - Workload: HammerDB TPROC-C, 40 warehouses, rampup 1min + duration 3min,
   bare-metal KVM host, ZFS on local NVMe, identical pool geometry on both sides.
@@ -14,8 +43,9 @@ OSv/PG on ZFS + local NVMe now beats Linux/PG on the same workload at peak.
   VU4 = 49020, VU8 = 67558, VU16 = 67568 (peak, ~1.73x Linux VU8), VU32 = 44929.
 - All OSv runs crash-free.
 
-Peak OSv throughput (VU16) is about 1.73x the Linux VU8 baseline. M1 (fair
-parity) is met and then some: OSv is ahead at peak, not merely level.
+Peak OSv throughput (VU16) was about 1.73x the Linux VU8 baseline, but this
+compares different client counts and PostgreSQL builds. It does not establish
+fair parity or isolate OSv's performance.
 
 What it took: the 10-commit fork/mmap/ZFS coherence stack on
 `wip/pg-zfs-bench-v19`, fixing three cross-address-space coherence root causes
@@ -25,7 +55,7 @@ under OSv's copy-on-write fork emulation:
    (plus wake-path hardening for stale/torn thread pointers).
 3. OpenZFS ARC-eviction waiter on the identity heap (patch 0030).
 
-## STATUS UPDATE (2026-08-31): the VU32+ investigation is CLOSED
+## Historical status update (2026-08-31; not closure of the current scaling investigation)
 
 The fold-back past VU16/32 was NOT guest-CPU saturation. It was a scheduler
 load-dispersal failure: past the vCPU count, woken backends piled onto ~8-10

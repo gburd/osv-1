@@ -147,10 +147,19 @@ namespace pthread_private {
             return {attr.stack_begin, attr.stack_size};
         }
         size_t size = attr.stack_size;
+        // mmap_stack marks this VMA as a thread stack so that, on a concurrent
+        // fork(), clone_address_space() SHARES it (writable, never COW) by VMA
+        // flag -- see core/mmu.cc share_ranges.  Without it, a pthread whose
+        // stack is mapped but NOT YET in thread_map when a fork clones the AS
+        // is missed by the with_all_threads() stack-sharing path; its live
+        // stack is then COW-write-protected in the parent, and the churn thread
+        // running on it faults with a torn/zeroed stack (bug #2, the concfork
+        // residual).  The VMA-flag path is atomic against the clone via
+        // vmas_mutex, so it closes the thread_map registration window entirely.
 #if CONF_lazy_stack
         unsigned stack_flags = mmu::mmap_stack;
 #else
-        unsigned stack_flags = mmu::mmap_populate;
+        unsigned stack_flags = mmu::mmap_populate | mmu::mmap_stack;
 #endif
         void *addr = mmu::map_anon(nullptr, size, stack_flags, mmu::perm_rw);
         mmu::mprotect(addr, attr.guard_size, 0);

@@ -1,5 +1,31 @@
 # Blocked / waiting wins - current snapshot (2026-09-17b)
 
+> CORRECTION (2026-10-26 maintenance sweep): the "nyh offline since 2026-08-03" claim below is
+> STALE and WRONG. @nyh commented on #1508 on 2026-10-20 and reviewed the locale series on
+> 2026-10-15; he is active DAILY (on scylladb/scylladb), just intermittent on OSv. #1464 was
+> APPROVED by @nyh (not @wkozaczuk). The fork benchmark is blocked by the OPERATOR'S
+> cleaner-provenance decision (2026-10-24), not by a dead maintainer. Current status lives in
+> .local/maint/RESULT.md; prefer it over the snapshot below.
+
+> UPDATE (2026-10-31 maintenance sweep): the fork-UAF dynamic-TLS fix LANDED as `1bd962e7d`
+> ('sched: keep dynamic TLS on the identity heap for fork children', G-signed). PR #15 DRAFT on
+> gburd/osv-1 (branch pr/fork-setup-tls-identity-heap). integ/pg-master AND integ/pg-fork-zfs
+> (=#1458 head) both FF'd to 1bd962e7d. aarch64 fork port COMPLETE (concfork 10/10 fault -> 0/10,
+> invariant positively proven off-arena). Three of our PRs also landed on master directly since
+> the last sweep: #1521 (>64 CPUs, now master tip 28c0f5a4b), #1508 (physio deletion, e0cedeca0),
+> #1526 (random harvest flush, 872f606b7).
+>
+> NEW FOLLOW-UP FINDING (NOT a blocker): **x86 fork-child residual ~20% fault.** With the fix,
+> x86 tst-fork-concfork still shows ~3/15 faults at a SEPARATE pre-existing fork-child USER-stack
+> teardown face (fault at a user VA ~0x2000.., e.g. RSP in mutex::lock()), present with AND without
+> the fix (so the fix is 0-regression on x86, not the cause). aarch64 is driven to 0/N; x86 has an
+> ADDITIONAL arena/teardown site this fix does not close.
+>   - Waiting for: an operator DECISION to pursue it.
+>   - Needed if: an x86 fork-heavy workload is planned (aarch64 is the target ISA; x86 is a
+>     no-regression cross-check, so x86-reaching-0/N is not required for the aarch64 port).
+>   - How you'd know it cleared: a follow-up identity-heap/teardown fix for the user-stack face
+>     drives x86 concfork to 0/N, byte-identical to the aarch64 result.
+
 ## BLOCKED ON MAINTAINER (nyh offline; I cannot self-merge/self-clear):
 - #1464 "sched: disperse threads faster" - APPROVED, waiting only on a merge click.
 - #1439 "signalfd(2)" - CHANGES_REQUESTED but STALE (all points answered); only the maintainer clears it.

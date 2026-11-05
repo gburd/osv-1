@@ -1,6 +1,6 @@
-# Upstream inventory — current snapshot 2026-10-17 (added stub-fix PRs #1560-#1562 and lwext4 0002 on #1533; checked by .local/check-inventory.sh)
+# Upstream inventory — current snapshot 2026-10-20 (Part-2 fork-stack merge LANDED on integ/pg-master; checked by .local/check-inventory.sh)
 
-**96 open PRs total = 90 OURS (81 non-draft + 9 draft) + 6 third-party.**
+**99 open PRs total = 93 OURS (83 non-draft + 10 draft) + 6 third-party.**
 Non-draft is GitHub state, **not ready-to-merge or validated**. All-author REST query,
 `gh api --paginate --slurp 'repos/cloudius-systems/osv/pulls?state=open&per_page=50&sort=created&direction=asc'`,
 returned pages of 50 + 38. Counts derived from saved JSON, not a hand-listed denominator.
@@ -13,16 +13,25 @@ Locale series published 2026-10-15/16: #1555-#1559 added below; #1477 reworked
 
 Master (fresh upstream API and upstream/gh-fork/origin ls-remote; local master/upstream/master agree):
 `872f606b7a5e29b081147b545a0eb0db5098fd14`. No sync needed or performed.
-Integration: `integ/pg-master` = `de9ee87fe` (carries the six locale PRs on the Round 4 set
-plus the four stub-fix/lwext4 additions #1560-#1562 and lwext4 0002). Re-gated 2026-10-17 on
-Fedora gcc 14: clean build (conf_zfs=bsd, fs=ramfs, 0 errors) and the four new fixes pass in the
-full integ context (tst-faccessat 22/0, tst-pthread-cleanup 6/0, tst-pthread 10/0, tst-vfs clean);
-lwext4 both patches apply (5 EIO guards present). conf_zfs=openzfs did NOT build on gcc 14 due to
-PRE-EXISTING OpenZFS-port strictness (zfsvfs_create implicit decl, zfs_file_open conflicting
-types) that none of the four commits touch; the prior gate used gcc 15.3 via the Nix dev shell
-with its own documented ZFS-image caveat (INTEG-REFRESH-SPEC.md). OpenZFS-on-gcc-14 is a build-env
-gap to resolve separately, not a regression from this batch.
-Prior gated head: `442d258ba33aed12d043ddf0a5f2796a632148fd` (full-build + zfs test.py 198/0/2, 2026-10-16).
+Integration: `integ/pg-master` = `d9ee4d4fb` (2026-10-20 LANDED the Part-2 fork-stack merge:
+now carries the full fork/PG-coherence stack from integ/pg-fork-zfs - thread-backed fork,
+per-child COW address space, the fork-arena, net/ZFS/epoll/dentry/timer cross-AS coherence,
+the bsd_zfs/open_zfs module split and OpenZFS #1423 fork fixes - on top of the six locale PRs,
+the Round 4 set, and the stub-fix/lwext4 additions #1560-#1562). GATE PASSED on m5d.metal real
+KVM, PG18.6 musl, conf_fork=1 fs=zfs conf_zfs=openzfs: pgbench -c8 = 270590 txns 0 FAILED
+9271 tps; -c16 = 611226 txns 0 failed 10453 tps; 0 crashes. All delta commits G-signed.
+OpenZFS zfs-2.4.4 BUILDS CLEAN on gcc-14 (the earlier 'needs gcc-15/Nix' note is RETIRED). Two
+merge-fix commits on top of the merge: 3ce446a1 (restore net kernel_heap_scope guards + openzfs
+patch dedup) and the sched wake-pull/_timers_parked fix; both independently reviewed
+(APPROVE-WITH-FIXES, .local/PART2-FIX-REVIEW.md, 1 tracked perf follow-up MED-1). apps gitlink
+held at b2d53b348 (published); PG apps are build-time content in the apps submodule.
+Backup: `backup/20261020-integ-pg-master-pre-part2` = de9ee87fe on gh-fork + origin.
+Third-party dispositions (.local/thirdparty-dispositions.md): ALL SIX EXCLUDE with per-PR
+reasons. #1390 was briefly INCLUDE'd but corrected to EXCLUDE after reading its actual diff
+(unfinished lfmutex spin-tuning experiment with CONF_mutex toggles, conflicts with the fork COW
+wait_record change integ carries at core/lfmutex.cc). #1215/#1288/#1338/#1466/#1522 EXCLUDE'd per
+earlier reasons (cosmetic / unreviewed / not-a-PG-dep / overlaps our #1509 / HIGH-TLSDESC finding).
+Prior integ head: `de9ee87fe` (locale + Round 4 + stub fixes; gcc-14 conf_zfs=bsd gate 2026-10-17).
 Record: `.local/teams/crucible-9p/publication/PUBLISHED.md`; manifest `build/integ-r5c/manifest.r5c-base.txt`
 plus the integ-only locale steps `refs/r5/integ-stack`, `refs/r5/integ-s2`.
 (#1477's 2026-10-16 respin is comment-only, so integ's compiled content is unchanged;
@@ -32,7 +41,7 @@ Inventory and integration gates **NOT RUN**: their tooling defects must first be
 independently negative-tested through their real interfaces. The old check demands the misleading
 word “ready”; this file deliberately does not accommodate it by making a false readiness claim.
 
-## OUR 81 NON-DRAFT PRs
+## OUR 83 NON-DRAFT PRs
 
   #1439 signal: implement signalfd(2) — `21cac540708ee6629274d11a0b6945e03418598a`
   #1440 fs: implement inotify(2) — `2e4ff0ce2a878223b9613ebd46e062d870d754eb`
@@ -77,7 +86,6 @@ word “ready”; this file deliberately does not accommodate it by making a fal
   #1504 x64: cover the psABI stack and pointer guards in the thread control block — `2f77155a73a17f5da85a853e44f200a3c230dd7b`
   #1506 zfs: allow an explicit ARC ceiling via OSV_ZFS_ARC_MAX — `98b5e58c45b13ccf081889292e49dcac3bb669c8`
   #1507 pagecache: skip the whole-file writeback scan on fsync when nothing is dirty — `9fb78af4b75f53c922aeaeeec7263df76ff6bba4`
-  #1508 vfs: issue one bio per iovec in physio(), with the correct length — `75bb43bf690629b01e3e5717f02f94585d256237`
   #1509 virtio-blk: optional per-queue completion threads (OSV_BLK_MQ_COMPLETE) — `894492eda53e2e63f3199231105fb083724e9ad2`
   #1511 sched: adaptive per-CPU idle-spin window (guest-side halt-polling) — `2be3701f010096169da63393776b49ee0bd34d78`
   #1512 bench: durable-write latency isolate with concurrent writers in zfs-bench — `1cdbe3541415450ddd72098c4006436ea73bcef3`
@@ -89,7 +97,6 @@ word “ready”; this file deliberately does not accommodate it by making a fal
   #1518 aarch64: read the 16550 console address from reg, not the node name — `79bb556d16b20fcd5c3980f606bd954549652873`
   #1519 arch/x64: minimal PMU (performance-counter) readout — `388da6d8ed8f81a21c941f56dffd7ea3d2dae38c`
   #1520 scripts/loader.py: fix 'osv info threads' under GDB 15.x when sourced explicitly — `69a44988ca5a8ae0c861525cd923c098c3a91283`
-  #1521 sched: support more than 64 CPUs — `b648cda0c10f8e75ad7e7ed35206d71d451ec2e7`
   #1523 virtio-rng: wire MMIO interrupts and validate completion lengths — `5312f62a38753b497bb8da082202ea3f3e26ca89`
   #1525 vfs: preserve nonblocking I/O flags at device boundaries — `664c2522c60012962a0cde4455cd07f2fb99830f`
   #1527 vfs: keep the dentry cache unchanged when rename fails — `07d120e130efa57bf6462435962bfe13f548a5d1`
@@ -115,18 +122,23 @@ word “ready”; this file deliberately does not accommodate it by making a fal
   #1560 nvme: fix an off-by-one PRP-list assert that panics at 2 MiB — `86e3530f4f5272be5eb44f110795fa72dbb6de98`
   #1561 vfs: implement faccessat(AT_SYMLINK_NOFOLLOW) instead of aborting — `0f8bb919969128348c6638b9011b3c6f59e903b5`
   #1562 libc: run pthread_cleanup handlers instead of dropping them — `8fd06d832af57dafd9e7c11a69b98151c237f627`
+  #1563 core/io_uring: advertise IORING_FEAT_EXT_ARG — `5a4d089d39607d92771f6f6f43770da3d1264d74`
+  #1565 signal: pass a real siginfo to SA_SIGINFO handlers from kill() — `df808cbfa22e745045a8c265b91af15413d8273e`
+  #1567 arch/aarch64: add a UEFI boot stub (ExitBootServices -> OSv ARM64-Image entry) — `61a5c5415cf60308a49df7497fc20d2eec7c7eae`
+  #1568 virtio-net: reap Tx completions reliably on mmio and pci — `8d935a4037194bcf332ec8b717979c38f217b8a7`
 
-## OUR 9 DRAFT PRs
+## OUR 10 DRAFT PRs
 
   #1424 drivers: add Crucible distributed block storage driver — `3d0bc004f10033924f2699101352771cd7293d36`
   #1438 numa: report real topology from getcpu and get_mempolicy — `6c49654846d3ac4cfcf0184a05b9e17ad63fd7a7`
   #1444 [STACKED on #1442] virtio-net: enable IPv6 checksum and TSO offload — `eea48c6ccad55f9227829bacbb0774b2838aaef5`
   #1445 [STACKED on #1441] mm: per-NUMA-node L2 page pools — `d5cdf7f9f4767d34e7bbfa08472614652f4a7d88`
   #1455 process: implement thread-backed fork()/vfork()/execve()/waitpid() (opt-in, off by default) — `fb8fd698e5299f35dcd3a4b4674848c1478b9505`
-  #1458 [DRAFT / tracking - DO NOT MERGE as one unit] PostgreSQL-on-OSv fork+ZFS integration (will split into S1..S6 on #1455/#1456/#1457 + #1423) — `d3e9e973dc3a6ef84dd17733b051b099b59724a5`
+  #1458 [DRAFT / tracking - DO NOT MERGE as one unit] PostgreSQL-on-OSv fork+ZFS integration (will split into S1..S6 on #1455/#1456/#1457 + #1423) — `74d221706d0e6c4a39f0ab5dc302449ee0587da8`
   #1475 mm: resolve fork COW write faults lock-free when nested (fork-stack follow-on to #1456) — `d4737480850ebc709cdfe416d64eca6b9145a318`
   #1510 libext: ext4 sequential-read performance (read-ahead + async prefetch) — `b5b370fa01292bec97c13f7cfb0ae8d22de7783a`
   #1545 scripts: tooling to compose and verify a projected-merged base from open PRs — `497419797b24136393f7752b1389419d72c1c7fa`
+  #1564 zfs: fix znode teardown double-free/UAF race (OSv OpenZFS port) — `1d8df1cbd23833b7dce83079ee5b78959e81041d`
 
 ## 6 THIRD-PARTY PRs — owner retains scope/publication authority
 
@@ -135,7 +147,7 @@ word “ready”; this file deliberately does not accommodate it by making a fal
   #1338 sched: Support POSIX's SCHED_RR scheduling policy — `a8eab2020a2fa3df2ebc86e4f20892e92b749f76` (nmeum)
   #1390 mutex: spin a little in lock() to avoid context switch — `44fbf4dba297a83dcab9fa72af0459b4e81f3f64` (wkozaczuk)
   #1466 virtio-blk: handle completions on the queue's dedicated thread — `56e64ddcc982c788e8cb69e0ff6c449b42851055` (wkozaczuk)
-  #1522 Support building on Fedora 44 — `81679d171b2fea18c7e280bae104e8c2949b7a71` (nyh)
+  #1522 Support building on Fedora 44 — `7c89b24b81338b6164cf63f59933c91272e31a04` (nyh)
 
 #1424 remains draft: reviewed client corrections do not establish fresh-upstream interoperability,
 snapshot support or fresh reviewed-head guest durability. #1438 remains draft and depends on corrected

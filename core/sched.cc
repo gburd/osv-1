@@ -91,6 +91,37 @@ bool wake_pull_enabled = false;
 static constexpr unsigned wake_pull_min_depth = 2;
 #endif
 
+// ttwu remote-enqueue runtime toggle.  When on, thread::wake_impl() may insert
+// a (non-parked, non-pinned, remote-target) wakee DIRECTLY onto the target
+// CPU's runqueue under cpu::runqueue_lock -- a Linux-ttwu-style remote enqueue
+// -- instead of posting to the per-source incoming_wakeups[] SPSC queue and
+// forcing the target to run the full handle_incoming_wakeups() drain before it
+// schedules.  Default OFF: compiled in, byte-identical behavior (no rq lock
+// taken, SPSC path used) unless armed at boot via env OSV_TTWU=1.  See
+// DESIGN.md (.local/pg19-a2a/ttwu-rework/) for the correctness argument.
+static bool ttwu_enabled = false;
+// Read once at init (like OSV_WAKE_PULL); hot paths read the bool.
+static inline bool sched_ttwu_enabled() { return ttwu_enabled; }
+
+// RAII: take a cpu's runqueue_lock ONLY when ttwu is enabled, else do nothing.
+// Every runqueue mutation/read on the owning CPU is wrapped in one of these
+// (over its full read-decide-mutate critical section), and the remote ttwu
+// waker wraps its single insert_equal.  When ttwu is off this is a no-op and
+// the default scheduler path is byte-identical.  np_spinlock: no preemption
+// change (all callers already run preempt/IRQ-off).  NOT recursive -- a CPU
+// takes at most one runqueue_lock at a time (see DESIGN.md Q3.1), so no nested
+// acquisition of the same or another rq lock.
+struct rq_lock_guard {
+    np_spinlock_t* _l;
+    explicit rq_lock_guard(cpu* c)
+        : _l(sched_ttwu_enabled() ? &c->runqueue_lock : nullptr) {
+        if (_l) { np_spin_lock(_l); }
+    }
+    ~rq_lock_guard() { if (_l) { np_spin_unlock(_l); } }
+    rq_lock_guard(const rq_lock_guard&) = delete;
+    rq_lock_guard& operator=(const rq_lock_guard&) = delete;
+};
+
 thread __thread * s_current;
 cpu __thread * current_cpu;
 
@@ -310,6 +341,13 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     trace_sched_sched();
     assert(sched::exception_depth <= 1);
     need_reschedule = false;
+    // ttwu: hold this CPU's runqueue_lock across the whole runqueue
+    // read-decide-erase critical section (through handle_incoming_wakeups'
+    // enqueues and the final preemption-timer peek), so a remote ttwu waker
+    // inserting onto our runqueue cannot race the set.  Released before
+    // switch_to (no runqueue access past this scope).  No-op when ttwu off.
+    {
+    rq_lock_guard _rqg(this);
     handle_incoming_wakeups();
 
     auto now = osv::clock::uptime::now();
@@ -439,6 +477,16 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
         } else {
             preemption_timer.set_with_irq_disabled(now + preempt_after);
         }
+    }
+    } // end rq_lock_guard scope: no runqueue access past here before switch_to
+    // ttwu: if the incoming thread was remote-enqueued by a ttwu waker, its
+    // timers were NOT resumed by the waker (it could not touch our per-CPU
+    // timer_set).  Resume them now, in THIS (the target) CPU's own context.
+    // (A parked fork thread never takes the ttwu fast path, so this never
+    // resumes a parked thread's foreign-AS timers -- see DESIGN.md Q3.)
+    if (n->_resume_timers_pending) {
+        n->_resume_timers_pending = false;
+        n->resume_timers();
     }
 
     if (app_thread.load(std::memory_order_relaxed) != n->_app) { // don't write into a cache line if it can be avoided
@@ -574,6 +622,9 @@ void cpu::do_idle()
             // halt/wake VM-exit round-trip (see idle_spin_count above).
             for (unsigned ctr = 0; ctr < spin_count; ++ctr) {
                 // FIXME: can we pull threads from loaded cpus?
+                // ttwu: rq lock makes the drain-enqueue + empty() check atomic
+                // against a remote ttwu waker inserting onto our runqueue.
+                rq_lock_guard _rqg(this);
                 handle_incoming_wakeups();
                 if (!runqueue.empty()) {
                     return;
@@ -584,14 +635,23 @@ void cpu::do_idle()
         assert(!thread::current()->is_app());
 #endif
         std::unique_lock<irq_lock_type> guard(irq_lock);
-        handle_incoming_wakeups();
-        if (!runqueue.empty()) {
-            return;
+        {
+            rq_lock_guard _rqg(this);
+            handle_incoming_wakeups();
+            if (!runqueue.empty()) {
+                return;
+            }
         }
         guard.release();
         arch::wait_for_interrupt(); // this unlocks irq_lock
-        handle_incoming_wakeups();
-    } while (runqueue.empty());
+        {
+            rq_lock_guard _rqg(this);
+            handle_incoming_wakeups();
+            if (!runqueue.empty()) {
+                return;
+            }
+        }
+    } while (true);
 }
 
 void start_early_threads();
@@ -841,7 +901,17 @@ void thread::pin(thread *t, cpu *target_cpu)
                 }
                 break;
             case status::queued:
-                current_cpu->runqueue.erase(current_cpu->runqueue.iterator_to(*t));
+                // ttwu: erasing t from THIS (current) cpu's runqueue must be
+                // serialized against a remote ttwu waker.  Scope the lock to
+                // the erase only: the subsequent wake_with_irq_disabled() may
+                // itself take target_cpu's rq lock (remote ttwu enqueue), and
+                // the np_spinlock is not recursive -- but these are two
+                // DIFFERENT cpus' locks and are never held simultaneously
+                // (one-rq-lock-at-a-time, DESIGN.md Q3.1).
+                {
+                    rq_lock_guard _rqg(current_cpu);
+                    current_cpu->runqueue.erase(current_cpu->runqueue.iterator_to(*t));
+                }
                 trace_sched_migrate(t, target_cpu->id);
                 t->stat_migrations.incr();
 #if CONF_fork
@@ -933,8 +1003,11 @@ void cpu::load_balance()
     while (true) {
         tmr.set(osv::clock::uptime::now() + std::chrono::milliseconds(CONF_sched_load_balance_ms));
         thread::wait_until([&] { return tmr.expired(); });
-        if (runqueue.empty()) {
-            continue;
+        {
+            rq_lock_guard _rqg(this);
+            if (runqueue.empty()) {
+                continue;
+            }
         }
         // Each thread we migrate this pass is queued on its destination CPU but
         // has not yet been dequeued there, so cpu::load() (runqueue.size()) does
@@ -968,6 +1041,9 @@ void cpu::load_balance()
             assert(!thread::current()->is_app());
 #endif
             WITH_LOCK(irq_lock) {
+                // ttwu: our own runqueue find_if+erase must be serialized
+                // against a remote ttwu waker inserting onto it.
+                rq_lock_guard _rqg(this);
                 auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
                         [](thread& t) { return t._migration_lock_counter == 0; });
                 if (i == runqueue.rend()) {
@@ -1076,6 +1152,12 @@ void cpu::donate_to_puller()
     }
     // Only donate if we still have queued work beyond the running thread; do
     // not hand off our last runnable thread and go idle ourselves.
+    // ttwu: hold our rq lock across the size check + find_if + erase so a
+    // remote ttwu waker inserting onto our runqueue cannot race the set.  The
+    // rest of the migration bookkeeping (mig fields, dst's SPSC queue) does not
+    // touch our runqueue, but holding the lock through it is harmless and the
+    // function is short; nothing here re-takes this CPU's rq lock.
+    rq_lock_guard _rqg(this);
     if (runqueue.size() < wake_pull_min_depth) {
         return;
     }
@@ -1152,16 +1234,25 @@ void thread::yield(thread_runtime::duration preempt_after)
 #endif
     std::lock_guard<irq_lock_type> guard(irq_lock);
     // FIXME: drive by IPI
-    cpu::current()->handle_incoming_wakeups();
-    // FIXME: what about other cpus?
-    if (cpu::current()->runqueue.empty()) {
-        return;
-    }
-    assert(t->_detached_state->st.load() == status::running);
-    // Do not yield to a thread with idle priority
-    thread &tnext = *(cpu::current()->runqueue.begin());
-    if (tnext.priority() == thread::priority_idle) {
-        return;
+    // ttwu: wrap the drain-enqueue + empty()/begin() peek under the rq lock so
+    // it is atomic against a remote ttwu waker.  Release BEFORE
+    // reschedule_from_interrupt (which re-takes the rq lock itself -- the
+    // np_spinlock is NOT recursive, so holding it across the call would
+    // deadlock).  The peeked decision stays valid: we only yield if there was
+    // a runnable non-idle thread, and reschedule re-reads under its own lock.
+    {
+        rq_lock_guard _rqg(cpu::current());
+        cpu::current()->handle_incoming_wakeups();
+        // FIXME: what about other cpus?
+        if (cpu::current()->runqueue.empty()) {
+            return;
+        }
+        assert(t->_detached_state->st.load() == status::running);
+        // Do not yield to a thread with idle priority
+        thread &tnext = *(cpu::current()->runqueue.begin());
+        if (tnext.priority() == thread::priority_idle) {
+            return;
+        }
     }
     trace_sched_yield_switch();
 
@@ -1602,6 +1693,79 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 #if CONF_lazy_stack_invariant
         assert(!sched::preemptable());
 #endif
+        // ttwu FAST PATH (OSV_TTWU=1): for a remote, non-parked, non-pinned
+        // wakee, enqueue it DIRECTLY onto its home CPU's runqueue under that
+        // CPU's runqueue_lock -- a Linux-ttwu-style remote enqueue -- instead
+        // of posting to the SPSC incoming_wakeups[] queue and forcing the
+        // target to run the full handle_incoming_wakeups() drain before it can
+        // schedule.  The wakee STAYS on its home CPU (tcpu == st->_cpu,
+        // unchanged): ttwu does NOT migrate, so it never needs the cross-CPU
+        // parked-list unlink that is the fork-UAF hazard (DESIGN.md Q3).
+        // Excluded (fall through to the unchanged SPSC path):
+        //   - parked fork threads (_timers_parked): their timers must be
+        //     resumed in their own AS on switch-in via unpark_timers; the SPSC
+        //     drain already skips resume for them.  88% of cross-CPU wakes.
+        //   - pinned / migration-locked threads (a concurrent migration owns
+        //     the placement decision).
+        //   - local wakes (tcpu == us): the SPSC path sets need_reschedule;
+        //     no remote lock needed.
+        if (sched_ttwu_enabled()
+                && tcpu != cpu::current()
+                && tcpu != nullptr
+#if CONF_fork
+                && !st->t->_timers_parked
+#endif
+                && st->t->_migration_lock_counter == 0) {
+            bool did_ttwu = false;
+            {
+                rq_lock_guard _rqg(tcpu);
+                // Re-verify placement under the lock: between reading tcpu and
+                // locking it, a concurrent pin()/migration could have changed
+                // st->_cpu.  If it did, our snapshot is stale -- fall through
+                // to the SPSC path (below) which posts to st->_cpu afresh.
+                // (The SPSC drain also guards with `t.tcpu() != this`, but we
+                // must not enqueue on the wrong runqueue in the first place.)
+                if (st->_cpu == tcpu) {
+                    // The wakee is status::waking (our CAS above won it); no
+                    // other path will enqueue it while we hold waking + the rq
+                    // lock.
+                    st->st.store(status::queued);
+                    // Runtime renormalize MUST precede insert_equal: the
+                    // runqueue is keyed by runtime, so the key must be correct
+                    // at insert time (DESIGN.md Q2).
+                    st->t->_runtime.update_after_sleep();
+                    tcpu->enqueue(*st->t);
+                    // Defer resume_timers to the target: we must not touch
+                    // tcpu's per-CPU timer_set from here (DESIGN.md Q2).  The
+                    // target drains this flag in reschedule_from_interrupt.
+                    st->t->_resume_timers_pending = true;
+                    did_ttwu = true;
+                }
+            }
+            if (did_ttwu) {
+                // Wake the target so it reschedules and picks up the enqueued
+                // thread.  Mirror send_wakeup_ipi()'s idle_poll protocol
+                // EXACTLY (the only correct way to avoid a lost wakeup):
+                // seq_cst fence, then IPI unless the target is idle-polling.
+                // If it IS idle-polling, the seq_cst StoreLoad guarantees its
+                // poll will observe our now-non-empty runqueue (inserted
+                // above) -> no IPI needed.  If it is NOT idle-polling, it is
+                // running or past the poll into halt, so IPI to force a
+                // reschedule.  Erring toward sending (we do not use
+                // send_wakeup_ipi's size<=1 suppression, since a remote insert
+                // gives us no guarantee the target reschedules on its own) --
+                // DESIGN.md Q3.4.
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (!tcpu->idle_poll.load(std::memory_order_relaxed)) {
+                    trace_sched_ipi(tcpu->id);
+                    wakeup_ipi.send(tcpu);
+                }
+                return;
+            }
+            // else: stale placement -> fall through to the SPSC path below,
+            // which re-reads st->_cpu into tcpu.
+            tcpu = st->_cpu;
+        }
         irq_save_lock_type irq_lock;
         WITH_LOCK(irq_lock) {
             tcpu->incoming_wakeups[c].push_back(*st->t);
@@ -2331,6 +2495,15 @@ void init_detached_threads_reaper()
         printf("WAKE_PULL %s\n", wake_pull_enabled ? "ON" : "off");
     }
 #endif
+    // ttwu remote-enqueue runtime toggle: env OSV_TTWU=1 arms it, default off.
+    // Compiled in but a no-op unless armed (no rq lock taken, SPSC drain path
+    // used) so the default build is byte-identical; set OSV_TTWU=1 to enable
+    // the Linux-ttwu-style direct remote-rq enqueue (see DESIGN.md).
+    {
+        const char* e = getenv("OSV_TTWU");
+        ttwu_enabled = (e && e[0] == '1');
+        printf("TTWU %s\n", ttwu_enabled ? "ON" : "off");
+    }
 }
 
 void start_early_threads()

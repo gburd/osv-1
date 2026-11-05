@@ -35,6 +35,15 @@ void page_fault(exception_frame *ef)
     }
     // The following code may sleep. So let's verify the fault did not happen
     // when preemption was disabled, or interrupts were disabled.
+    // DEBUG (crash2): if we faulted with preemption disabled (IRQ/fault ctx),
+    // dump the faulting VA, PC, and this cpu's parked_threads before aborting.
+    if (!sched::preemptable()) {
+        debug_ll("\n[crash2] page_fault !preemptable va=0x%lx rip=%p\n",
+                 (unsigned long)addr, pc);
+#if CONF_fork
+        sched::cpu::current()->debug_dump_parked("page_fault", (unsigned long)addr);
+#endif
+    }
     assert(sched::preemptable());
     assert(ef->rflags & processor::rflags_if);
 

@@ -8,11 +8,13 @@ assembly that silently omitted #1502 and capped a sweep at VU32.
 
 ## What "projected-merged future" means precisely
 Base = `upstream/master`
-  + every OPEN, NON-DRAFT PR we author that is mergeable
-  - DRAFT PRs (by definition not expected to merge as-is)
-  - explicit DO-NOT-MERGE / tracking PRs (e.g. #1458)
-  - superseded PRs (keep the successor, drop the predecessor)
-  reducing each stacked/mutually-exclusive group to its intended head, conflicts resolved once.
+  + every open PR (any author) whose reviewed manifest row is INCLUDE, merged in row order
+  + each reviewed ALTERNATIVE(<sha>) commit, at its row's position
+  Every other open PR also has a row: EXCLUDE(reason), ALTERNATIVE(#M) (covered by INCLUDE row #M) or
+  BLOCKED(clearance). Draft state is metadata, not a disposition. A do-not-merge or tracking PR (#1458,
+  or a title or label saying do-not-merge or DNM) is EXCLUDE or BLOCKED only. A superseded predecessor
+  is EXCLUDE(reason) or ALTERNATIVE(#successor). A stacked child must not carry an excluded parent's
+  head (FAIL[excluded-ancestor]). That check is ancestry only, so it misses a rebased or cherry-picked copy.
 
 This is both the right QUESTION (what does the merged world look like) and a complete GATE (you cannot
 forget a fix, because the base IS the set of PRs).
@@ -26,22 +28,26 @@ forget a fix, because the base IS the set of PRs).
 Prefer (2) for a focused perf question and SAY it is workload-scoped; use (1) when the question is
 "ship-readiness of the whole tree". Either way the base is DERIVED FROM THE PR LIST, not from memory.
 
-## The gate stays, and gains a second form
-- `.local/bench-base-gate.sh` (marker gate): fast, catches a missing REQUIRED fix by grep. Keep it as
-  the pre-launch smoke check.
-- `.local/build-projected-base.sh` (composition gate): constructs the base from the live PR list and
-  reports exactly which PRs are IN, which are EXCLUDED (draft/dnm/superseded) and WHY, and which
-  CONFLICT and need manual resolution. The base is only valid if every intended PR is either merged in
-  or explicitly, visibly excluded with a reason. No silent omissions.
+## The gates
+- `.local/build-projected-base.sh --manifest FILE [--prs-json P --prs-total T] [--base REF]
+  [--remote NAME] [--out NEWDIR] [--plan-only]` plans the base from a reviewed manifest (one row per
+  open PR). Plan-only is the default, and it writes nothing to the repository. After a clean plan,
+  `... --apply NEW-BRANCH --worktree NEW-PATH` builds the base in a new branch and worktree. A conflict,
+  a fetch failure, a moved head or an excluded ancestor fails. BLOCKED rows give exit 3.
+- `.local/bench-preflight.sh` is the only launch gate (usage in AGENTS.md). Its tree is the --apply
+  worktree, with nothing on top.
+- `.local/bench-base-gate.sh` is a marker smoke test and NEVER a launch gate. It is fail-open on
+  ancestry and honours BENCH_ALLOW_STALE_BASE.
 
 ## Standing rule for every benchmark run and every benchmark agent brief
-1. Build the base with build-projected-base.sh from the CURRENT PR list (not a remembered branch).
-2. Run bench-base-gate.sh on the composed tree; refuse to launch if it fails.
-3. Record in the run's identity block: the exact PR list composed IN, the list EXCLUDED with reasons,
-   the base commit, and which scope (full vs workload-scoped) was used.
-4. When a new eligible PR is filed, it enters the next base automatically because the base is derived
-   from the PR list. When a PR merges upstream, it drops out of "ours to add" and appears in
-   upstream/master - the composition script must dedupe against what master already contains.
+1. Freeze a PR snapshot, write and review the manifest (one row per open PR), and plan with
+   build-projected-base.sh. A new PR without a row fails the plan (FAIL[missing]), so it cannot be forgotten.
+2. --apply into a NEW branch and worktree. Commit nothing on top: a host-only patch is a PR with an
+   INCLUDE row, or a reviewed ALTERNATIVE(<sha>) commit.
+3. Build from that worktree, run bench-preflight.sh on it, and launch only on exit 0.
+4. Record in the run's identity block: the manifest and its sha256, the plan's FINAL tree, the base
+   commit, the levers file's sha256, and the scope (full vs workload-scoped). A PR that merges upstream
+   leaves the snapshot. Delete its row, or the plan fails (FAIL[unknown]).
 
 ## Why this is better than a fix checklist
 A checklist is a second thing to maintain and can drift from the PR list. The PR list is the ground
@@ -50,6 +56,8 @@ our actual upstreaming state: nothing we intend to merge can be silently missing
 NOT intend to merge (draft/dnm) is visibly excluded with a reason in the run record.
 
 ## Tooling built (2026-09-13)
+(HISTORICAL, superseded 2026-10 by the manifest composer above: --scope, the deny-list and IN-by-default
+are gone, and bench-base-gate.sh is no longer a gate.)
 - `.local/build-projected-base.sh [--scope full|pg] [--apply BR]`: derives the base from the LIVE PR
   list. Default IN for every non-draft, non-DNM PR; excludes only an explicit NUMBERED deny-list with a
   per-PR reason (a title-regex over-excluded - it dropped setlocale #1477 which PG calls - so exclusion
@@ -72,12 +80,12 @@ EXCLUDED (19): 8 DRAFT (#1444 #1445 #1447 #1455 #1458 #1475 #1487 #1501), 1 DNM 
   merge probe will surface the conflict and they get resolved once.
 - #1502 + #1503: #1503 (per-chain) sits on top of #1502 (lock-order); include both since both are IN,
   order #1502 first.
-- The merge probe in build-projected-base.sh reports each conflict; resolve in the scratch worktree,
-  then --apply. This is the "resolve conflicts once" step, done ONCE per base refresh not per run.
+- A conflict is FAIL[conflict] with a merge-tree receipt, and --apply refuses it. Resolve it once per
+  base refresh, as a reviewed ALTERNATIVE(<sha>) commit on the conflicting row, then re-plan.
 
 ## Net methodology change
 The benchmark base is now DERIVED FROM THE LIVE PR LIST, not assembled from memory. A fix we intend to
-merge cannot be silently missing (it is IN by default); a fix we do not intend to merge is visibly
+merge cannot be silently missing (every open PR needs a reviewed row); a fix we do not intend to merge is visibly
 excluded with a reason recorded in the run. The a2a-base-missing-#1502 class of error is now
 structurally prevented.
   #1509 (virtio-blk per-queue completion) is a REQUIRED at-scale fix -> IN the projected base, and needs OSV_BLK_MQ_COMPLETE=1 set at boot

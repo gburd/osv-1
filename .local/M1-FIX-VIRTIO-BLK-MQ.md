@@ -36,7 +36,8 @@ The fix moved the ISOLATE (+58% aggregate durable-write throughput). The M1 clai
 NOPM on the projected-merged base, matched OSv-vs-Linux. Prediction: OSv VU16 stops declining (the
 completion serialization was why it fell 104k->65k); how close to Linux 269k it gets is the open number.
 Run: projected-merged base + #1509 (OSV_BLK_MQ_COMPLETE=1), VU8/16/32/64, matched Linux (32 GiB ARC),
-via build-projected-base.sh + bench-base-gate.sh. This is the next benchmark and the real M1 verdict.
+via build-projected-base.sh --manifest M (plan, then --apply) and bench-preflight.sh (usage in AGENTS.md).
+This is the next benchmark and the real M1 verdict.
 
 ## Session PR tally (M1 arc)
 #1502 AB-BA (proven e2e) | #1505 ZIL hires | #1506 ARC-max | #1507 fsync scan | #1508 physio per-iovec |

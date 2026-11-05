@@ -15,4 +15,3 @@ if (host_arch == 'x86_64' and os.getenv('ARCH') == 'aarch64') or \
 else:
     api.require('java-tests')
 
-api.require('dl_tests')

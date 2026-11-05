@@ -23,14 +23,17 @@ completion path matters (valid null, redirects). Watch for a wedge on PERQ (woul
 correction did not hold - critical).
 
 ## After this: the FULL projected-merged base run (ship-readiness)
-The M1-confirm base is the minimal-delta A/B (isolates #1509). Separately, build the full 35-PR
-projected-merged base via build-projected-base.sh --apply (resolve conflicts once: fork stack #1456,
-NUMA add/adds, #1502->#1503 order) for the truest future-OSv number. #1508 + #1509 are IN it by default.
+The M1-confirm base is the minimal-delta A/B (isolates #1509). Separately, build the full
+projected-merged base with `build-projected-base.sh --manifest M`: plan first, then `--apply
+candidate/<name> --worktree <new-path>` after a clean plan. Resolve each conflict once as a reviewed
+ALTERNATIVE(<sha>) row (fork stack #1456, NUMA add/adds, #1502->#1503 order). This gives the truest
+future-OSv number. #1508 and #1509 are in it only if their manifest rows say INCLUDE.
 
 ## Session M1 PR arc (all master-facing, generic G2)
 #1502 AB-BA (e2e proven) | #1505 ZIL hires | #1506 ARC-max | #1507 fsync scan | #1508 physio per-iovec |
 #1509 virtio-blk per-queue completion | #1472 wake-pull default-on. Gate scripts:
-bench-base-gate.sh (marker), build-projected-base.sh (composition). 56 open PRs.
+bench-preflight.sh (the launch gate), build-projected-base.sh (composition from a manifest).
+bench-base-gate.sh is a smoke test only. 56 open PRs.
 
 ## Validity check steered into 0c90e588 (2026-09-14)
 The agent added one host iothread + num-queues=CPUS to the pool disk. Flagged two things that could

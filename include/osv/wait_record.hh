@@ -40,7 +40,16 @@ public:
     explicit waiter(sched::thread *t) : t(t) { };
 
     inline void wake() {
-        t.load(std::memory_order_relaxed)->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
+        // A woken (t==nullptr) record is a no-op: with fork's heap-allocated
+        // coherent_wait_record (freed RCU-deferred, see wait_record.hh), a late
+        // or duplicate wake off a mutex waitqueue can reach an already-drained
+        // record.  Loading a stale non-null t and waking it would enqueue a
+        // wrong/reused thread.  Guard against the null.
+        auto th = t.load(std::memory_order_relaxed);
+        if (!th) {
+            return;
+        }
+        th->wake_with_from_mutex([&] { t.store(nullptr, std::memory_order_release); });
     }
 
     inline void wait() const {
