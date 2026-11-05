@@ -101,6 +101,14 @@ struct ostask {
 	struct task	 ost_task;
 	task_func_t	*ost_func;
 	void		*ost_arg;
+	/*
+	 * Id-table state for taskq_dispatch()ed tasks only (see
+	 * opensolaris_taskq.c).  Caller-owned entries (taskq_dispatch_safe)
+	 * are never in the table and leave these zero.
+	 */
+	taskqid_t	 ost_id;
+	LIST_ENTRY(ostask) ost_hash;
+	volatile u_int	 ost_rc;
 };
 
 /*
