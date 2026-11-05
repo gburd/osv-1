@@ -6,7 +6,8 @@
 #
 # Re-derive the item tables of libc/locale/locale-data.cc by measuring glibc
 # (see item-types.py) and compare them with the code and with
-# libc/locale/langinfo-builtin.inc:
+# langinfo-builtin.inc (generated here from scripts/locale-oracle/oracle-C*.txt,
+# as the build does):
 #   item-types.sh <test locale data (make-test-locales.sh's out)> <scratch>
 # Compiles every UTF-8 locale in /usr/share/i18n/SUPPORTED with the host's
 # localedef into <scratch>/all, then runs item-dump, item-min.sh,
@@ -23,5 +24,7 @@ echo "locales: $(echo $names | wc -w) ($(ls -d "$t"/all/*.utf8* | wc -l) from /u
 LOCPATH="$data/dir:$t/all" "$t/item-dump" C C.UTF-8 $names > "$t/dump.txt"
 sh "$here/item-min.sh" "$data/dir/de_DE.utf8" "$t/min" > "$t/min.txt"
 sh "$here/item-names.sh" "$t/names" > "$t/names.txt"
+python3 "$tree/scripts/gen-langinfo-builtin.py" "$here/../oracle-C.txt" "$here/../oracle-C.UTF-8.txt" \
+    > "$t/langinfo-builtin.inc"
 python3 "$here/item-types.py" "$t/dump.txt" "$t/min.txt" "$tree/libc/locale/locale-data.cc" \
-    "$tree/libc/locale/langinfo-builtin.inc" "$t/names.txt"
+    "$t/langinfo-builtin.inc" "$t/names.txt"

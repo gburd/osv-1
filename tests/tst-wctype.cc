@@ -50,9 +50,10 @@ namespace utf = boost::unit_test;
 #define GTEST_LOG_(I) std::cout
 #define GTEST_SKIP() std::cout
 
-// Bionic is always UTF-8; OSv, like glibc, starts in a strict C locale with
-// no wide classes or case maps above 0x7f. Run in C.UTF-8 as bionic does,
-// and pass newlocale() a mask (LC_ALL is a category, not a mask).
+// This test assumes a UTF-8 C locale, which glibc and OSv do not provide: both
+// start in a strict C locale with no wide classes or case maps above 0x7f. Run
+// the fixture in C.UTF-8, and pass newlocale() a mask (LC_ALL is a category,
+// not a mask).
 struct utf8_global {
   utf8_global() { setlocale(LC_ALL, "C.UTF-8"); }
 };
