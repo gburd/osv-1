@@ -41,6 +41,7 @@
 #include <osv/kernel_config_lazy_stack_invariant.h>
 #include <osv/kernel_config_memory_jvm_balloon.h>
 #include <osv/pagecache.hh>
+#include <osv/vfs_file.hh>
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
 #include <osv/fork_arena.hh>
@@ -549,12 +550,13 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             pt_element<0> sh = ppte;
             if (pte_is_cow(sh)) {
                 sh = pte_mark_cow(sh, false);
-                // The parent's mapping leaves the count without dropping it,
-                // and one more keeps it above zero: an older child that still
-                // maps the frame copy-on-write must copy it, never free it or
-                // write it in place.
-                cow_get(sh.addr());
             }
+            // Count the child's mapping whether or not the frame was COW. If a
+            // later fork no longer finds this address in a shared range (a
+            // user-supplied thread stack that has since exited), the frame
+            // becomes COW there, and an uncounted older mapper would let the
+            // newer one free it while the older child still maps it.
+            cow_get(sh.addr());
             sh.set_writable(true);
             parent_pt[i] = sh;
             sh.set_sw_bit(pte_shared, true);
@@ -778,6 +780,16 @@ address_space *clone_address_space(address_space *parent)
         for (auto &v : *parent->vmas) {
             if (v.size() == 0) continue;
             if ((v.flags() & mmap_stack) || (v.flags() & mmap_shared)) {
+                share_ranges.push_back({v.start(), v.end()});
+                continue;
+            }
+            // A file whose pages belong to the file itself (a shm or io_uring
+            // object, not the page cache) maps those pages directly even when
+            // MAP_PRIVATE, so the mapping is shared in effect. Copy-on-write
+            // would let the fault path or child teardown free a page the file
+            // still owns.
+            auto *fv = dynamic_cast<file_vma *>(&v);
+            if (fv && !dynamic_cast<vfs_file *>(fv->file().get())) {
                 share_ranges.push_back({v.start(), v.end()});
             }
         }
