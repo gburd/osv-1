@@ -41,6 +41,7 @@
 #include <osv/kernel_config_lazy_stack_invariant.h>
 #include <osv/kernel_config_memory_jvm_balloon.h>
 #include <osv/pagecache.hh>
+#include <osv/vfs_file.hh>
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
 #include <osv/fork_arena.hh>
@@ -493,6 +494,8 @@ static bool cow_put(phys pa)
     return v != 0;
 }
 
+static bool addr_is_file_owned(vma_list_type &vmas, uintptr_t va);
+
 static bool addr_is_shared(uintptr_t va)
 {
     if (!cow_share_ranges) return false;
@@ -549,12 +552,16 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             pt_element<0> sh = ppte;
             if (pte_is_cow(sh)) {
                 sh = pte_mark_cow(sh, false);
-                // The parent's mapping leaves the count without dropping it,
-                // and one more keeps it above zero: an older child that still
-                // maps the frame copy-on-write must copy it, never free it or
-                // write it in place.
-                cow_get(sh.addr());
             }
+            // Count the child's mapping whether or not the frame was COW, and
+            // never drop it (teardown skips pte_shared leaves). If a later
+            // fork no longer finds this address in a shared range (a
+            // user-supplied thread stack that has since exited), the frame
+            // becomes COW there; the count must not miss this child, or the
+            // newer one could free the frame while this child still maps it.
+            // An older child that maps the frame COW must likewise copy it,
+            // never free it or write it in place.
+            cow_get(sh.addr());
             sh.set_writable(true);
             parent_pt[i] = sh;
             sh.set_sw_bit(pte_shared, true);
@@ -956,18 +963,21 @@ address_space *clone_address_space(address_space *parent)
 // are always freed (they were allocated fresh for the child).  Leaf 4K pages
 // are freed only if they are the child's PRIVATE copy (writable, non-COW);
 // COW / read-only leaves are shared with the parent and left intact.
-static void free_child_pt_level0(pt_element<0> *pt)
+static void free_child_pt_level0(pt_element<0> *pt, vma_list_type &vmas,
+                                 uintptr_t base_virt)
 {
     for (unsigned i = 0; i < pte_per_page; i++) {
         pt_element<0> e = pt[i];
         if (e.empty()) continue;
+        uintptr_t va = base_virt + (uintptr_t)i * page_size;
         if (e.writable() && !pte_is_cow(e) && !e.sw_bit(pte_shared) &&
                 !e.sw_bit(pte_pagecache)) {
             // Child's own COW-copied private page: free it.  (pte_shared pages
             // are jointly-owned stack/MAP_SHARED frames -- never free them.)
             memory::free_page(phys_to_virt(e.addr()));
         } else if (pte_is_cow(e) && !e.sw_bit(pte_shared) &&
-                   !e.sw_bit(pte_pagecache) && !cow_put(e.addr())) {
+                   !e.sw_bit(pte_pagecache) && !cow_put(e.addr()) &&
+                   !addr_is_file_owned(vmas, va)) {
             // The child was the last mapper of this COW frame.
             memory::free_page(phys_to_virt(e.addr()));
         }
@@ -977,25 +987,32 @@ static void free_child_pt_level0(pt_element<0> *pt)
 }
 
 template<int N>
-static void free_child_pt_level(pt_element<N> *pt);
+static void free_child_pt_level(pt_element<N> *pt, vma_list_type &vmas,
+                                uintptr_t base_virt);
 
 template<>
-void free_child_pt_level<1>(pt_element<1> *pt)
+void free_child_pt_level<1>(pt_element<1> *pt, vma_list_type &vmas,
+                            uintptr_t base_virt)
 {
+    const uintptr_t step = (uintptr_t)page_size * pte_per_page; // 2 MB
     for (unsigned i = 0; i < pte_per_page; i++) {
         pt_element<1> e = pt[i];
         if (e.empty() || e.large()) continue;   // large: shared mapping, skip
-        free_child_pt_level0(phys_cast<pt_element<0>>(e.next_pt_addr()));
+        free_child_pt_level0(phys_cast<pt_element<0>>(e.next_pt_addr()), vmas,
+                             base_virt + i * step);
     }
     memory::free_page(pt);
 }
 template<>
-void free_child_pt_level<2>(pt_element<2> *pt)
+void free_child_pt_level<2>(pt_element<2> *pt, vma_list_type &vmas,
+                            uintptr_t base_virt)
 {
+    const uintptr_t step = (uintptr_t)page_size * pte_per_page * pte_per_page; // 1 GB
     for (unsigned i = 0; i < pte_per_page; i++) {
         pt_element<2> e = pt[i];
         if (e.empty() || e.large()) continue;
-        free_child_pt_level<1>(phys_cast<pt_element<1>>(e.next_pt_addr()));
+        free_child_pt_level<1>(phys_cast<pt_element<1>>(e.next_pt_addr()), vmas,
+                               base_virt + i * step);
     }
     memory::free_page(pt);
 }
@@ -1022,7 +1039,8 @@ void destroy_address_space(address_space *as)
         for (unsigned slot = pml4_app_first; slot <= pml4_app_last; slot++) {
             pt_element<3> e3 = pml4[slot];
             if (e3.empty() || e3.large()) continue;
-            free_child_pt_level<2>(phys_cast<pt_element<2>>(e3.next_pt_addr()));
+            free_child_pt_level<2>(phys_cast<pt_element<2>>(e3.next_pt_addr()),
+                                   *as->vmas, (uintptr_t)slot << 39);
         }
         memory::free_page(phys_to_virt(pml4_phys));
     }
@@ -1906,6 +1924,23 @@ find_intersecting_vma_in(vma_list_type &vmas, uintptr_t addr) {
         return vmas.end();
     }
 }
+
+#if CONF_fork
+// True if @va lies in a mapping of a file that owns its pages (a shm or
+// io_uring object, whose map_page() hands out the file's own frames) rather
+// than the page cache or anonymous memory.  Such a frame may be shared
+// copy-on-write by fork, but it is freed only by the file, never by the fork
+// paths.  Caller holds @vmas' lock.
+static bool addr_is_file_owned(vma_list_type &vmas, uintptr_t va)
+{
+    auto v = find_intersecting_vma_in(vmas, va);
+    if (v == vmas.end()) {
+        return false;
+    }
+    auto *fv = dynamic_cast<file_vma *>(&*v);
+    return fv && !dynamic_cast<vfs_file *>(fv->file().get());
+}
+#endif
 
 static inline vma_list_type::iterator
 find_intersecting_vma(uintptr_t addr) {
@@ -2917,7 +2952,7 @@ static bool cow_peek_enabled()
     return v != 0;
 }
 
-static bool handle_cow_write_fault(uintptr_t addr)
+static bool handle_cow_write_fault(vma_list_type &vmas, uintptr_t addr)
 {
     unsigned i0;
     pt_element<0> *pt = walk_to_leaf(addr, i0);
@@ -2930,11 +2965,15 @@ static bool handle_cow_write_fault(uintptr_t addr)
     // clear this process's private copy.  The vma fault path handles it.
     if (e0.sw_bit(pte_pagecache)) return false;
 
+    // A frame that belongs to its file is never ours: copy away from it and
+    // drop our count, but neither write it in place nor free it.
+    bool file_owned = addr_is_file_owned(vmas, addr);
+
     // Every other address space has dropped this frame: write it in place.
     // No one can add a mapper meanwhile: that takes a fork of this address
     // space, and the caller holds its vma lock for write.
     auto c = cow_count(e0.addr());
-    if (c && c->load(std::memory_order_acquire) == 0) {
+    if (!file_owned && c && c->load(std::memory_order_acquire) == 0) {
         pt_element<0> npte = pte_mark_cow(e0, false);
         npte.set_writable(true);
         pt[i0] = npte;
@@ -2954,7 +2993,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     npte.set_writable(true);
     pt[i0] = npte;
     mmu::flush_tlb_all();
-    if (!cow_put(e0.addr())) {
+    if (!cow_put(e0.addr()) && !file_owned) {
         // The other mappers dropped the frame while we copied it.
         memory::free_page(shared);
     }
@@ -3020,7 +3059,7 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
                 (!cow_peek_enabled() || write_fault_needs_cow_lock(addr))) {
             PREVENT_STACK_PAGE_FAULT
             WITH_LOCK(as->vmas_mutex->for_write()) {
-                if (handle_cow_write_fault(addr)) {
+                if (handle_cow_write_fault(*as->vmas, addr)) {
                     trace_mmu_vm_fault_ret(addr, ef->get_error());
                     return;
                 }
