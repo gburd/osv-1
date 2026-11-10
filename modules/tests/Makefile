@@ -184,7 +184,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-fork-socket.so \
 	tst-fork-conn-socket.so \
 	tst-cow-range-cover.so \
-	tst-fork-fdleak.so \
+	tst-fork-fdleak.so tst-fork-cow-leak.so \
 	tst-fork-overlap-sockets.so \
 	tst-fork-posix-shm.so \
 	tst-fork-shared-write.so \
