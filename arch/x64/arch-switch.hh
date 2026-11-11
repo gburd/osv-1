@@ -285,7 +285,7 @@ void thread::setup_tcb()
     _tcb->tls_base = p + user_tls_size;
 
     _tcb->app_tcb = 0;
-    _tcb->reserved0 = 0;
+    _tcb->dtv = &_arch._dtv;
     _tcb->reserved1 = 0;
     // Install the psABI guards.  Applications compiled with -fstack-protector
     // read the canary straight from %fs:0x28, so an uninitialised slot here is
@@ -380,6 +380,8 @@ void* thread::get_syscall_stack_top()
 
 void thread::update_dtv()
 {
+    _arch._dtv.last_index = _tls.size() - 1;
+    _arch._dtv.first = &_tls[0];
 }
 
 void thread_main_c(thread* t)
