@@ -549,16 +549,35 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             pt_element<0> sh = ppte;
             if (pte_is_cow(sh)) {
                 sh = pte_mark_cow(sh, false);
-                // The parent's mapping leaves the count without dropping it,
-                // and one more keeps it above zero: an older child that still
-                // maps the frame copy-on-write must copy it, never free it or
-                // write it in place.
+            }
+            // Count the child's mapping of a process frame whether or not it
+            // was COW, and never drop it (teardown skips pte_shared leaves).
+            // If a later fork no longer finds this address in a shared range
+            // (a user-supplied thread stack that has since exited), the frame
+            // becomes COW there, and the count must not miss this child.  A
+            // frame the parent already tags pte_shared belongs to its file or
+            // to the shared-anon registry, never to the fork paths: skip it.
+            if (!ppte.sw_bit(pte_shared)) {
                 cow_get(sh.addr());
             }
             sh.set_writable(true);
             parent_pt[i] = sh;
             sh.set_sw_bit(pte_shared, true);
             child_pt[i] = sh;
+        } else if (ppte.sw_bit(pte_shared)) {
+            // A frame that belongs to its file (a MAP_PRIVATE mapping of a shm
+            // or io_uring object, tagged by the file's map_page()): each side
+            // copies it on its first write, but it is the file's to free, so
+            // it is not counted and the fork paths never free it or write it
+            // in place.  A frame some other address space owns jointly, or a
+            // read-only one, is shared as-is.
+            if (ppte.writable() || pte_is_cow(ppte)) {
+                pt_element<0> cow = pte_mark_cow(ppte, true);
+                parent_pt[i] = cow;
+                child_pt[i] = cow;
+            } else {
+                child_pt[i] = ppte;
+            }
         } else if (ppte.writable() && !pte_is_cow(ppte)) {
             // Private writable page: make it COW (write-protect + cow bit) in
             // BOTH parent and child.
@@ -1650,7 +1669,7 @@ public:
 #if CONF_fork
         // A COW frame another address space still maps is not ours to free.
         if (ours && pte_is_cow(old) && !old.sw_bit(pte_pagecache) &&
-                cow_put(old.addr())) {
+                !old.sw_bit(pte_shared) && cow_put(old.addr())) {
             ours = false;
         }
 #endif
@@ -2930,11 +2949,15 @@ static bool handle_cow_write_fault(uintptr_t addr)
     // clear this process's private copy.  The vma fault path handles it.
     if (e0.sw_bit(pte_pagecache)) return false;
 
+    // A frame that belongs to its file (pte_shared): copy away from it, and
+    // never write it in place or free it.
+    bool file_owned = e0.sw_bit(pte_shared);
+
     // Every other address space has dropped this frame: write it in place.
     // No one can add a mapper meanwhile: that takes a fork of this address
     // space, and the caller holds its vma lock for write.
     auto c = cow_count(e0.addr());
-    if (c && c->load(std::memory_order_acquire) == 0) {
+    if (!file_owned && c && c->load(std::memory_order_acquire) == 0) {
         pt_element<0> npte = pte_mark_cow(e0, false);
         npte.set_writable(true);
         pt[i0] = npte;
@@ -2954,7 +2977,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     npte.set_writable(true);
     pt[i0] = npte;
     mmu::flush_tlb_all();
-    if (!cow_put(e0.addr())) {
+    if (!file_owned && !cow_put(e0.addr())) {
         // The other mappers dropped the frame while we copied it.
         memory::free_page(shared);
     }
@@ -3614,6 +3637,11 @@ bool shm_file::map_page(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bo
 {
     uintptr_t hp_off = align_down(offset, huge_page_size);
 
+#if CONF_fork
+    // The frame is the object's, not the process's: fork and teardown must
+    // never free it (shm_file::close() does).
+    pte.set_sw_bit(pte_shared, true);
+#endif
     return write_pte(static_cast<char*>(page(hp_off)) + offset - hp_off, ptep, pte);
 }
 
@@ -3622,6 +3650,9 @@ bool shm_file::map_page(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bo
     uintptr_t hp_off = align_down(offset, huge_page_size);
 
     assert(hp_off == offset);
+#if CONF_fork
+    pte.set_sw_bit(pte_shared, true);
+#endif
 
     return write_pte(static_cast<char*>(page(hp_off)) + offset - hp_off, ptep, pte);
 }
