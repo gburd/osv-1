@@ -389,9 +389,11 @@ net::net(virtio_device& dev)
 #if CONF_drivers_pci
     // One MSI-X vector per data virtqueue.  setup_queue() maps virtqueue index
     // i -> MSI-X entry i (1:1), so the entry numbers are the virtqueue indices
-    // rx[i]=2*i and tx[i]=2*i+1.  Each Rx vector wakes that queue's poll thread;
-    // Tx vectors just disable the queue's interrupts (Tx completion is reaped by
-    // the xmitter/gc path, as in the original single-queue driver).
+    // rx[i]=2*i and tx[i]=2*i+1.  Each Rx vector wakes that queue's poll thread.
+    // Each Tx vector masks further Tx interrupts and wakes that queue's xmitter
+    // to reap; the xmitter re-arms and re-checks before it sleeps
+    // (reap_and_rearm), so a completion posted in the enable window is never
+    // lost.
     int_factory.register_msi_bindings = [this](interrupt_manager &msi) {
         std::vector<msix_binding> bindings;
         bindings.reserve(2 * _nqp);
@@ -402,7 +404,10 @@ net::net(virtio_device& dev)
             bindings.push_back({ (unsigned)(2 * i),
                                  [rx] { rx->vqueue->disable_interrupts(); }, poll });
             bindings.push_back({ (unsigned)(2 * i + 1),
-                                 [tx] { tx->vqueue->disable_interrupts(); }, nullptr });
+                                 [tx] {
+                                     tx->vqueue->disable_interrupts();
+                                     tx->wake_tx_reaper();
+                                 }, nullptr });
         }
         if (!msi.easy_register(bindings)) {
             // Vector allocation is bounded by reserve_msix_vectors() above, so
@@ -417,7 +422,10 @@ net::net(virtio_device& dev)
         return new pci_interrupt(
             pci_dev,
             [=] { return this->ack_irq(); },
-            [=] { this->_rxqs[0]->poll_task->wake_with_irq_disabled(); });
+            [=] {
+                this->_rxqs[0]->poll_task->wake_with_irq_disabled();
+                this->wake_tx_reaper();
+            });
     };
 #endif
 
@@ -431,13 +439,27 @@ net::net(virtio_device& dev)
             gic::irq_type::IRQ_TYPE_EDGE,
             _dev.get_irq(),
             [=] { return this->ack_irq(); },
-            [=] { poll_task->wake_with_irq_disabled(); });
+            [=] {
+                poll_task->wake_with_irq_disabled();
+                // The shared MMIO IRQ also carries Tx completions, which
+                // ack_irq() does not service (it only quiesces Rx).  Wake
+                // the Tx reaper, as the x86 MMIO handler below does.
+                this->wake_tx_reaper();
+            });
     };
 #else
     int_factory.create_gsi_edge_interrupt = [this,poll_task]() {
         return new gsi_edge_interrupt(
             _dev.get_irq(),
-            [=] { if (this->ack_irq()) poll_task->wake_with_irq_disabled(); });
+            [=] {
+                if (this->ack_irq()) {
+                    poll_task->wake_with_irq_disabled();
+                }
+                // The shared MMIO IRQ also carries Tx completions, which
+                // ack_irq() does not service (it only quiesces Rx).  Wake
+                // the Tx reaper; virtio-PCI uses its Tx MSI-X vector.
+                this->wake_tx_reaper();
+            });
     };
 #endif
 #endif
@@ -1180,6 +1202,33 @@ void net::txq::gc()
     }
 
     vqueue->get_buf_gc();
+}
+
+void net::wake_tx_reaper()
+{
+    for (auto& txq : _txqs) {
+        txq->wake_tx_reaper();
+    }
+}
+
+void net::txq::reap_and_rearm()
+{
+    // Enable-then-recheck: reap visible completions, arm the completion
+    // interrupt (sets used_event + a seq_cst fence pairing with the device),
+    // then re-check the used ring once.  If a completion landed in the enable
+    // window, disable and reap again; otherwise the ring is drained with the
+    // interrupt armed, so it is safe for the xmitter to sleep -- the next
+    // completion raises the Tx MSI-X (PCI) / shared IRQ (MMIO), which wakes
+    // the xmitter to reap.  Closes the lost-wake window where the xmitter
+    // slept with unreaped completions and Tx interrupts disabled.
+    for (;;) {
+        gc();
+        vqueue->enable_interrupts();
+        if (!vqueue->used_ring_not_empty()) {
+            break;
+        }
+        vqueue->disable_interrupts();
+    }
 }
 
 // Send VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET on the control virtqueue to tell the
