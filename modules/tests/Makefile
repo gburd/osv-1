@@ -306,6 +306,7 @@ tests += tst-locale-ctype.so
 tests += misc-ctype-dump.so
 tests += tst-dentry-rename-child.so
 tests += tst-locale-data.so
+tests += tst-locale-numeric.so
 tests += misc-locale-dump.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
@@ -339,6 +340,7 @@ conf_locale ?= 0
 # results with the C locale's range (tr_TR's toupper('i') is 'i').
 $(out)/tests/tst-locale-data.o: CXXFLAGS += -std=gnu++17 -DOSV_CONF_LOCALE=$(conf_locale) \
 	-fno-builtin-toupper -fno-builtin-tolower
+$(out)/tests/tst-locale-numeric.o: CXXFLAGS += -std=gnu++17 -DOSV_CONF_LOCALE=$(conf_locale)
 ifeq ($(conf_locale),1)
 locale-test-data := $(out)/tests/locale-data
 locale-test-stamp := $(locale-test-data)/.stamp
