@@ -26,14 +26,15 @@
 // placed at the very END of the TLS allocation (see thread::setup_tcb() in
 // arch-switch.hh), so every application canary read was an out-of-bounds read
 // 16 bytes past the end of that buffer, returning whatever the allocator
-// happened to have there.  reserved0/reserved1 only pad the ABI-mandated gap
-// (glibc keeps multiple_threads/gscope_flag/sysinfo there); nothing on OSv
-// reads them, and they exist solely to place stack_guard at 0x28.
+// happened to have there.  dtv sits at 0x18, where tlsdesc.S reads it as
+// %fs:24.  reserved1 only pads the rest of the ABI-mandated gap (glibc keeps
+// multiple_threads/gscope_flag/sysinfo there); nothing on OSv reads it, and
+// it exists solely to place stack_guard at 0x28.
 struct thread_control_block {
     thread_control_block* self;   // 0x00
     void* tls_base;               // 0x08
     unsigned long app_tcb;        // 0x10
-    unsigned long reserved0;      // 0x18 -- ABI padding, unused by OSv
+    void* dtv;                    // 0x18 -- the DTV, read by __tlsdesc_dynamic (tlsdesc.S)
     unsigned long reserved1;      // 0x20 -- ABI padding, unused by OSv
     uintptr_t stack_guard;        // 0x28 -- -fstack-protector canary (psABI)
     uintptr_t pointer_guard;      // 0x30 -- pointer-mangling guard (psABI)
