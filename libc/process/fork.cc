@@ -681,6 +681,7 @@ pid_t fork(void)
     // and post-return rsp (rbp+16).  The child resumes with exactly this
     // context so it continues in fork()'s caller as a normal `ret` would --
     // essential for deep call chains (see osv::fork_resume_ctx, tst-fork-deep).
+#if defined(__x86_64__)
     fork_resume_ctx ctx;
     void **fp = static_cast<void**>(__builtin_frame_address(0));
     asm volatile("movq %%rbx, %0\n\t"
@@ -693,16 +694,56 @@ pid_t fork(void)
     ctx.rbp = reinterpret_cast<unsigned long>(fp[0]);          // caller's rbp
     ctx.rip = reinterpret_cast<unsigned long>(__builtin_return_address(0));
     ctx.rsp = reinterpret_cast<unsigned long>(fp + 2);         // fork rbp + 16
-
-    pid_t parent = getpid();
-
+    void *resume_ctx = &ctx;
     void *caller_ret = reinterpret_cast<void*>(ctx.rip);
     void *caller_sp  = reinterpret_cast<void*>(ctx.rsp);
+#elif defined(__aarch64__)
+    // aarch64 SAME-VA fork (mirrors x86): capture the caller's full AAPCS64
+    // callee-saved register context so the child resumes in fork()'s caller
+    // EXACTLY as a normal return would, on the parent's EXACT stack VAs (which
+    // clone_address_space privatizes into the child).  fork() is noinline and
+    // its prologue saved x19-x28/x29/x30 to its own frame, but those registers
+    // STILL hold the caller's values here at the top of fork()'s body (nothing
+    // has reloaded them yet), so reading them directly captures the caller's
+    // context -- the same trick x86 uses for rbx/r12-r15.
+    fork_resume_ctx ctx;
+    asm volatile("str x19, %0\n\t str x20, %1\n\t str x21, %2\n\t str x22, %3\n\t"
+                 "str x23, %4\n\t str x24, %5\n\t str x25, %6\n\t str x26, %7\n\t"
+                 "str x27, %8\n\t str x28, %9\n\t"
+                 : "=m"(ctx.x19), "=m"(ctx.x20), "=m"(ctx.x21), "=m"(ctx.x22),
+                   "=m"(ctx.x23), "=m"(ctx.x24), "=m"(ctx.x25), "=m"(ctx.x26),
+                   "=m"(ctx.x27), "=m"(ctx.x28));
+    // fork's frame record: __builtin_frame_address(0) points at fork's saved
+    // {x29(caller fp), x30(return addr)} pair.  fp[0] = caller's frame pointer.
+    void **fp = static_cast<void**>(__builtin_frame_address(0));
+    ctx.fp = reinterpret_cast<unsigned long>(fp[0]);          // caller's x29
+    ctx.pc = reinterpret_cast<unsigned long>(__builtin_return_address(0));
+    // Caller's SP = the SP in effect just before `bl fork`.  Unlike x86 (where
+    // `call` pushes an 8-byte return address, so caller rsp == rbp + 16), the
+    // aarch64 `bl` pushes NOTHING -- the return address goes in x30 -- so fork's
+    // frame record does NOT sit at a fixed +16 from the caller's SP, and the
+    // x86-style `fp + 2` points 240 bytes INTO fork's own 256-byte frame.  The
+    // caller's SP is fork's incoming (entry) SP, which is exactly the DWARF CFA
+    // of this frame.  __builtin_dwarf_cfa() returns it portably (no hardcoded
+    // frame size).  Restoring the wrong SP shifts the child's whole stack frame:
+    // callee-saved regs (x19-x28, captured as absolute caller values) stay
+    // correct while SP-relative accesses land elsewhere, so a function that
+    // mixes the two -- e.g. test_fork_exec building argv at [sp,#64] but passing
+    // it via x22 -- reads back garbage and faults (strlen on a wild argv[0]).
+    ctx.sp = reinterpret_cast<unsigned long>(__builtin_dwarf_cfa());
+    void *resume_ctx = &ctx;
+    void *caller_ret = reinterpret_cast<void*>(ctx.pc);
+    void *caller_sp  = reinterpret_cast<void*>(ctx.sp);
+#else
+#error "fork() caller-context capture not implemented for this architecture"
+#endif
+
+    pid_t parent = getpid();
 
     void *stack_to_free = nullptr;
     // POSIX: run pthread_atfork prepare handlers in the parent before forking.
     __osv_run_atfork_prepare();
-    sched::thread *child = fork_thread(caller_ret, caller_sp, &ctx, &stack_to_free);
+    sched::thread *child = fork_thread(caller_ret, caller_sp, resume_ctx, &stack_to_free);
     if (!child) {
         __osv_run_atfork_parent();  // undo prepare-side locking
         errno = ENOMEM;
