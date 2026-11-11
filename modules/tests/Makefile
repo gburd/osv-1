@@ -300,6 +300,11 @@ internal-api-tests += tst-umount-release.so
 ifeq ($(conf_zfs),openzfs)
 $(out)/tests/tst-umount-release.o: COMMON += -DCONF_ZFS_OPENZFS
 endif
+tests += tst-iconv-gb18030.so tst-qsort.so
+
+# tst-qsort compiles musl's qsort.c in to test its internal helpers.
+$(out)/tests/tst-qsort.o: CFLAGS += -iquote $(src)/musl/src/internal \
+	-iquote $(src)/musl/arch/$(ARCH_STR) -Wno-dangling-pointer
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
