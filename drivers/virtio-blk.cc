@@ -150,21 +150,22 @@ blk::blk(virtio_device& virtio_dev)
     bool multi_queue = _num_queues > 1;
     for (int qid = 0; qid < _num_queues; qid++) {
         get_virt_queue(qid)->set_use_indirect(true);
-        auto *t = sched::thread::make(
-           [this,qid] { this->req_done(qid); },
-           sched::thread::attr().name("virtio-blk" + (_num_queues > 1 ? std::to_string(qid) : "") + "_req_done")
-               // 256 KB, the ZFS kthread convention (bsd/porting/kthread.cc):
-               // bio completion runs the filesystem's bio_done callback inline,
-               // and the ZFS path (vdev_disk_bio_done) overruns the default stack.
-               .stack(256 << 10));
-        t->start();
-        // It only makes sense and is actuall necessary to pin the consumer
-        // threads when there are more than one queue so that each is serviced
-        // on different cpu to make it thread-safe
+        // Each queue has exactly one consumer, its own completion thread, so
+        // draining needs no lock (see req_done()). With several queues, the
+        // threads are created pinned to different CPUs so that a completion is
+        // handled near the CPU that submitted to that queue (make_request()
+        // picks the queue by CPU) and the wake does not need an IPI.
+        auto attr = sched::thread::attr()
+            .name("virtio-blk" + (multi_queue ? std::to_string(qid) : "") + "_req_done")
+            // 256 KB, the ZFS kthread convention (bsd/porting/kthread.cc):
+            // bio completion runs the filesystem's bio_done callback inline,
+            // and the ZFS path (vdev_disk_bio_done) overruns the default stack.
+            .stack(256 << 10);
         if (multi_queue) {
-           auto cpu = sched::cpus[qid % sched::cpus.size()];
-           sched::thread::pin(t, cpu);
+            attr.pin(sched::cpus[qid % sched::cpus.size()]);
         }
+        auto *t = sched::thread::make([this,qid] { this->req_done(qid); }, attr);
+        t->start();
         threads[qid] = t;
     }
     // A shared interrupt does not identify the completed queue. Capture the
@@ -314,10 +315,12 @@ void blk::read_config()
  *
  * MSI-X wakes the completed queue's thread; shared interrupts wake all threads.
  * Each thread sleeps until its own queue's used ring is non-empty,
- * then drains it. No lock needs to be held while the queue is drained,
- * as the req_done() for each queue is handled on different cpu, and also
- * is thread-safe when interacting with producer threads calling make_request()
- * because it races only on the lock-free _used_ring_host_head counter.
+ * then drains it. No lock is held while the queue is drained: this thread is
+ * the queue's only consumer, and it races producers in make_request() only on
+ * _used_ring_host_head, which it publishes with release ordering before the
+ * producer's GC can recycle a finalized descriptor. It must not take the
+ * queue's submission lock: a producer sleeps in add_buf_wait() holding that
+ * lock while it waits for this thread to free ring space.
  */
 void blk::req_done(int qid)
 {
