@@ -49,7 +49,7 @@ namespace sched {
 struct thread {
     unsigned wakes = 0;
     bool started = false;
-    struct attr { attr& name(std::string) { return *this; } };
+    struct attr { attr& name(std::string) { return *this; } attr& stack(size_t) { return *this; } attr& pin(int) { return *this; } };
     static std::vector<std::unique_ptr<thread>> owned;
     static thread* make(std::function<void()>, attr) {
         owned.emplace_back(new thread);
