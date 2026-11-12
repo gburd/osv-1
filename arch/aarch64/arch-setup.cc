@@ -30,6 +30,9 @@
 #include "drivers/console.hh"
 #include "drivers/pl011.hh"
 #include "early-console.hh"
+#if CONF_drivers_acpi
+#include "acpi-pci.hh"
+#endif
 #if CONF_drivers_pci
 #include <osv/pci.hh>
 #endif
@@ -252,6 +255,14 @@ void arch_init_drivers()
     extern boot_time_chart boot_time;
 
 #if CONF_drivers_pci
+#if CONF_drivers_acpi
+    size_t dtb_cfg_len;
+    if (!opt_pci_disabled && !pci::get_pci_cfg(&dtb_cfg_len) && acpi_pci::setup()) {
+        acpi_pci::print_devices();
+        pci::pci_device_enumeration();
+        boot_time.event("pci enumerated");
+    } else
+#endif
     if (!opt_pci_disabled) {
         int irqmap_count = dtb_get_pci_irqmap_count();
         if (irqmap_count > 0) {
