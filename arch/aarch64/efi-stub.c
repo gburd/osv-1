@@ -570,6 +570,8 @@ struct machine {
     u64 ecam_base;
     int have_ecam;
 
+    u64 rsdp;             /* physical address of the ACPI 2.0+ RSDP       */
+
     int psci;             /* 0 = none, 1 = present                        */
     int psci_hvc;         /* 1 = hvc conduit, 0 = smc                     */
 };
@@ -735,6 +737,7 @@ static void acpi_scan(struct efi_system_table *st, struct machine *m)
         stub_puts(st, "osv-efi: no ACPI RSDP in the EFI configuration table\n");
         return;
     }
+    m->rsdp = (u64)(unsigned long)rsdp;
     xsdt = (const u8 *)(unsigned long)rd64(rsdp + 0x18);
     if (!xsdt || !sig_is(xsdt, "XSDT")) {
         stub_puts(st, "osv-efi: no XSDT\n");
@@ -842,6 +845,17 @@ static u64 build_dtb(struct machine *m, void *buf, u64 cap,
      * line and removes the need for fdt_setprop() slack in this buffer. */
     fdt_begin_node(&w, "chosen");
     fdt_prop_str(&w, "bootargs", cmdline);
+    /* The kernel needs the RSDP to evaluate the DSDT (PCI host bridge
+     * windows and interrupt routing), and after ExitBootServices it can no
+     * longer reach the EFI configuration table.  The tables themselves stay
+     * valid: they live in ACPI reclaim/NVS memory, outside the /memory
+     * range handed to OSv below. */
+    if (m->rsdp) {
+        addr[0] = m->rsdp;
+        cells[0] = (u32)(addr[0] >> 32);
+        cells[1] = (u32)addr[0];
+        fdt_prop_cells(&w, "osv,acpi-rsdp", cells, 2);
+    }
     fdt_end_node(&w);
 
     /* /memory: read by dtb_get_phys_memory() into memory::phys_mem_size and
@@ -976,18 +990,10 @@ static u64 build_dtb(struct machine *m, void *buf, u64 cap,
         }
     }
 
-    /* NO PCI NODE IS EMITTED, DELIBERATELY, AND THIS IS THE ONE PLACE WHERE
-     * ACPI CANNOT BE TRANSLATED STATICALLY.  MCFG gives the ECAM base, but
-     * dtb_get_pci_ranges() needs the host bridge's memory and I/O windows and
-     * dtb_get_pci_irqmap() needs its interrupt routing, and on ACPI both of
-     * those live in the DSDT as a _CRS / _PRT, i.e. behind an AML
-     * interpreter.  arch_setup_pci() returns early when dtb_get_pci_cfg()
-     * fails and arch_init_drivers() skips enumeration when the config space
-     * is unset, so omitting the node yields a correct PCI-less boot rather
-     * than a wrong one.  A guessed window would silently mis-program BARs.
-     * Closing this gap is what an ACPI discovery path (with AML, or with the
-     * _CRS decoded by the ACPICA already vendored for x86) is for. */
-    (void)m->have_ecam;
+    /* No PCI node: the host bridge windows (_CRS) and interrupt routing
+     * (_PRT) are AML in the DSDT, so the kernel reads them through ACPICA,
+     * starting from the RSDP passed in /chosen above.  A window guessed here
+     * would silently mis-program BARs. */
 
     fdt_end_node(&w);   /* / */
 

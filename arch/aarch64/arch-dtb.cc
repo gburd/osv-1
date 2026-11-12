@@ -741,6 +741,20 @@ bool dtb_get_pci_irqmap(u32 *bdfs, int *irq_ids, int n)
     return true;
 }
 
+u64 dtb_get_acpi_rsdp()
+{
+    if (!dtb)
+        return 0;
+    int node = fdt_path_offset(dtb, "/chosen");
+    if (node < 0)
+        return 0;
+    int len;
+    auto prop = (const u32 *)fdt_getprop(dtb, node, "osv,acpi-rsdp", &len);
+    if (!prop || len != 8)
+        return 0;
+    return (u64)fdt32_to_cpu(prop[0]) << 32 | fdt32_to_cpu(prop[1]);
+}
+
 bool dtb_get_vmm_is_xen()
 {
     if (fdt_check_header(dtb) != 0)
