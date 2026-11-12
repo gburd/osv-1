@@ -299,6 +299,7 @@ tests += tst-close-range.so
 tests += tst-numa-mempolicy.so
 tests += tst-numa-alloc.so
 tests += tst-numa.so
+tests += tst-pthread-cleanup.so
 tests += tst-random-flush.so
 tests += tst-signalfd.so
 tests += tst-locale-builtin.so
