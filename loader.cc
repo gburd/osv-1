@@ -19,11 +19,9 @@
 
 #include "smp.hh"
 
-#ifdef __x86_64__
 #if CONF_drivers_acpi
 #include "drivers/acpi.hh"
 #endif
-#endif /* __x86_64__ */
 
 #include <osv/sched.hh>
 #include <osv/numa.hh>
@@ -822,12 +820,12 @@ void main_cont(int loader_argc, char** loader_argv)
 
     memory::enable_debug_allocator();
 
-#ifdef __x86_64__
 #if CONF_drivers_acpi
     acpi::init();
+#ifdef __x86_64__
     numa::init();
 #endif
-#endif /* __x86_64__ */
+#endif
 
     if (sched::cpus.size() > sched::max_cpus) {
         printf("Too many cpus, can't boot with greater than %u cpus.\n", sched::max_cpus);

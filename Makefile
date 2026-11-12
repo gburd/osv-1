@@ -323,6 +323,9 @@ endif
 ifeq ($(arch),x64)
 INCLUDES += -isystem external/$(arch)/acpica/source/include
 endif
+ifeq ($(arch)-$(conf_drivers_acpi),aarch64-1)
+INCLUDES += -isystem external/$(arch)/acpica/source/include
+endif
 
 ifeq ($(arch),aarch64)
 libfdt_base = external/$(arch)/libfdt
@@ -577,8 +580,28 @@ kernel_vm_base := 0xfc0080000 #63GB
 app_local_exec_tls_size := 0x200
 
 include $(libfdt_base)/Makefile.libfdt
+
 libfdt-source := $(patsubst %.c, $(libfdt_base)/%.c, $(LIBFDT_SRCS))
 libfdt = $(patsubst %.c, %.o, $(libfdt-source))
+
+# ACPICA, for the PCI host bridge description (_CRS, _PRT) that UEFI firmware
+# leaves in the DSDT.  The x86 copy is too old to know aarch64 is a 64-bit
+# target, so aarch64 carries a current ACPICA of its own.
+ifeq ($(conf_drivers_acpi),1)
+ifeq (,$(wildcard external/$(arch)/acpica/source))
+    $(error Missing external/$(arch)/acpica/ directory. Please run "git submodule update --init external/$(arch)/acpica")
+endif
+acpi-defines = -DACPI_USE_LOCAL_CACHE
+# Not built: the AML debugger, the disassembler and the resource dumper
+# (used only by the debugger), which current ACPICA no longer compiles out
+# with #ifdef; and utprint.c/utclib.c, ACPICA's own printf and C library for
+# hosts without one, which would clash with libc.
+acpi-source := $(shell find external/$(arch)/acpica/source/components -type f -name '*.c' \
+	-not -path '*/debugger/*' -not -path '*/disassembler/*' -not -name rsdump.c \
+	-not -name utprint.c -not -name utclib.c)
+acpi = $(patsubst %.c, %.o, $(acpi-source))
+$(acpi:%=$(out)/%): CFLAGS += -fno-strict-aliasing -Wno-stringop-truncation
+endif
 
 # The UEFI stub.  Built freestanding, position independent, and with NO
 # dynamic relocations: UEFI loads the image wherever it likes and we declare
@@ -914,6 +937,9 @@ endif
 endif # x64
 
 ifeq ($(arch),aarch64)
+ifeq ($(conf_drivers_acpi),1)
+drivers += drivers/acpi.o
+endif
 drivers += drivers/mmio-isa-serial.o
 drivers += drivers/pl011.o
 drivers += drivers/pl031.o
@@ -1006,6 +1032,9 @@ objects += arch/$(arch)/memmove.o
 endif
 objects += arch/$(arch)/sched.o
 objects += $(libfdt)
+ifeq ($(conf_drivers_acpi),1)
+objects += $(acpi)
+endif
 endif
 
 ifeq ($(arch),x64)
