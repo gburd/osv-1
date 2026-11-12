@@ -41,6 +41,14 @@ extern char *cmdline;
  */
 size_t dtb_get_phys_memory(u64 *addr);
 
+/* int dtb_get_extra_memory(u64 *addr, size_t *len, int max);
+ *
+ * Fills up to max further RAM ranges from the /memory reg property, after
+ * the first entry that dtb_get_phys_memory() returns, and returns how many.
+ */
+
+int dtb_get_extra_memory(u64 *addr, size_t *len, int max);
+
 /* u64 dtb_get_uart(int *irqid)
  *
  * return the base address of the uart and writes the
