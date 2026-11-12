@@ -163,6 +163,14 @@ bool dtb_get_pci_irqmap(u32 *bdfs, int *irq_ids, int n);
 #define DTB_PHYSHI_D_SH 11
 #define DTB_PHYSHI_F_SH 8
 
+/* u64 dtb_get_acpi_rsdp();
+ *
+ * Returns the physical address of the ACPI RSDP passed by the UEFI stub in
+ * /chosen "osv,acpi-rsdp", or 0 when the machine was not booted by firmware.
+ */
+
+u64 dtb_get_acpi_rsdp();
+
 /* bool dtb_get_vmm_is_xen();
  *
  * Returns true if Xen hypervisor is detected.
