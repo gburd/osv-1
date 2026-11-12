@@ -34,6 +34,9 @@ extern "C" {
 
 #include <osv/prio.hh>
 #include "acpi.hh"
+#ifdef __aarch64__
+#include "arch-dtb.hh"
+#endif
 
 #define acpi_tag "acpi"
 #define acpi_d(...)   tprintf_d(acpi_tag, __VA_ARGS__)
@@ -57,10 +60,16 @@ ACPI_PHYSICAL_ADDRESS AcpiOsGetRootPointer()
     if (acpi::pvh_rsdp_paddr) {
         rsdp = acpi::pvh_rsdp_paddr;
     } else {
+#ifdef __aarch64__
+        // No legacy BIOS area to scan: the RSDP is known only from the EFI
+        // configuration table, which the UEFI stub passes on.
+        abort();
+#else
         auto st = AcpiFindRootPointer(&rsdp);
         if (ACPI_FAILURE(st)) {
             abort();
         }
+#endif
     }
     return rsdp;
 }
@@ -224,6 +233,7 @@ AcpiOsReleaseObject (
  * Interrupt handlers
  */
 
+#ifdef __x86_64__
 namespace osv {
 
 class acpi_interrupt {
@@ -304,6 +314,19 @@ AcpiOsRemoveInterruptHandler(
     osv::acpi_interrupts.erase(InterruptNumber);
     return AE_OK;
 }
+#else
+// Hardware-reduced ACPI, the only kind arm64 firmware provides, has no SCI,
+// so ACPICA never asks for an interrupt handler here.
+ACPI_STATUS AcpiOsInstallInterruptHandler(UINT32, ACPI_OSD_HANDLER, void *)
+{
+    return AE_SUPPORT;
+}
+
+ACPI_STATUS AcpiOsRemoveInterruptHandler(UINT32, ACPI_OSD_HANDLER)
+{
+    return AE_NOT_EXIST;
+}
+#endif
 
 ACPI_THREAD_ID AcpiOsGetThreadId()
 {
@@ -334,6 +357,20 @@ void AcpiOsStall(UINT32 Microseconds)
     sched::thread::sleep(std::chrono::microseconds(Microseconds));
 }
 
+#ifdef __aarch64__
+// aarch64 has no I/O port instructions, and the hardware-reduced ACPI that
+// arm64 firmware provides does not use SystemIO for fixed hardware.
+ACPI_STATUS AcpiOsReadPort(ACPI_IO_ADDRESS, UINT32 *Value, UINT32)
+{
+    *Value = ~0u;
+    return AE_SUPPORT;
+}
+
+ACPI_STATUS AcpiOsWritePort(ACPI_IO_ADDRESS, UINT32, UINT32)
+{
+    return AE_SUPPORT;
+}
+#else
 ACPI_STATUS AcpiOsReadPort(
     ACPI_IO_ADDRESS         Address,
     UINT32                  *Value,
@@ -375,6 +412,7 @@ ACPI_STATUS AcpiOsWritePort(
     }
     return AE_OK;
 }
+#endif
 
 
 ACPI_STATUS
@@ -519,6 +557,14 @@ UINT64 AcpiOsGetTimer()
     return clock::get()->time() / 100;
 }
 
+#ifdef __aarch64__
+// Called by the current ACPICA and not by the older x86 copy.
+ACPI_STATUS AcpiOsEnterSleep(UINT8 SleepState, UINT32 RegaValue, UINT32 RegbValue)
+{
+    return AE_OK;
+}
+#endif
+
 ACPI_STATUS AcpiOsSignal(UINT32 Function, void *Info)
 {
     abort();
@@ -557,6 +603,12 @@ bool is_enabled() {
 
 void early_init()
 {
+#ifdef __aarch64__
+    acpi::pvh_rsdp_paddr = dtb_get_acpi_rsdp();
+    if (!acpi::pvh_rsdp_paddr) {
+        return;    // Not booted by UEFI firmware: the device tree describes the machine.
+    }
+#endif
     if (!acpi::pvh_rsdp_paddr) {
         ACPI_SIZE rsdp;
         auto st = AcpiFindRootPointer(&rsdp);
@@ -638,7 +690,7 @@ void init()
 
 void __attribute__((constructor(init_prio::acpi))) acpi_init_early()
 {
-#if CONF_drivers_xen
+#if CONF_drivers_xen && defined(__x86_64__)
     XENPV_ALTERNATIVE({ acpi::early_init(); }, {});
 #else
     acpi::early_init();
