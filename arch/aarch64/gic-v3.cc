@@ -55,6 +55,10 @@
 
 #include "processor.hh"
 #include "gic-v3.hh"
+#include <osv/drivers_config.h>
+#if CONF_drivers_acpi
+#include "acpi-pci.hh"
+#endif
 #include "arm-clock.hh"
 
 extern class interrupt_table idt;
@@ -720,7 +724,12 @@ u32 gic_v3_driver::pci_device_id(pci::function* dev)
 {
     u8 bus, device, function;
     dev->get_bdf(bus, device, function);
-    return (((u32)bus) << 8) | (((u32)device) << 3) | (u32)function;
+    u32 rid = (((u32)bus) << 8) | (((u32)device) << 3) | (u32)function;
+#if CONF_drivers_acpi
+    return acpi_pci::msi_device_id(rid);
+#else
+    return rid;
+#endif
 }
 
 void gic_v3_driver::allocate_msi_dev_mapping(pci::function* dev)
