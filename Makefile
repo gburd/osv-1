@@ -1033,6 +1033,7 @@ endif
 objects += arch/$(arch)/sched.o
 objects += $(libfdt)
 ifeq ($(conf_drivers_acpi),1)
+objects += arch/$(arch)/acpi-pci.o
 objects += $(acpi)
 endif
 endif
