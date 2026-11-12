@@ -17,7 +17,7 @@
 
 #include <osv/drivers_config.h>
 
-#if CONF_drivers_acpi
+#if CONF_drivers_acpi && defined(__x86_64__)
 extern "C" {
 #include "acpi.h"
 }
@@ -84,7 +84,7 @@ unsigned distance(unsigned from, unsigned to)
     return 20;       // Default remote distance when no SLIT is present.
 }
 
-#if CONF_drivers_acpi
+#if CONF_drivers_acpi && defined(__x86_64__)
 using boost::intrusive::get_parent_from_member;
 
 static bool parse_srat(topology& t)
@@ -267,7 +267,7 @@ void init()
     }
     s_initialized = true;
 
-#if CONF_drivers_acpi
+#if CONF_drivers_acpi && defined(__x86_64__)
     try {
         topology pending;
         if (parse_srat(pending)) {

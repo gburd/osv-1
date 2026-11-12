@@ -1,6 +1,9 @@
 [submodule "external/x64/acpica"]
 	path = external/x64/acpica
 	url = ../../cloudius-systems/acpica
+[submodule "external/aarch64/acpica"]
+	path = external/aarch64/acpica
+	url = https://github.com/acpica/acpica
 	ignore = dirty
 [submodule "apps"]
 	path = apps
