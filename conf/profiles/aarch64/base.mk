@@ -36,6 +36,11 @@ ifeq ($(conf_drivers_ena),1)
 export conf_drivers_pci?=1
 endif
 
+export conf_drivers_acpi?=0
+ifeq ($(conf_drivers_acpi),1)
+export conf_drivers_pci?=1
+endif
+
 export conf_drivers_cadence?=0
 export conf_drivers_virtio?=0
 export conf_drivers_pci?=0
