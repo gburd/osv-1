@@ -17,6 +17,7 @@
 #include "fault-fixup.hh"
 #include "dump.hh"
 #include "gic-v3.hh"
+#include <osv/intr_random.hh>
 
 __thread exception_frame* current_interrupt_frame;
 class interrupt_table idt __attribute__((init_priority((int)init_prio::idt)));
@@ -227,6 +228,7 @@ void interrupt(exception_frame* frame)
     current_interrupt_frame = frame;
 
     unsigned int iar = gic::gic->ack_irq();
+    harvest_interrupt_randomness(iar, frame);
     if (idt.invoke_interrupt(iar)) {
         gic::gic->end_irq(iar);
     }
