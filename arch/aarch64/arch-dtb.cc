@@ -153,6 +153,34 @@ static bool dtb_get_int_spec(int node, struct dtb_int_spec *s, int n)
     return true;
 }
 
+int dtb_get_extra_memory(u64 *addr, size_t *len, int max)
+{
+    if (!dtb)
+        return 0;
+    int node = fdt_path_offset(dtb, "/memory");
+    if (node < 0)
+        return 0;
+    u32 addr_cells, size_cells;
+    if (!dtb_getprop_u32_cascade(node, "#address-cells", &addr_cells) ||
+        !dtb_getprop_u32_cascade(node, "#size-cells", &size_cells))
+        return 0;
+    int size;
+    auto reg = (const u32 *)fdt_getprop(dtb, node, "reg", &size);
+    int entry = (addr_cells + size_cells) * sizeof(u32);
+    if (!reg || !entry)
+        return 0;
+    int total = size / entry, n = 0;
+    reg += addr_cells + size_cells;   // the first entry is the kernel's own block
+    for (int x = 1; x < total && n < max; x++, n++) {
+        addr[n] = len[n] = 0;
+        for (u32 i = 0; i < addr_cells; i++, reg++)
+            addr[n] = addr[n] << 32 | fdt32_to_cpu(*reg);
+        for (u32 i = 0; i < size_cells; i++, reg++)
+            len[n] = len[n] << 32 | fdt32_to_cpu(*reg);
+    }
+    return n;
+}
+
 size_t dtb_get_phys_memory(u64 *addr)
 {
     size_t retval;

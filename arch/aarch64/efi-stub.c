@@ -823,8 +823,18 @@ static void node_name_at(char *out, const char *stem, u64 addr)
 /* Build the device tree OSv/aarch64 expects.  Every node here exists because
  * a named dtb_get*() accessor looks for it; nothing is emitted "for
  * completeness". */
+/* Every usable RAM range outside the stub's own block, from the final EFI
+ * memory map, so the kernel gets all of the machine's memory. */
+#define MAX_EXTRA_RAM 32
+struct ram_ranges {
+    u64 base[MAX_EXTRA_RAM];
+    u64 size[MAX_EXTRA_RAM];
+    int n;
+};
+
 static u64 build_dtb(struct machine *m, void *buf, u64 cap,
-                     u64 mem_base, u64 mem_size, const char *cmdline)
+                     u64 mem_base, u64 mem_size, const char *cmdline,
+                     const struct ram_ranges *extra)
 {
     struct fdt_writer w;
     u32 cells[12];
@@ -858,16 +868,32 @@ static u64 build_dtb(struct machine *m, void *buf, u64 cap,
     }
     fdt_end_node(&w);
 
-    /* /memory: read by dtb_get_phys_memory() into memory::phys_mem_size and
-     * mmu::mem_addr.  This describes ONLY the block the stub allocated, which
-     * is the whole point: OSv treats this range as free and will write over
-     * anything inside it. */
+    /* /memory: the first reg entry is the block the stub allocated, which
+     * dtb_get_phys_memory() reads into mmu::mem_addr and holds the kernel.
+     * Any further entries are the rest of the machine's usable RAM.  OSv
+     * treats every range here as free and will write over anything in it, so
+     * only memory the firmware no longer owns is listed. */
     node_name_at(name, "memory", mem_base);
     fdt_begin_node(&w, name);
     fdt_prop_str(&w, "device_type", "memory");
-    addr[0] = mem_base;
-    size[0] = mem_size;
-    fdt_prop_reg(&w, "reg", addr, size, 1);
+    {
+        u32 reg[4 * (MAX_EXTRA_RAM + 1)];
+        int n = 0;
+
+        reg[n++] = (u32)(mem_base >> 32);
+        reg[n++] = (u32)mem_base;
+        reg[n++] = (u32)(mem_size >> 32);
+        reg[n++] = (u32)mem_size;
+        for (i = 0; extra && i < extra->n; i++) {
+            reg[n++] = (u32)(extra->base[i] >> 32);
+            reg[n++] = (u32)extra->base[i];
+            reg[n++] = (u32)(extra->size[i] >> 32);
+            reg[n++] = (u32)extra->size[i];
+        }
+        for (i = 0; i < n; i++)
+            fdt_put_be32((u8 *)&reg[i], reg[i]);
+        fdt_prop(&w, "reg", reg, (u64)n * 4);
+    }
     fdt_end_node(&w);
 
     /* /cpus: dtb_parse_cpus() counts subnodes with device_type = "cpu" and
@@ -994,6 +1020,7 @@ static u64 build_dtb(struct machine *m, void *buf, u64 cap,
      * (_PRT) are AML in the DSDT, so the kernel reads them through ACPICA,
      * starting from the RSDP passed in /chosen above.  A window guessed here
      * would silently mis-program BARs. */
+    (void)m->have_ecam;
 
     fdt_end_node(&w);   /* / */
 
@@ -1017,6 +1044,94 @@ static u64 align_up(u64 v, u64 a)
 /* Implemented in preboot.S: turns the MMU and caches off, drops to EL1 if the
  * firmware left us at EL2, and branches to the relocated image with
  * x0 = DTB physical address.  Never returns. */
+/* EFI_MEMORY_DESCRIPTOR, UEFI 2.10 section 7.2.3.  Read with explicit
+ * offsets and the firmware's desc_size stride, which may exceed the struct. */
+#define EFI_MD_TYPE          0
+#define EFI_MD_PHYS_START    8
+#define EFI_MD_NUM_PAGES     24
+#define EFI_MD_ATTRIBUTE     32
+#define EFI_MEMORY_WB        0x8ULL
+#define EFI_MEMORY_RUNTIME   0x8000000000000000ULL
+
+/* Memory the OS may use once boot services are gone: loader code and data
+ * (this stub, its stack and pool allocations, all dead once the kernel runs),
+ * boot services code and data, and conventional memory. */
+static int efi_ram_usable(u32 type)
+{
+    return type == 1 || type == 2 || type == 3 || type == 4 || type == 7;
+}
+
+static void add_range(struct ram_ranges *r, u64 base, u64 end)
+{
+    if (end <= base)
+        return;
+    if (r->n && r->base[r->n - 1] + r->size[r->n - 1] == base) {
+        r->size[r->n - 1] += end - base;
+        return;
+    }
+    if (r->n == MAX_EXTRA_RAM) {
+        /* Keep the largest ranges: replace the smallest if this is bigger. */
+        int i, min = 0;
+        for (i = 1; i < r->n; i++)
+            if (r->size[i] < r->size[min])
+                min = i;
+        if (r->size[min] >= end - base)
+            return;
+        for (i = min; i < r->n - 1; i++) {
+            r->base[i] = r->base[i + 1];
+            r->size[i] = r->size[i + 1];
+        }
+        r->n--;
+    }
+    r->base[r->n] = base;
+    r->size[r->n] = end - base;
+    r->n++;
+}
+
+/* Usable WB RAM from the memory map, minus [skip_lo, skip_hi), clipped to
+ * 2 MB boundaries so each range can be mapped with large pages.  The map from
+ * EDK2 is sorted by address, which is what lets adjacent ranges coalesce. */
+static void collect_ram(const u8 *map, u64 map_size, u64 desc_size,
+                        u64 skip_lo, u64 skip_hi, struct ram_ranges *r)
+{
+    u64 off, run_base = 0, run_end = 0;
+
+    r->n = 0;
+    if (!map || desc_size < EFI_MD_ATTRIBUTE + 8)
+        return;
+    for (off = 0; off + desc_size <= map_size; off += desc_size) {
+        const u8 *d = map + off;
+        u64 base = rd64(d + EFI_MD_PHYS_START);
+        u64 end = base + (rd64(d + EFI_MD_NUM_PAGES) << 12);
+        u64 attr = rd64(d + EFI_MD_ATTRIBUTE);
+
+        if (!efi_ram_usable(rd32(d + EFI_MD_TYPE)) || !(attr & EFI_MEMORY_WB) ||
+            (attr & EFI_MEMORY_RUNTIME))
+            continue;
+        if (base == run_end) {
+            run_end = end;
+            continue;
+        }
+        if (run_end > run_base) {
+            /* flush the previous run, split around the kernel block */
+            u64 lo = align_up(run_base, TWO_MB), hi = run_end & ~(TWO_MB - 1);
+            if (lo < skip_lo)
+                add_range(r, lo, hi < skip_lo ? hi : (skip_lo & ~(TWO_MB - 1)));
+            if (hi > skip_hi)
+                add_range(r, lo > skip_hi ? lo : align_up(skip_hi, TWO_MB), hi);
+        }
+        run_base = base;
+        run_end = end;
+    }
+    if (run_end > run_base) {
+        u64 lo = align_up(run_base, TWO_MB), hi = run_end & ~(TWO_MB - 1);
+        if (lo < skip_lo)
+            add_range(r, lo, hi < skip_lo ? hi : (skip_lo & ~(TWO_MB - 1)));
+        if (hi > skip_hi)
+            add_range(r, lo > skip_hi ? lo : align_up(skip_hi, TWO_MB), hi);
+    }
+}
+
 extern void osv_efi_enter_kernel(u64 image_base, u64 dtb, u64 image_size);
 
 /* Called from the PE entry trampoline in preboot.S.
@@ -1032,7 +1147,8 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
     u64 image_size;
     u64 want, alloc_base = 0, alloc_size = 0;
     u64 kernel_base, dtb_phys, dtb_len;
-    u64 map_size = 0, map_key = 0, desc_size = 0;
+    u64 map_size = 0, map_key = 0, desc_size = 0, map_size_used = 0;
+    struct ram_ranges extra;
     u32 desc_version = 0;
     void *map = NULL;
     efi_status rc;
@@ -1055,13 +1171,10 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
     stub_memset(&m, 0, sizeof(m));
     acpi_scan(st, &m);
 
-    /* Allocate the block OSv will own.  Descending sizes so a small instance
-     * still boots; below 4 GB because boot.S's boot page tables only ident-map
-     * that much, which is the same constraint #1490 was about.
-     *
-     * ponytail: the guest gets what the stub allocates, not all machine RAM.
-     * Lifting it means describing several /memory ranges from the EFI memory
-     * map AND extending the boot-time ident map past 4 GB. */
+    /* Allocate the block that holds the kernel.  Descending sizes so a small
+     * instance still boots; below 4 GB because boot.S's boot page tables only
+     * ident-map that much.  The rest of RAM, above 4 GB included, is added
+     * from the final memory map after ExitBootServices. */
     want = align_up(image_size + IMAGE_TEXT_OFFSET + DTB_BYTES + TWO_MB * 2,
                     TWO_MB);
     for (attempt = 0; attempt < 8; attempt++) {
@@ -1102,7 +1215,9 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
     kernel_base = align_up(alloc_base, TWO_MB) + IMAGE_TEXT_OFFSET;
     dtb_phys = align_up(kernel_base + image_size, 0x1000);
 
-    if (dtb_phys + DTB_BYTES > alloc_base + alloc_size) {
+    /* Room for two trees: the second, with all of RAM, is written after
+     * ExitBootServices. */
+    if (dtb_phys + 2 * DTB_BYTES > alloc_base + alloc_size) {
         stub_puts(st, "osv-efi: allocation too small for image + DTB\n");
         return EFI_SUCCESS;
     }
@@ -1112,7 +1227,7 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
     dtb_len = build_dtb(&m, (void *)(unsigned long)dtb_phys, DTB_BYTES,
                         align_up(alloc_base, TWO_MB),
                         (alloc_base + alloc_size) - align_up(alloc_base, TWO_MB),
-                        (const char *)(unsigned long)(image_start + 0x200));
+                        (const char *)(unsigned long)(image_start + 0x200), NULL);
     if (!dtb_len) {
         stub_puts(st, "osv-efi: device tree did not fit\n");
         return EFI_SUCCESS;
@@ -1208,6 +1323,7 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
                                 &desc_version);
         if (rc != EFI_SUCCESS)
             break;
+        map_size_used = this_size;
         rc = bs->exit_boot_services(image_handle, map_key);
         if (rc == EFI_SUCCESS)
             break;
@@ -1219,7 +1335,22 @@ efi_status osv_efi_main(efi_handle image_handle, struct efi_system_table *st,
         return rc;
     }
 
-    /* No EFI service may be called from here on. */
+    /* No EFI service may be called from here on.
+     *
+     * The map that ExitBootServices accepted is final, so it is the one to
+     * describe.  The tree above, with the kernel block only, stays in place
+     * if the larger one does not fit. */
+    collect_ram(map, map_size_used, desc_size, alloc_base, alloc_base + alloc_size,
+                &extra);
+    if (extra.n) {
+        u64 cmd = image_start + 0x200;
+        u64 len = build_dtb(&m, (void *)(unsigned long)(dtb_phys + DTB_BYTES),
+                            DTB_BYTES, align_up(alloc_base, TWO_MB),
+                            (alloc_base + alloc_size) - align_up(alloc_base, TWO_MB),
+                            (const char *)(unsigned long)cmd, &extra);
+        if (len)
+            dtb_phys += DTB_BYTES;
+    }
     osv_efi_enter_kernel(kernel_base, dtb_phys, image_size);
     return EFI_SUCCESS;   /* not reached */
 }

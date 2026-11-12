@@ -106,6 +106,30 @@ void arch_setup_free_memory()
             area == mmu::mem_area::page ? "page" : "mempool");
     }
 
+    // RAM outside the block that holds the kernel.  Only UEFI firmware boots
+    // describe any: there the kernel block is a few GB below 4 GB, and the
+    // rest of the machine's memory, most of it above 4 GB, comes from the EFI
+    // memory map.  The temporary phys_mem map covers all of it.
+    u64 extra_addr[32];
+    size_t extra_len[32];
+    int extra = dtb_get_extra_memory(extra_addr, extra_len, 32);
+    size_t extra_total = 0;
+    for (int i = 0; i < extra; i++) {
+        if (extra_addr[i] + extra_len[i] > u64(temp_phys_map_gbs) << 30) {
+            debug_early("arch-setup: RAM above the temporary map ignored\n");
+            continue;
+        }
+        mmu::free_initial_memory_range(extra_addr[i], extra_len[i]);
+        for (auto&& area : mmu::identity_mapped_areas) {
+            auto base = reinterpret_cast<void*>(get_mem_area_base(area));
+            mmu::linear_map(base + extra_addr[i], extra_addr[i], extra_len[i],
+                area == mmu::mem_area::main ? "main" :
+                area == mmu::mem_area::page ? "page" : "mempool");
+        }
+        extra_total += extra_len[i];
+    }
+    memory::phys_mem_size += extra_total;
+
     /* linear_map [TTBR0 - boot, DTB and ELF] */
     /* physical memory layout - relative to the 2MB-aligned address PA stored in mmu::mem_addr
        PA +     0x0 - PA + 0x80000: boot
