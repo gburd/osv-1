@@ -285,6 +285,7 @@ internal-api-tests += tst-random-flush.so
 internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
+tests += tst-fork-msleep-wake.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
