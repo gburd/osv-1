@@ -83,6 +83,14 @@ $(out)/tests/tst-reloc.so: $(src)/tests/tst-reloc.c
 
 $(out)/tests/lib-circular-reloc1.so: $(src)/tests/lib-circular-reloc1.cc
 $(out)/tests/lib-circular-reloc2.so: $(src)/tests/lib-circular-reloc2.cc
+
+# tst-fork-vislookup is LINKED against libforksym.so so its forksym_fn_* calls
+# go through the executable PLT (lazy resolve in a forked child).
+$(out)/tests/tst-fork-vislookup.so: \
+		$(out)/tests/tst-fork-vislookup.o \
+		$(out)/tests/libforksym.so
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ tests/tst-fork-vislookup.o $(LIBS) tests/libforksym.so, LD tests/tst-fork-vislookup.so)
+
 $(out)/tests/tst-elf-circular-reloc.so: \
 		$(out)/tests/tst-elf-circular-reloc.o \
 		$(out)/tests/lib-circular-reloc1.so \
@@ -126,7 +134,8 @@ rofs-only-tests := rofs/tst-chdir.so rofs/tst-symlink.so rofs/tst-readdir.so \
 conf_zfs ?= bsd
 
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
-	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so
+	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so \
+	tst-fork-zfs-write.so
 
 # ZFS tests that drive the OpenZFS userspace C API (libzfs / libzfs_core) via
 # dlopen("libzfs.so").  Those libraries are only built in conf_zfs=openzfs; in
@@ -179,6 +188,39 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	misc-ctxsw.so tst-read.so tst-symlink.so tst-openat.so \
 	tst-eventfd.so tst-remove.so misc-wake.so tst-epoll.so misc-lfring.so \
 	tst-sig-dfl-ignore.so \
+	tst-fork-child-mmap.so \
+	tst-fork.so tst-execve.so payload-exit7.so \
+	tst-fork-cow.so tst-fork-deep.so tst-pgfork.so tst-fork-preempt.so \
+	tst-fork-cow-lost-write.so \
+	tst-fork-sharedptr-drift.so \
+	tst-fork-thread-unload.so \
+	tst-fork-pltgot.so \
+	tst-fork-symlookup.so \
+	tst-fork-vislookup.so \
+	libforksym.so \
+	tst-fork-child-mmap.so \
+	tst-fork-file-mmap.so \
+	tst-fork-socket.so \
+	tst-fork-conn-socket.so \
+	tst-fork-overlap-sockets.so \
+	tst-fork-cow-leak.so \
+	tst-fork-shm-private.so \
+	tst-cow-range-cover.so \
+	tst-fork-fdleak.so \
+	tst-fork-posix-shm.so \
+	tst-fork-shared-write.so \
+	tst-fork-shared-catalog.so \
+	tst-fork-serial.so \
+	tst-fork-sigchld-latch.so \
+	tst-fork-arena-freelist.so \
+	tst-fork-sigchld-latch.so \
+	tst-fork-irq-cow.so \
+	tst-fork-shared-race.so \
+	tst-fork-timer-park-stress.so \
+	tst-fork-urandom.so \
+	tst-fork-concfork-objlist.so \
+	tst-fork-cow-file-race.so \
+	tst-fork-lock-noalloc.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
@@ -281,6 +323,7 @@ ifeq ($(conf_fs_9p_tcp),1)
 tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
+internal-api-tests += tst-fork-lock-noalloc.so
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
@@ -375,6 +418,18 @@ $(locale-test-stamp): $(src)/scripts/locale-oracle/make-test-locales.sh \
 		$(src)/scripts/locale-oracle/messages/mk-cats.sh
 	$(call quiet, sh $< $(locale-test-data) && touch $@, LOCALEDEF tests/locale-data)
 endif
+tests += tst-fork.so
+tests += tst-execve.so
+tests += payload-exit7.so
+tests += tst-fork-cow.so
+tests += tst-shmin.so
+tests += tst-fork-deep.so
+tests += tst-fork-file-mmap.so
+tests += tst-fork-pagecache-ptes.so
+internal-api-tests += tst-random-flush.so
+internal-api-tests += tst-fork-pagecache-ptes.so
+tests += tst-fork-xcpu-free.so
+internal-api-tests += tst-fork-xcpu-free.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
