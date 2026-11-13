@@ -11,23 +11,37 @@
 
 using namespace mmu;
 
+// A device that reads memory after an MMIO write (a doorbell) must see every
+// earlier store to that memory. x86 keeps stores in order; arm64 does not order
+// Normal memory stores before a Device memory store without a barrier.
+static inline void mmio_wmb()
+{
+#ifdef __aarch64__
+    asm volatile("dmb oshst" ::: "memory");
+#endif
+}
+
 void mmio_setb(mmioaddr_t addr, u8 val)
 {
+    mmio_wmb();
     *reinterpret_cast<volatile u8*>(addr) = val;
 }
 
 void mmio_setw(mmioaddr_t addr, u16 val)
 {
+    mmio_wmb();
     *reinterpret_cast<volatile u16*>(addr) = val;
 }
 
 void mmio_setl(mmioaddr_t addr, u32 val)
 {
+    mmio_wmb();
     *reinterpret_cast<volatile u32*>(addr) = val;
 }
 
 void mmio_setq(mmioaddr_t addr, u64 val)
 {
+    mmio_wmb();
     *reinterpret_cast<volatile u64*>(addr) = val;
 }
 
