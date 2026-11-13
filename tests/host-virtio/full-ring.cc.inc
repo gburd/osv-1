@@ -7,6 +7,12 @@
 #define trace_virtio_blk_wake(...) ((void)0)
 #define trace_virtio_blk_make_request_readonly(...) ((void)0)
 #define trace_virtio_blk_make_request_seg_max(...) ((void)0)
+// The driver's request counters (drivers/virtio-blk.cc), bumped by the
+// extracted make_request() and req_done().
+volatile unsigned long g_blk_submitted = 0;
+volatile unsigned long g_blk_completed = 0;
+volatile unsigned long g_blk_wr_submitted = 0;
+volatile unsigned long g_blk_wr_completed = 0;
 static const int sector_size = 512;
 enum { BIO_READ, BIO_WRITE, BIO_FLUSH, BIO_DISCARD };
 struct bio {
