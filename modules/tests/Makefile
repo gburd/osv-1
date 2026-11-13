@@ -288,6 +288,8 @@ internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-msleep-wake.so
 tests += tst-fork-nvme-cid.so
 internal-api-tests += tst-fork-nvme-cid.so
+tests += tst-fork-large-alloc-frag.so
+internal-api-tests += tst-fork-large-alloc-frag.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
