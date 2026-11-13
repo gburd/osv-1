@@ -185,8 +185,10 @@ public:
     nvme_cq_entry_t submit_and_return_on_completion(nvme_sq_entry_t* cmd, void* data = nullptr, unsigned int datasize = 0);
 private:
     sched::thread_handle _req_waiter;
-    nvme_cq_entry_t _req_res;
-    volatile bool new_cq;
+    // The queue pair comes from aligned_new, which does not zero memory: a stale
+    // nonzero new_cq makes the first admin command return heap garbage at once.
+    nvme_cq_entry_t _req_res {};
+    volatile bool new_cq = false;
 };
 
 }
