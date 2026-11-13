@@ -178,7 +178,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-align.so tst-cxxlocale.so misc-tcp-close-without-reading.so \
 	tst-sigwait.so tst-sampler.so misc-malloc.so misc-memcpy.so \
 	misc-free-perf.so misc-printf.so tst-hostname.so \
-	tst-sendfile.so misc-lock-perf.so tst-uio.so tst-printf.so \
+	tst-sendfile.so misc-lock-perf.so tst-uio.so tst-printf.so tst-random-seed.so \
 	tst-pthread-affinity.so tst-pthread-tsd.so tst-thread-local.so \
 	tst-zfs-mount.so tst-regex.so tst-tcp-siocoutq.so \
 	tst-select-timeout.so tst-faccessat.so \
