@@ -58,6 +58,8 @@
 #include <boost/lockfree/stack.hpp>
 #include <boost/lockfree/policies.hpp>
 #include <dlfcn.h>
+#include <unordered_map>
+#include <string>
 
 TRACEPOINT(trace_memory_malloc, "buf=%p, len=%d, align=%d", void *, size_t,
            size_t);
@@ -2843,6 +2845,21 @@ static void census_line(unsigned long t, bool full, uint64_t (*arc)(int))
            arena_live >> 10, arc ? (unsigned long)(arc(0) >> 10) : 0, arc ? (unsigned long)(arc(1) >> 10) : 0,
            mmu::live_child_address_spaces.load(), fork_arena::live_as_slots(), mmu::census_forks.load(),
            sched::thread::numthreads(), n4, lo4 >> 10, bytes6 >> 10, maxr / page_size);
+    if (sched::thread::numthreads() > 1000) {
+        // Name the crowd: the five most common thread names, in this AS's view.
+        fork_arena::kernel_heap_scope kh;
+        std::unordered_map<std::string, unsigned> names;
+        sched::with_all_threads([&] (sched::thread& th) { names[th.name()]++; });
+        std::vector<std::pair<unsigned, std::string>> v;
+        for (auto& n : names) {
+            v.emplace_back(n.second, n.first);
+        }
+        std::sort(v.rbegin(), v.rend());
+        printf(" names=");
+        for (size_t i = 0; i < v.size() && i < 5; i++) {
+            printf("%s%s:%u", i ? "," : "", v[i].second.c_str(), v[i].first);
+        }
+    }
     if (full) {
         printf(" hist=");
         for (unsigned o = 0; o <= page_ranges_max_order; o++) {
