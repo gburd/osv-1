@@ -306,6 +306,9 @@ pt_element<4> *current_pt_root()
 // identity-mapped kernel heap (same VA->phys in every AS) -- see
 // fork_child_needs_heap_wait_record() and include/osv/wait_record.hh.
 std::atomic<int> live_child_address_spaces{0};
+// Diagnosis-only memory census counters, in pages unless named otherwise.
+std::atomic<long> census_pt_pages{0}, census_cow_copies{0}, census_child_frees{0},
+    census_last_frees{0}, census_shared_anon{0}, census_window_pages{0}, census_forks{0};
 
 // Recursively clone the child's copy of an application-range subtree of the
 // parent's page table, level by level, marking most private 4K leaf pages
@@ -535,6 +538,7 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             // writing its own stack with irqs off and never faults, and the
             // child owns/frees this page on address-space teardown.
             void *child_page = memory::alloc_page();
+            census_cow_copies.fetch_add(1, std::memory_order_relaxed);
             memcpy(child_page, phys_to_virt(ppte.addr()), page_size);
             pt_element<0> pv = ppte;
             if (pte_is_cow(pv)) {
@@ -631,6 +635,7 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
             ppte = parent_pt[i]; // re-read: now a non-large intermediate pte
         }
         void *child_sub = memory::alloc_page();
+        census_pt_pages.fetch_add(1, std::memory_order_relaxed);
         memset(child_sub, 0, page_size);
         auto parent_sub = phys_cast<pt_element<0>>(ppte.next_pt_addr());
         clone_pt_level0(parent_sub, static_cast<pt_element<0>*>(child_sub),
@@ -652,6 +657,7 @@ void clone_pt_level<2>(pt_element<2> *parent_pt, pt_element<2> *child_pt,
         if (ppte.empty()) { child_pt[i] = make_empty_pte<2>(); continue; }
         if (ppte.large()) { child_pt[i] = ppte; continue; }
         void *child_sub = memory::alloc_page();
+        census_pt_pages.fetch_add(1, std::memory_order_relaxed);
         memset(child_sub, 0, page_size);
         auto parent_sub = phys_cast<pt_element<1>>(ppte.next_pt_addr());
         clone_pt_level<1>(parent_sub, static_cast<pt_element<1>*>(child_sub),
@@ -748,6 +754,7 @@ address_space *clone_address_space(address_space *parent)
 
     // Allocate the child's PML4 page.
     void *child_pml4_page = memory::alloc_page();
+    census_pt_pages.fetch_add(1, std::memory_order_relaxed);
     memset(child_pml4_page, 0, page_size);
     auto child_pml4 = static_cast<pt_element<3>*>(child_pml4_page);
 
@@ -882,6 +889,7 @@ address_space *clone_address_space(address_space *parent)
                 // Deep-copy this app subtree (level 2 downwards) into the
                 // child, marking private 4K leaves COW.
                 void *child_sub = memory::alloc_page();
+                census_pt_pages.fetch_add(1, std::memory_order_relaxed);
                 memset(child_sub, 0, page_size);
                 auto parent_sub = phys_cast<pt_element<2>>(pslot.next_pt_addr());
                 clone_pt_level<2>(parent_sub, static_cast<pt_element<2>*>(child_sub),
@@ -942,6 +950,7 @@ address_space *clone_address_space(address_space *parent)
     } // release vmas_mutex
 
     live_child_address_spaces.fetch_add(1, std::memory_order_relaxed);
+    census_forks.fetch_add(1, std::memory_order_relaxed);
 
     // Build the child's vma_list from the snapshot -- these allocations are free
     // to hit the malloc pool refill path without risking a fork-time deadlock.
@@ -988,14 +997,17 @@ static void free_child_pt_level0(pt_element<0> *pt)
             // Child's own COW-copied private page: free it.  (pte_shared pages
             // are jointly-owned stack/MAP_SHARED frames -- never free them.)
             memory::free_page(phys_to_virt(e.addr()));
+            census_child_frees.fetch_add(1, std::memory_order_relaxed);
         } else if (pte_is_cow(e) && !e.sw_bit(pte_shared) &&
                    !e.sw_bit(pte_pagecache) && !cow_put(e.addr())) {
             // The child was the last mapper of this COW frame.
             memory::free_page(phys_to_virt(e.addr()));
+            census_last_frees.fetch_add(1, std::memory_order_relaxed);
         }
         // else: shared (COW, read-only, or pte_shared) -- leave the frame.
     }
     memory::free_page(pt);
+    census_pt_pages.fetch_sub(1, std::memory_order_relaxed);
 }
 
 template<int N>
@@ -1010,6 +1022,7 @@ void free_child_pt_level<1>(pt_element<1> *pt)
         free_child_pt_level0(phys_cast<pt_element<0>>(e.next_pt_addr()));
     }
     memory::free_page(pt);
+    census_pt_pages.fetch_sub(1, std::memory_order_relaxed);
 }
 template<>
 void free_child_pt_level<2>(pt_element<2> *pt)
@@ -1020,6 +1033,7 @@ void free_child_pt_level<2>(pt_element<2> *pt)
         free_child_pt_level<1>(phys_cast<pt_element<1>>(e.next_pt_addr()));
     }
     memory::free_page(pt);
+    census_pt_pages.fetch_sub(1, std::memory_order_relaxed);
 }
 
 void destroy_address_space(address_space *as)
@@ -1047,6 +1061,7 @@ void destroy_address_space(address_space *as)
             free_child_pt_level<2>(phys_cast<pt_element<2>>(e3.next_pt_addr()));
         }
         memory::free_page(phys_to_virt(pml4_phys));
+        census_pt_pages.fetch_sub(1, std::memory_order_relaxed);
     }
     // Dispose the child's own vma objects (the clones built in
     // clone_address_space, plus the vma_list edge markers).  ~vma is a no-op
@@ -2274,6 +2289,7 @@ public:
             // are visible in every fork AS, exactly like the old emplace.
             fork_arena::kernel_heap_scope kh;
             reg->pages.emplace(shared_anon_node{va, page});
+            census_shared_anon.fetch_add(1, std::memory_order_relaxed);
             return page;
         }
     }
@@ -2318,6 +2334,7 @@ public:
         if (page) {
             fork_arena::kernel_heap_scope kh;
             memory::free_page(page);
+            census_shared_anon.fetch_sub(1, std::memory_order_relaxed);
         }
         return false;   // we already handled the frame; don't double-free
     }
@@ -2498,6 +2515,7 @@ void* alloc(size_t bytes)
         initialized_anonymous_page_provider map;
         operate_range(populate_small<>(&map, perm_rw), reinterpret_cast<void*>(va), bytes);
     }
+    census_window_pages.fetch_add(bytes / page_size, std::memory_order_relaxed);
     return reinterpret_cast<void*>(va);
 }
 
@@ -2533,6 +2551,7 @@ void free(void* p, size_t bytes)
     for (auto pg : pages) {
         memory::free_page(pg);
     }
+    census_window_pages.fetch_sub(pages.size(), std::memory_order_relaxed);
     WITH_LOCK(window_mutex) {
         free_ranges[bytes].push_back(reinterpret_cast<uintptr_t>(p));
     }
@@ -3086,6 +3105,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     // Copy the shared page into a fresh private page.
     void *shared = phys_to_virt(e0.addr());
     void *priv = memory::alloc_page();
+    census_cow_copies.fetch_add(1, std::memory_order_relaxed);
     memcpy(priv, shared, page_size);
 
     // Install the private page writable, clearing the cow bit, in THIS AS only.
@@ -3098,6 +3118,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     if (!file_owned && !cow_put(e0.addr())) {
         // The other mappers dropped the frame while we copied it.
         memory::free_page(shared);
+        census_last_frees.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
 }

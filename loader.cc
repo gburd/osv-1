@@ -1038,6 +1038,7 @@ void* do_main_thread(void *_main_args)
     // Kernel stacks that need no contiguous memory; set up before the first fork.
     mmu::stack_window::init();
     memory::headerless_init();
+    memory::census_start();
     mmu::print_cow_peek_setting();
 #endif
 

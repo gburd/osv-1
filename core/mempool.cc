@@ -57,6 +57,7 @@
 #include <boost/dynamic_bitset.hpp>
 #include <boost/lockfree/stack.hpp>
 #include <boost/lockfree/policies.hpp>
+#include <dlfcn.h>
 
 TRACEPOINT(trace_memory_malloc, "buf=%p, len=%d, align=%d", void *, size_t,
            size_t);
@@ -296,6 +297,8 @@ unsigned pool::get_size()
     return _size;
 }
 
+// Diagnosis-only census: small-object pool pages and live linear large bytes.
+static std::atomic<long> census_pool_pages{0}, census_large_bytes{0};
 static inline void* untracked_alloc_page();
 static inline void untracked_free_page(void *v);
 
@@ -305,6 +308,7 @@ void pool::add_page()
     // we may add this page to the free list of a different cpu, due to the
     // enablement of preemption
     void* page = untracked_alloc_page();
+    census_pool_pages.fetch_add(1, std::memory_order_relaxed);
 #if CONF_lazy_stack_invariant
     assert(sched::preemptable() && arch::irq_enabled());
 #endif
@@ -379,6 +383,7 @@ void pool::free_same_cpu(free_object* obj, unsigned cpu_id)
         DROP_LOCK(preempt_lock) {
             untracked_free_page(header);
         }
+        census_pool_pages.fetch_sub(1, std::memory_order_relaxed);
     } else {
         if (!header->local_free) {
             if (header->nalloc) {
@@ -419,6 +424,7 @@ void pool::flush_empty_pages(unsigned cpu_id)
         DROP_LOCK(preempt_lock) {
             untracked_free_page(header);
         }
+        census_pool_pages.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 #endif
@@ -1218,6 +1224,7 @@ static void* malloc_large(size_t size, size_t alignment, bool block = true, bool
             }
             if (ret_header) {
                 on_alloc(size);
+                census_large_bytes.fetch_add(size, std::memory_order_relaxed);
                 void* obj = ret_header;
                 obj += offset;
 #if CONF_fork
@@ -1506,10 +1513,12 @@ static void free_large(void* obj)
 #if CONF_fork
     if (auto size = headerless_size(obj)) {
         headerless_pages.load(std::memory_order_relaxed)[linear_page_index(obj)] = 0;
+        census_large_bytes.fetch_sub(size, std::memory_order_relaxed);
         return free_page_range(obj, size);
     }
 #endif
     obj = align_down(obj - 1, page_size);
+    census_large_bytes.fetch_sub(static_cast<page_range*>(obj)->size, std::memory_order_relaxed);
     free_page_range(static_cast<page_range*>(obj));
 }
 
@@ -2779,6 +2788,88 @@ void free_kernel_stack(void* p, size_t size)
     } else {
         free(p);
     }
+}
+
+// Diagnosis-only memory census (OSV_MEM_CENSUS=<seconds>): a kernel thread
+// prints one CENSUS line per period with free memory, where the allocated
+// memory sits (page pools, quarantine, large and small kernel heap, fork page
+// tables and copies, shared-anon pages, the stack window, the fork arena, the
+// ARC), the free-range histogram, and process and thread counts.
+}
+namespace mmu {
+extern std::atomic<int> live_child_address_spaces;
+extern std::atomic<long> census_pt_pages, census_cow_copies, census_child_frees,
+    census_last_frees, census_shared_anon, census_window_pages, census_forks;
+}
+namespace fork_arena {
+unsigned live_as_slots();
+void overflow_stats(unsigned long*, unsigned long*, unsigned long*, unsigned long*);
+}
+namespace memory {
+static void census_line(unsigned long t, bool full, uint64_t (*arc)(int))
+{
+    size_t lo4 = 0, n4 = 0, maxr = 0, cnt[page_ranges_max_order + 1] = {};
+    size_t bytes6 = 0;
+    WITH_LOCK(free_page_ranges_lock) {
+        free_page_ranges.for_each(full ? 0 : 4, [&] (page_range& pr) {
+            auto o = std::min<unsigned>(ilog2(pr.size / page_size), page_ranges_max_order);
+            cnt[o]++;
+            if (o >= 4) { n4++; lo4 += pr.size; }
+            if (o >= 6) { bytes6 += pr.size; }
+            maxr = std::max(maxr, pr.size);
+            return true;
+        });
+    }
+    size_t l1 = 0, q = 0;
+    for (auto c : sched::cpus) {
+        stats::pool_stats ps;
+        stats::get_l1_stats(c->id, ps);
+        l1 += ps._nr;
+        q += percpu_pgquar.for_cpu(c)->filled;
+    }
+    stats::pool_stats l2;
+    stats::get_global_l2_stats(l2);
+    unsigned long committed, recycled, foreign, arena_live;
+    fork_arena::overflow_stats(&committed, &recycled, &foreign, &arena_live);
+    constexpr size_t k = page_size / 1024;
+    printf("CENSUS t=%lu freeK=%zu l1K=%zu l2K=%zu quarK=%zu poolK=%ld largeK=%ld ptK=%ld cowK=%ld childfreeK=%ld lastfreeK=%ld "
+           "shanonK=%ld winK=%ld arenaK=%lu arcK=%lu arccK=%lu as=%d asslots=%u forks=%ld threads=%d "
+           "r4n=%zu r4K=%zu r6K=%zu maxr=%zu",
+           t, stats::free() >> 10, l1 * k, l2._nr * page_pool::page_batch::nr_pages * k, q * k,
+           census_pool_pages.load() * long(k), census_large_bytes.load() >> 10,
+           mmu::census_pt_pages.load() * long(k), mmu::census_cow_copies.load() * long(k),
+           mmu::census_child_frees.load() * long(k), mmu::census_last_frees.load() * long(k),
+           mmu::census_shared_anon.load() * long(k), mmu::census_window_pages.load() * long(k),
+           arena_live >> 10, arc ? (unsigned long)(arc(0) >> 10) : 0, arc ? (unsigned long)(arc(1) >> 10) : 0,
+           mmu::live_child_address_spaces.load(), fork_arena::live_as_slots(), mmu::census_forks.load(),
+           sched::thread::numthreads(), n4, lo4 >> 10, bytes6 >> 10, maxr / page_size);
+    if (full) {
+        printf(" hist=");
+        for (unsigned o = 0; o <= page_ranges_max_order; o++) {
+            printf("%s%zu", o ? "," : "", cnt[o]);
+        }
+    }
+    printf("\n");
+}
+
+void census_start()
+{
+    auto e = getenv("OSV_MEM_CENSUS");
+    unsigned period = e ? atoi(e) : 0;
+    if (!period) {
+        return;
+    }
+    printf("LEVER mem_census=%u\n", period);
+    sched::thread::make([period] {
+        uint64_t (*arc)(int) = nullptr;
+        for (unsigned long t = 0;; t += period) {
+            if (!arc) {
+                arc = reinterpret_cast<uint64_t (*)(int)>(dlsym(RTLD_DEFAULT, "osv_census_arc"));
+            }
+            census_line(t, t % (10 * period) == 0, arc);
+            sched::thread::sleep(std::chrono::seconds(period));
+        }
+    }, sched::thread::attr().name("mem-census").stack(64 * 1024))->start();
 }
 #endif
 

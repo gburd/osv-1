@@ -224,3 +224,10 @@ void
 arc_unregister_hotplug(void)
 {
 }
+
+/* Diagnosis-only census hook: 0 = ARC size, 1 = ARC target (arc_c). */
+__attribute__((visibility("default"))) uint64_t
+osv_census_arc(int what)
+{
+	return (what ? arc_c : (uint64_t)aggsum_value(&arc_sums.arcstat_size));
+}
