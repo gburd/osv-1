@@ -25,6 +25,7 @@
 #include <osv/kernel_config_fork.h>
 #include <osv/fork_arena.hh>
 #include <osv/pid.h>
+#include <osv/census.hh>
 #include "../libc.hh"
 #include "../signal.hh"   // nsignals, signal_actions (per-child sig table)
 
@@ -789,15 +790,21 @@ pid_t fork(void)
     // ~application_runtime never fires, application::join() blocks forever on
     // _terminated, and OSv hangs at shutdown instead of powering off.
     child->set_cleanup([cpid, stack_to_free, child, child_as] {
+        {
+        sched::census_timer ct(sched::cs_cleanup_misc);
         fork::child_exited(cpid, 0);
         fork::unregister_pid(cpid, child_as);
         if (stack_to_free) {
             free(stack_to_free);
         }
+        }
         // Drop any inherited-fd references the child still held (its close()s
         // dropped the ones it explicitly closed; this releases the rest, so
         // the parent's fd refcounts return to just the parent's own).
+        {
+        sched::census_timer ct(sched::cs_fds);
         fork::release_inherited_fds(child_as);
+        }
         // Drop the child's private signal-disposition table.
         osv::fork::fork_release_child_signal_actions(child_as);
         // Only destroy the child address space if the child still owns it.
@@ -805,8 +812,10 @@ pid_t fork(void)
         // destroys child_as itself; destroying it again here is a double-free
         // (GP fault / ~rwlock assert when the reaper tears down freed vmas).
         if (child->address_space() == child_as) {
+            sched::census_timer ct(sched::cs_destroy_as);
             mmu::destroy_address_space(child_as);
         }
+        sched::census_timer ct(sched::cs_dispose);
         sched::thread::dispose(child);
     });
 

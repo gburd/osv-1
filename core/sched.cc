@@ -27,6 +27,7 @@
 #include <osv/preempt-lock.hh>
 #include <osv/kernel_config_fork.h>
 #include <osv/mempool.hh>
+#include <osv/census.hh>
 #if CONF_fork
 #include <osv/fork_arena.hh>
 #endif
@@ -177,6 +178,8 @@ void *alloc_thread_storage(size_t align, size_t size)
 
 // Diagnosis-only census counters for the reaper.
 std::atomic<long> census_zombies_added{0}, census_reaped{0}, census_reap_ns{0};
+std::atomic<long> census_ns[cs_count + 1], census_n[cs_count + 1];
+__thread bool census_in_reap;
 
 class thread::reaper {
 public:
@@ -1663,6 +1666,7 @@ thread::~thread()
         total_app_time_exited += _total_cpu_time;
     }
     if (_attr._stack.deleter) {
+        census_timer ct(census_in_reap ? cs_stack_free : cs_count);
         _attr._stack.deleter(_attr._stack);
     }
     for (unsigned i = 1; i < _tls.size(); i++) {
@@ -2484,8 +2488,10 @@ void thread::reaper::reap()
                 auto z = &_zombies.front();
                 _zombies.pop_front();
                 auto t0 = osv::clock::uptime::now();
+                census_in_reap = true;
                 z->join();
                 z->_cleanup();
+                census_in_reap = false;
                 census_reap_ns.fetch_add((osv::clock::uptime::now() - t0).count(), std::memory_order_relaxed);
                 census_reaped.fetch_add(1, std::memory_order_relaxed);
             }

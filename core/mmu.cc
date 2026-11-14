@@ -46,6 +46,7 @@
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
 #include <osv/fork_arena.hh>
+#include <osv/census.hh>
 #endif
 #include <cstdio>
 
@@ -1055,6 +1056,7 @@ void destroy_address_space(address_space *as)
             child_pagecache_mappings(as, pagecache::release_mappings);
         }
         auto pml4 = phys_cast<pt_element<3>>(pml4_phys);
+        sched::census_timer ct(sched::cs_pt_teardown);
         for (unsigned slot = pml4_app_first; slot <= pml4_app_last; slot++) {
             pt_element<3> e3 = pml4[slot];
             if (e3.empty() || e3.large()) continue;

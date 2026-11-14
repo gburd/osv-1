@@ -2806,6 +2806,7 @@ extern std::atomic<long> census_pt_pages, census_cow_copies, census_child_frees,
 namespace sched {
 extern std::atomic<long> census_zombies_added, census_reaped, census_reap_ns;
 }
+#include <osv/census.hh>
 namespace fork_arena {
 unsigned live_as_slots();
 void overflow_stats(unsigned long*, unsigned long*, unsigned long*, unsigned long*);
@@ -2850,6 +2851,11 @@ static void census_line(unsigned long t, bool full, uint64_t (*arc)(int))
            sched::thread::numthreads(), n4, lo4 >> 10, bytes6 >> 10, maxr / page_size,
            sched::census_zombies_added.load() - sched::census_reaped.load(), sched::census_reaped.load(),
            sched::census_reap_ns.load() / 1000000);
+    // Reap stages: cumulative ms and count each (misc, fds, destroy_as, pt, dispose, stack, flush_reaper, flush_all).
+    printf(" rs=");
+    for (int i = 0; i < sched::cs_count; i++) {
+        printf("%s%ld:%ld", i ? "," : "", sched::census_ns[i].load() / 1000000, sched::census_n[i].load());
+    }
     if (sched::thread::numthreads() > 1000) {
         // Name the crowd: the five most common thread names, in this AS's view.
         fork_arena::kernel_heap_scope kh;

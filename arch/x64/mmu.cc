@@ -16,6 +16,7 @@
 #include <osv/elf.hh>
 #include "exceptions.hh"
 #include <algorithm>
+#include <osv/census.hh>
 
 void page_fault(exception_frame *ef)
 {
@@ -72,6 +73,8 @@ inter_processor_interrupt tlb_flush_ipi{IPI_TLB_FLUSH, [] {
 static void do_flush_tlb_all(bool lazy)
 {
     static std::vector<sched::cpu*> ipis(sched::max_cpus);
+    sched::census_timer ct(sched::cs_flush_all);
+    sched::census_timer ctr(sched::census_in_reap ? sched::cs_flush_reaper : sched::cs_count);
 
     if (sched::cpus.size() <= 1) {
         mmu::flush_tlb_local();
