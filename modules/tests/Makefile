@@ -292,6 +292,8 @@ tests += tst-fork-large-alloc-frag.so
 internal-api-tests += tst-fork-large-alloc-frag.so
 tests += tst-fork-stack-frag.so
 internal-api-tests += tst-fork-stack-frag.so
+tests += tst-fork-kheap-headerless.so
+internal-api-tests += tst-fork-kheap-headerless.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
