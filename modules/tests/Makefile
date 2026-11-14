@@ -432,6 +432,8 @@ tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-large-alloc-frag.so
 internal-api-tests += tst-fork-large-alloc-frag.so
+tests += tst-fork-stack-frag.so
+internal-api-tests += tst-fork-stack-frag.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
