@@ -25,6 +25,9 @@ enum census_stage {
     cs_stack_free,      // a thread's stack deleter, on the reaper
     cs_flush_reaper,    // TLB flushes issued by the reaper
     cs_flush_all,       // TLB flushes issued by anyone
+    cs_flush_cow,       // ...of which by the COW write-fault handler
+    cs_flush_pagecache, // ...of which by the page cache
+    cs_flush_operate,   // ...of which by operate_range (munmap, mprotect, ...)
     cs_count
 };
 extern std::atomic<long> census_ns[cs_count + 1], census_n[cs_count + 1];  // [cs_count]: not counted

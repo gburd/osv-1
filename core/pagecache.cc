@@ -6,6 +6,7 @@
  */
 
 
+#include <osv/census.hh>
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
@@ -413,7 +414,7 @@ public:
         });
         arc_cache_map.erase(ab);
         if (count) {
-            mmu::flush_tlb_all();
+            { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
         }
     }
 };
@@ -497,7 +498,7 @@ void remove_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
         // TODO 1: Investigate if there is an alternative "cheaper" way to solve this problem.
         // TODO 2: Investigate why flushing TLB is necessary in single CPU scenario.
         // TODO 3: Investigate why we do not have to flush tlb when removing read mapping with ZFS.
-        mmu::flush_tlb_all();
+        { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
     }
 }
 
@@ -517,7 +518,7 @@ static unsigned drop_read_cached_page(std::unordered_map<hashkey, T>& cache, cac
     cache.erase(cp->key());
 
     if (flush && flushed > 1) { // if there was only one pte it is the one we are faulting on; no need to flush.
-        mmu::flush_tlb_all();
+        { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
     }
 
     delete cp;
@@ -851,7 +852,7 @@ static void insert(cached_page_write* cp) {
             }
             tofree[i] = p;
         }
-        mmu::flush_tlb_all();
+        { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
         for (auto p: tofree) {
             delete p;
         }
@@ -1209,7 +1210,7 @@ int sync(vfs_file* fp, off_t start, off_t end)
     if (to_flush.empty())
         return 0;
 
-    mmu::flush_tlb_all();
+    { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
 
     /* Phase 3: write each page back to the filesystem. */
     int ret = 0;
@@ -1266,7 +1267,7 @@ static void flush_write_cache_dirty()
     if (to_flush.empty())
         return;
 
-    mmu::flush_tlb_all();
+    { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
 
     /* Phase 3: write back (vnode lock acquired inside writeback(); write_lock
      * is still held, consistent with the existing pagecache::sync() path).
@@ -1335,7 +1336,7 @@ int writeback_inode(dev_t dev, ino_t ino, off_t start, off_t end)
     if (to_flush.empty())
         return 0;
 
-    mmu::flush_tlb_all();
+    { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
 
     /* Phase 3: write back.  On error, re-mark dirty so the page is retried
      * and report the first error to the caller (fsync durability). */
@@ -1472,7 +1473,7 @@ private:
             flush = mark_accessed(accessed);
 
             if (flush) {
-                mmu::flush_tlb_all();
+                { sched::census_timer cf(sched::cs_flush_pagecache); mmu::flush_tlb_all(); }
             }
 
             if (buckets_scanned == bucket_count || !scanned) {

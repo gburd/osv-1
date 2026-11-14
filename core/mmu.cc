@@ -1890,6 +1890,7 @@ template<typename T> ulong operate_range(T mapper, void *vma_start, void *start,
     // split_large_page() and other specific places where we modify specific
     // page table entries.
     if (mapper.tlb_flush_needed()) {
+        sched::census_timer cf(sched::cs_flush_operate);
         mmu::flush_tlb_all();
     }
     mapper.finalize();
@@ -3100,7 +3101,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
         pt_element<0> npte = pte_mark_cow(e0, false);
         npte.set_writable(true);
         pt[i0] = npte;
-        mmu::flush_tlb_all();
+        { sched::census_timer cf(sched::cs_flush_cow); mmu::flush_tlb_all(); }
         return true;
     }
 
@@ -3116,7 +3117,7 @@ static bool handle_cow_write_fault(uintptr_t addr)
     npte = pte_mark_cow(npte, false);
     npte.set_writable(true);
     pt[i0] = npte;
-    mmu::flush_tlb_all();
+    { sched::census_timer cf(sched::cs_flush_cow); mmu::flush_tlb_all(); }
     if (!file_owned && !cow_put(e0.addr())) {
         // The other mappers dropped the frame while we copied it.
         memory::free_page(shared);
