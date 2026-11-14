@@ -2803,6 +2803,9 @@ extern std::atomic<int> live_child_address_spaces;
 extern std::atomic<long> census_pt_pages, census_cow_copies, census_child_frees,
     census_last_frees, census_shared_anon, census_window_pages, census_forks;
 }
+namespace sched {
+extern std::atomic<long> census_zombies_added, census_reaped, census_reap_ns;
+}
 namespace fork_arena {
 unsigned live_as_slots();
 void overflow_stats(unsigned long*, unsigned long*, unsigned long*, unsigned long*);
@@ -2836,7 +2839,7 @@ static void census_line(unsigned long t, bool full, uint64_t (*arc)(int))
     constexpr size_t k = page_size / 1024;
     printf("CENSUS t=%lu freeK=%zu l1K=%zu l2K=%zu quarK=%zu poolK=%ld largeK=%ld ptK=%ld cowK=%ld childfreeK=%ld lastfreeK=%ld "
            "shanonK=%ld winK=%ld arenaK=%lu arcK=%lu arccK=%lu as=%d asslots=%u forks=%ld threads=%d "
-           "r4n=%zu r4K=%zu r6K=%zu maxr=%zu",
+           "r4n=%zu r4K=%zu r6K=%zu maxr=%zu zq=%ld reaped=%ld reapms=%ld",
            t, stats::free() >> 10, l1 * k, l2._nr * page_pool::page_batch::nr_pages * k, q * k,
            census_pool_pages.load() * long(k), census_large_bytes.load() >> 10,
            mmu::census_pt_pages.load() * long(k), mmu::census_cow_copies.load() * long(k),
@@ -2844,7 +2847,9 @@ static void census_line(unsigned long t, bool full, uint64_t (*arc)(int))
            mmu::census_shared_anon.load() * long(k), mmu::census_window_pages.load() * long(k),
            arena_live >> 10, arc ? (unsigned long)(arc(0) >> 10) : 0, arc ? (unsigned long)(arc(1) >> 10) : 0,
            mmu::live_child_address_spaces.load(), fork_arena::live_as_slots(), mmu::census_forks.load(),
-           sched::thread::numthreads(), n4, lo4 >> 10, bytes6 >> 10, maxr / page_size);
+           sched::thread::numthreads(), n4, lo4 >> 10, bytes6 >> 10, maxr / page_size,
+           sched::census_zombies_added.load() - sched::census_reaped.load(), sched::census_reaped.load(),
+           sched::census_reap_ns.load() / 1000000);
     if (sched::thread::numthreads() > 1000) {
         // Name the crowd: the five most common thread names, in this AS's view.
         fork_arena::kernel_heap_scope kh;

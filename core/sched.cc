@@ -175,6 +175,9 @@ void *alloc_thread_storage(size_t align, size_t size)
 #endif
 }
 
+// Diagnosis-only census counters for the reaper.
+std::atomic<long> census_zombies_added{0}, census_reaped{0}, census_reap_ns{0};
+
 class thread::reaper {
 public:
     reaper();
@@ -2480,8 +2483,11 @@ void thread::reaper::reap()
             while (!_zombies.empty()) {
                 auto z = &_zombies.front();
                 _zombies.pop_front();
+                auto t0 = osv::clock::uptime::now();
                 z->join();
                 z->_cleanup();
+                census_reap_ns.fetch_add((osv::clock::uptime::now() - t0).count(), std::memory_order_relaxed);
+                census_reaped.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -2496,6 +2502,7 @@ void thread::reaper::add_zombie(thread* z)
         // address spaces even when the terminating thread is a fork child
         // running in its COW address space (see _zombie_link in sched.hh).
         _zombies.push_back(*z);
+        census_zombies_added.fetch_add(1, std::memory_order_relaxed);
         _thread->wake();
     }
 }
