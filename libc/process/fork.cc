@@ -62,6 +62,9 @@ extern "C" void fork_clear_gfdt_slot_if(int fd, struct file *fp);
 // a different file there, which the reaper must not touch).
 extern "C" void fork_reap_close_child_opened_fd(int fd, struct file *fp);
 
+// Provided by libc/signal.cc: drop a process's interval timers.
+extern "C" void fork_release_process_itimers(mmu::address_space *as);
+
 
 namespace osv {
 namespace fork {
@@ -602,9 +605,10 @@ void child_exited(pid_t child_pid, int status)
         parent = it->second->parent_pid;
         g_cv.wake_all();
     }
-    // Notify the parent, Linux-style, that a child changed state.
-    (void)parent;
-    kill(getpid(), SIGCHLD);
+    // Notify the parent, Linux-style, that a child changed state.  Address the
+    // parent's pid, not getpid(): this may run in the exiting child itself,
+    // and a child's signal to its own pid goes to the child.
+    kill(parent, SIGCHLD);
 }
 
 bool exit_current_child(int status)
@@ -615,6 +619,13 @@ bool exit_current_child(int status)
         if (g_children.find(me) == g_children.end()) {
             return false;   // top-level app: exit() shuts OSv down as usual
         }
+    }
+    // The process's timers die with it.  Do it now rather than at reap time,
+    // so a timer cannot fire into an exited process before the reaper runs.
+    // An exec'd child runs in AS0, whose timers are the top-level app's.
+    auto *as = mmu::current_address_space();
+    if (as != mmu::kernel_address_space()) {
+        fork_release_process_itimers(as);
     }
     // Encode like Linux wait status for a normal exit: WEXITSTATUS in bits 8-15.
     child_exited(me, (status & 0xff) << 8);
@@ -805,6 +816,7 @@ pid_t fork(void)
         // destroys child_as itself; destroying it again here is a double-free
         // (GP fault / ~rwlock assert when the reaper tears down freed vmas).
         if (child->address_space() == child_as) {
+            fork_release_process_itimers(child_as);
             mmu::destroy_address_space(child_as);
         }
         sched::thread::dispose(child);
