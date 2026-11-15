@@ -589,12 +589,16 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             child_pt[i] = cow;
             cow_get(ppte.addr());
         } else {
-            // Read-only or already-COW private page: share the same physical
-            // page as-is (stays COW/read-only in the child too).
-            if (pte_is_cow(ppte)) {
-                cow_get(ppte.addr());
-            }
-            child_pt[i] = ppte;
+            // Read-only or already-COW private page: share the frame and count
+            // the child as a mapper, so whichever side drops it last frees it.
+            // A read-only page shared uncounted was freed by the parent's
+            // munmap (or the child's) while the other side still mapped it.
+            // Marking it COW keeps it read-only; a write to it is refused by
+            // the vma's permission before the COW path could copy it.
+            pt_element<0> cow = pte_mark_cow(ppte, true);
+            parent_pt[i] = cow;
+            child_pt[i] = cow;
+            cow_get(ppte.addr());
         }
     }
 }
@@ -620,12 +624,12 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
         if (ppte.large()) {
             // Never share a 2 MB page: split it to 4 K in the PARENT in place,
             // then fall through to the normal 4 K clone path, which makes the
-            // per-page decision (private-writable -> COW, MAP_SHARED -> stays
-            // shared, read-only -> shared as-is).  A writable one shared as-is
-            // would let the child's writes reach the parent.  A read-only one
-            // would leave the child mapping a frame nothing counts it on, and
-            // it would keep teardown from treating every 2 MB leaf in a child
-            // as one the child faulted in itself (see free_child_large_pages).
+            // per-page decision (private -> counted COW, MAP_SHARED -> stays
+            // shared).  A writable one shared as-is would let the child's
+            // writes reach the parent.  A read-only one would leave the child
+            // mapping a frame nothing counts it on, and it would keep teardown
+            // from treating every 2 MB leaf in a child as one the child
+            // faulted in itself (see free_child_large_pages).
             // Cost: one 4 K page table per split page.
             split_large_page(hw_ptep<1>::force(&parent_pt[i]));
             ppte = parent_pt[i]; // re-read: now a non-large intermediate pte
@@ -975,17 +979,17 @@ address_space *clone_address_space(address_space *parent)
 // --- fork COW page-table teardown ------------------------------------------
 //
 // Recursively free a child's private app-range subtree.  Intermediate tables
-// are always freed (they were allocated fresh for the child).  Leaf 4K pages
-// are freed only if they are the child's PRIVATE copy (writable, non-COW);
-// COW / read-only leaves are shared with the parent and left intact.
+// are always freed (they were allocated fresh for the child).  The fork marks
+// every private page it shares COW and counts it, so a leaf that is neither
+// COW, pte_shared nor a page-cache page is the child's own, writable or not.
 static void free_child_pt_level0(pt_element<0> *pt)
 {
     for (unsigned i = 0; i < pte_per_page; i++) {
         pt_element<0> e = pt[i];
         if (e.empty()) continue;
-        if (e.writable() && !pte_is_cow(e) && !e.sw_bit(pte_shared) &&
+        if (!pte_is_cow(e) && !e.sw_bit(pte_shared) &&
                 !e.sw_bit(pte_pagecache)) {
-            // Child's own COW-copied private page: free it.  (pte_shared pages
+            // Child's own private page: free it.  (pte_shared pages
             // are jointly-owned stack/MAP_SHARED frames -- never free them.)
             memory::free_page(phys_to_virt(e.addr()));
         } else if (pte_is_cow(e) && !e.sw_bit(pte_shared) &&
@@ -3208,7 +3212,12 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
                 (!cow_peek_enabled() || write_fault_needs_cow_lock(addr))) {
             PREVENT_STACK_PAGE_FAULT
             WITH_LOCK(as->vmas_mutex->for_write()) {
-                if (handle_cow_write_fault(addr)) {
+                // A COW page in a vma that does not allow the write (it was
+                // read-only at the fork, or mprotect()ed since) is a SIGSEGV
+                // below, not a copy.
+                auto v = find_intersecting_vma_in(*as->vmas, addr);
+                if (v != as->vmas->end() && !access_fault(*v, ef->get_error()) &&
+                        handle_cow_write_fault(addr)) {
                     trace_mmu_vm_fault_ret(addr, ef->get_error());
                     return;
                 }
@@ -3223,16 +3232,16 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
             // it would replace this AS's written private page with the file's
             // bytes.  The fork holds the lock for write, so this check is
             // stable while we hold it for read.
-            if (mmu::is_page_fault_write(ef->get_error()) &&
-                    write_fault_needs_cow_lock(addr)) {
-                cow_raced = true;
-                continue;
-            }
             auto vma = find_intersecting_vma_in(*as->vmas, addr);
             if (vma == as->vmas->end() || access_fault(*vma, ef->get_error())) {
                 vm_sigsegv(addr, ef);
                 trace_mmu_vm_fault_sigsegv(addr, ef->get_error(), "slow");
                 return;
+            }
+            if (mmu::is_page_fault_write(ef->get_error()) &&
+                    write_fault_needs_cow_lock(addr)) {
+                cow_raced = true;
+                continue;
             }
             vma->fault(addr, ef);
         }
