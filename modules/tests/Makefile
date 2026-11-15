@@ -188,6 +188,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	tst-fork-shm-private.so \
 	tst-fork-hugepage-exit.so \
 	tst-fork-ro-lifetime.so \
+	tst-fork-cow-mt.so \
 	tst-cow-range-cover.so \
 	tst-fork-fdleak.so \
 	tst-fork-posix-shm.so \
