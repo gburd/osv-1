@@ -222,6 +222,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-blk-
 	tst-fork-cow-file-race.so \
 	tst-fork-lock-noalloc.so \
 	tst-fork-itimer.so \
+	tst-reaper-unblocked.so \
 	misc-fsx.so tst-sleep.so tst-resolve.so tst-except.so \
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
@@ -325,6 +326,7 @@ tests += tst-9p-fs.so
 internal-api-tests += tst-9p-fs.so
 endif
 internal-api-tests += tst-fork-lock-noalloc.so
+internal-api-tests += tst-reaper-unblocked.so
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
