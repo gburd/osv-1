@@ -59,9 +59,9 @@ pid_t pid_for_current();
 // not a live fork child (unknown, or the top-level app).
 mmu::address_space *as_for_pid(pid_t pid);
 
-// Record that child @child_pid exited with @status (encoded WIFEXITED-style),
-// wake any waiter, and raise SIGCHLD to the parent.  Called from the child's
-// exit path.
+// Make child @child_pid waitable, with the status its exit() recorded or else
+// @status (encoded WIFEXITED-style), wake any waiter, and raise SIGCHLD to the
+// parent.  Called once the child's resources have been released.
 void child_exited(pid_t child_pid, int status);
 
 // waitpid(2)/wait4(2) backend: block (unless WNOHANG) for a child of the
@@ -70,8 +70,9 @@ void child_exited(pid_t child_pid, int status);
 pid_t wait_child(pid_t pid, int *status, int options);
 
 // If the current thread is a fork() child (or an exec'd child app), record its
-// exit @status for the parent's waitpid(), notify the parent (SIGCHLD), and
-// return true so exit() ends only this thread instead of shutting down OSv.
+// exit @status for the parent's waitpid() and return true so exit() ends only
+// this thread instead of shutting down OSv.  The parent is notified (waitpid,
+// SIGCHLD) once the child is torn down.
 // Returns false for the top-level application (exit() shuts down as before).
 bool exit_current_child(int status);
 
