@@ -428,6 +428,17 @@ void add_fork_shared_module_range(uintptr_t start, uintptr_t end);
 // Never call on the kernel address space.
 void destroy_address_space(address_space *as);
 
+// Flush the TLB entries for [va, va + len) of @as on every CPU that can hold
+// them, and return when they are gone.  AS0 uses flush_tlb_all().
+void flush_tlb_as(address_space *as, uintptr_t va, size_t len);
+
+// The CPU mask of @as: bit N is set while CPU N may hold entries of @as.
+std::atomic<u64> *as_cpu_mask(address_space *as);
+
+// x86: the context switch calls this on CPU @cpu right before it loads the
+// page-table root of @as.
+void note_as_loaded(address_space *as, unsigned cpu);
+
 // Resolve OSV_MMU_COW_PEEK and print "LEVER mmu_cow_peek=0|1".  Call once,
 // after the command line's --env options are applied and before the
 // application runs, so the console shows the value the fault path uses.

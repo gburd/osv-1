@@ -438,6 +438,7 @@ tests += tst-fork-kheap-headerless.so
 internal-api-tests += tst-fork-kheap-headerless.so
 tests += tst-fork-hugepage-exit.so
 tests += tst-fork-ro-lifetime.so
+tests += tst-fork-cow-mt.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
