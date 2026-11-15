@@ -354,6 +354,7 @@ tests += tst-numa.so
 tests += tst-pthread-cleanup.so
 tests += tst-random-flush.so
 tests += tst-signalfd.so
+tests += tst-listen-backlog.so
 tests += tst-locale-builtin.so
 tests += tst-locale-ctype.so
 tests += misc-ctype-dump.so
