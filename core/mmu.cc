@@ -2863,7 +2863,12 @@ static bool handle_cow_write_fault(uintptr_t addr)
     npte = pte_mark_cow(npte, false);
     npte.set_writable(true);
     pt[i0] = npte;
+#ifdef __aarch64__
+    // A broadcast invalidation of this one page reaches every CPU.
+    flush_tlb_as(current_address_space(), addr, page_size);
+#else
     mmu::flush_tlb_all();
+#endif
     return true;
 }
 #endif // CONF_fork
