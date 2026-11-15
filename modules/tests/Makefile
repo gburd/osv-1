@@ -266,6 +266,14 @@ internal-api-tests += tst-fork-pagecache-ptes.so
 tests += tst-fork-xcpu-free.so
 internal-api-tests += tst-fork-xcpu-free.so
 tests += tst-fork-vma-split.so
+tests += tst-fork-many-procs.so
+internal-api-tests += tst-fork-many-procs.so
+tests += tst-fork-arena-churn.so
+internal-api-tests += tst-fork-arena-churn.so
+tests += tst-fork-arena-big.so
+internal-api-tests += tst-fork-arena-big.so
+tests += tst-fork-arena-reuse.so
+internal-api-tests += tst-fork-arena-reuse.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
