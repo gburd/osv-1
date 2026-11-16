@@ -827,6 +827,7 @@ address_space *clone_address_space(address_space *parent)
     // entry verbatim (points at the same lower-level tables).  Clone only the
     // application slots (1..127) so their PTEs can diverge under COW.
     PREVENT_STACK_PAGE_FAULT
+    auto fd_t1 = osv::clock::uptime::now();
     WITH_LOCK(parent->vmas_mutex->for_write()) {
         // Build the "share, don't COW" ranges: stack VMAs (OSv runs kernel code
         // on the app stack, so its pages must stay writable -- see the note on
@@ -975,6 +976,7 @@ address_space *clone_address_space(address_space *parent)
         // this cannot fault under the lock.
         mmu::flush_tlb_all_cpus();
     } // release vmas_mutex
+    auto fd_t2 = osv::clock::uptime::now();
 
     live_child_address_spaces.fetch_add(1, std::memory_order_relaxed);
 
