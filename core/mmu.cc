@@ -532,6 +532,7 @@ static bool addr_is_privatize(uintptr_t va)
 
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
+static __thread u64 fork_diag_tl_leaves0, fork_diag_tl_pt_pages;
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
                             uintptr_t base_virt)
 {
@@ -541,6 +542,7 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             child_pt[i] = make_empty_pte<0>();
             continue;
         }
+        fork_diag_tl_leaves0++;
         uintptr_t va = base_virt + (uintptr_t)i * page_size;
         if (ppte.sw_bit(pte_pagecache)) {
             // A page-cache page (already read-only/COW for a private mapping,
@@ -658,6 +660,7 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
         }
         void *child_sub = memory::alloc_page();
         memset(child_sub, 0, page_size);
+        fork_diag_tl_pt_pages++;
         auto parent_sub = phys_cast<pt_element<0>>(ppte.next_pt_addr());
         clone_pt_level0(parent_sub, static_cast<pt_element<0>*>(child_sub),
                         base_virt + (uintptr_t)i * step);
@@ -679,6 +682,7 @@ void clone_pt_level<2>(pt_element<2> *parent_pt, pt_element<2> *child_pt,
         if (ppte.large()) { child_pt[i] = ppte; continue; }
         void *child_sub = memory::alloc_page();
         memset(child_sub, 0, page_size);
+        fork_diag_tl_pt_pages++;
         auto parent_sub = phys_cast<pt_element<1>>(ppte.next_pt_addr());
         clone_pt_level<1>(parent_sub, static_cast<pt_element<1>*>(child_sub),
                           base_virt + (uintptr_t)i * step);
@@ -757,6 +761,14 @@ static void child_pagecache_mappings(address_space *as,
     }
 }
 
+// Diagnosis: per-fork cost of clone_address_space, split into the page-table
+// copy (under the vma lock), the vma rebuild after it, and the whole call,
+// plus the page-table pages allocated and leaf PTEs visited; and the COW
+// write faults taken.  fork_diag_dump() prints the totals.
+std::atomic<u64> fork_diag_ns_clone{0}, fork_diag_ns_ptcopy{0}, fork_diag_ns_vmas{0},
+    fork_diag_n_clone{0}, fork_diag_pt_pages{0}, fork_diag_leaves{0},
+    fork_diag_cow_faults{0}, fork_diag_ns_fork{0}, fork_diag_ns_thread{0};
+
 address_space *clone_address_space(address_space *parent)
 {
     // Force every allocation done while cloning (the child's anon_vma copies,
@@ -766,6 +778,9 @@ address_space *clone_address_space(address_space *parent)
     // same mutex (and give the child a COW-private copy of kernel vma
     // bookkeeping).  This is the malloc-during-fork recursion trap.
     fork_arena::kernel_heap_scope kh;
+    auto fd_t0 = osv::clock::uptime::now();
+    fork_diag_tl_leaves0 = 0;
+    fork_diag_tl_pt_pages = 0;
     cow_extra_init();
     // The parent's actual PML4 page (array of 512 level-3 entries).
     phys parent_pml4_phys = parent->top ? parent->top->next_pt_addr()
@@ -915,6 +930,7 @@ address_space *clone_address_space(address_space *parent)
                 // child, marking private 4K leaves COW.
                 void *child_sub = memory::alloc_page();
                 memset(child_sub, 0, page_size);
+                fork_diag_tl_pt_pages++;
                 auto parent_sub = phys_cast<pt_element<2>>(pslot.next_pt_addr());
                 clone_pt_level<2>(parent_sub, static_cast<pt_element<2>*>(child_sub),
                                   (uintptr_t)slot << 39);
@@ -1001,7 +1017,23 @@ address_space *clone_address_space(address_space *parent)
     // The walk copied the parent's page-cache PTEs: register the child's
     // copies with the page cache (the child has not started yet).
     child_pagecache_mappings(child, pagecache::inherit_mappings);
+    auto fd_t3 = osv::clock::uptime::now();
+    fork_diag_ns_ptcopy.fetch_add((fd_t2 - fd_t1).count(), std::memory_order_relaxed);
+    fork_diag_ns_vmas.fetch_add((fd_t3 - fd_t2).count(), std::memory_order_relaxed);
+    fork_diag_ns_clone.fetch_add((fd_t3 - fd_t0).count(), std::memory_order_relaxed);
+    fork_diag_n_clone.fetch_add(1, std::memory_order_relaxed);
+    fork_diag_pt_pages.fetch_add(fork_diag_tl_pt_pages, std::memory_order_relaxed);
+    fork_diag_leaves.fetch_add(fork_diag_tl_leaves0, std::memory_order_relaxed);
     return child;
+}
+
+extern "C" int fork_diag_dump(char *buf, int len)
+{
+    return snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
+                    "cow_faults=%lu fork_ns=%lu thread_ns=%lu\n",
+                    fork_diag_n_clone.load(), fork_diag_ns_clone.load(), fork_diag_ns_ptcopy.load(),
+                    fork_diag_ns_vmas.load(), fork_diag_pt_pages.load(), fork_diag_leaves.load(),
+                    fork_diag_cow_faults.load(), fork_diag_ns_fork.load(), fork_diag_ns_thread.load());
 }
 
 // --- fork COW page-table teardown ------------------------------------------
@@ -3214,6 +3246,7 @@ void print_cow_peek_setting()
 
 static bool handle_cow_write_fault(uintptr_t addr)
 {
+    fork_diag_cow_faults.fetch_add(1, std::memory_order_relaxed);
     unsigned i0;
     pt_element<0> *pt = walk_to_leaf(addr, i0);
     if (!pt) return false;
