@@ -116,6 +116,9 @@
 
 #define ENA_RX_IRQ_INTERVAL	20
 #define ENA_TX_IRQ_INTERVAL	50
+/* Re-arm delays written by ena_cleanup(), in device delay units; default
+ * ENA_{RX,TX}_IRQ_INTERVAL, overridden by OSV_ENA_IRQ_INTERVAL="rx,tx". */
+extern unsigned ena_rx_irq_interval, ena_tx_irq_interval;
 
 #define ENA_MIN_MTU		128
 
@@ -261,6 +264,10 @@ struct ena_que {
 	uint32_t id;
 	int domain;
 	struct sysctl_oid *oid;
+
+	/* diagnosis counters: interrupts, cleanup passes, packets, last irq cpu */
+	u64 diag_irq, diag_cleanup, diag_rx, diag_tx;
+	unsigned diag_irq_cpu;
 
 };
 

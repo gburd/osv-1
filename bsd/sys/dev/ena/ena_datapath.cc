@@ -98,6 +98,8 @@ ena_cleanup(struct ena_que *que)
 	for (i = 0; i < ENA_CLEAN_BUDGET; ++i) {
 		rxc = ena_rx_cleanup(rx_ring);
 		txc = ena_tx_cleanup(tx_ring);
+		que->diag_rx += rxc;
+		que->diag_tx += txc;
 
 		if (unlikely((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0))
 			return;
@@ -106,9 +108,10 @@ ena_cleanup(struct ena_que *que)
 			break;
 	}
 
+	que->diag_cleanup++;
 	/* Signal that work is done and unmask interrupt */
-	ena_com_update_intr_reg(&intr_reg, ENA_RX_IRQ_INTERVAL,
-	    ENA_TX_IRQ_INTERVAL, true);
+	ena_com_update_intr_reg(&intr_reg, ena_rx_irq_interval,
+	    ena_tx_irq_interval, true);
 	counter_u64_add(tx_ring->tx_stats.unmask_interrupt_num, 1);
 	ena_com_unmask_intr(io_cq, &intr_reg);
 }
