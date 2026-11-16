@@ -947,6 +947,37 @@ ena_destroy_all_io_queues(struct ena_adapter *adapter)
 
 TRACEPOINT(trace_ena_cleanup_wake, "");
 
+unsigned ena_rx_irq_interval = ENA_RX_IRQ_INTERVAL;
+unsigned ena_tx_irq_interval = ENA_TX_IRQ_INTERVAL;
+static struct ena_adapter *whygap_ena_adapter;
+
+/* Diagnosis: one line per IO queue into buf; returns the length written. */
+extern "C" int ena_diag_dump(char *buf, int len)
+{
+	struct ena_adapter *a = whygap_ena_adapter;
+	int n = 0;
+	if (!a)
+		return snprintf(buf, len, "ena none\n");
+	n += snprintf(buf + n, len - n, "ena queues=%d rx_iv=%u tx_iv=%u res=%u\n",
+	    a->num_io_queues, ena_rx_irq_interval, ena_tx_irq_interval,
+	    a->ena_dev->intr_delay_resolution);
+	for (int i = 0; i < a->num_io_queues && n < len - 128; i++) {
+		struct ena_que *q = &a->que[i];
+		n += snprintf(buf + n, len - n,
+		    "enaq %d irq=%lu cleanup=%lu rx=%lu tx=%lu irqcpu=%u\n", i,
+		    q->diag_irq, q->diag_cleanup, q->diag_rx, q->diag_tx,
+		    q->diag_irq_cpu);
+	}
+	return n;
+}
+
+/* Diagnosis: change the re-arm delays at run time. */
+extern "C" void ena_diag_set_irq_interval(unsigned rx, unsigned tx)
+{
+	ena_rx_irq_interval = rx;
+	ena_tx_irq_interval = tx;
+}
+
 static void
 cleanup_work(ena_que *queue)
 {
@@ -1106,6 +1137,8 @@ ena_handle_msix(void *arg)
 	if (unlikely((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0))
 		return 0;
 
+	queue->diag_irq++;
+	queue->diag_irq_cpu = sched::cpu::current()->id;
 	queue->cleanup_thread->wake_with_irq_or_preemption_disabled([queue] { queue->cleanup_pending++; });
 
 	return 0;
@@ -2636,6 +2669,22 @@ ena_attach(pci::device* pdev, ena_adapter **_adapter)
 
 	adapter->max_num_io_queues = max_num_io_queues;
 	ena_log(pdev, INFO, "ena_attach: set max_num_io_queues to %d", max_num_io_queues);
+
+	{
+		const char *iv = getenv("OSV_ENA_IRQ_INTERVAL");
+		unsigned rx, tx;
+		if (iv && sscanf(iv, "%u,%u", &rx, &tx) == 2) {
+			ena_rx_irq_interval = rx;
+			ena_tx_irq_interval = tx;
+		}
+		/* Only reads the device's delay unit; adaptive moderation stays off. */
+		int mrc = ena_com_init_interrupt_moderation(ena_dev);
+		printf("LEVER ena_irq_interval=%u,%u\n", ena_rx_irq_interval,
+		    ena_tx_irq_interval);
+		printf("ENA intr_delay_resolution=%u rc=%d max_num_io_queues=%u\n",
+		    ena_dev->intr_delay_resolution, mrc, max_num_io_queues);
+		whygap_ena_adapter = adapter;
+	}
 
 	adapter->buf_ring_size = ENA_DEFAULT_BUF_RING_SIZE;
 
