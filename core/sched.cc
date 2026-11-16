@@ -242,6 +242,11 @@ cpu::cpu(unsigned _id)
 }
 
 static unsigned idle_spin_max();
+// Diagnosis counters, per CPU: halts (wait_for_interrupt calls), wake IPIs
+// sent to the CPU, idle entries, and ns spent halted.
+struct idle_diag { u64 halts, ipis, idles, halt_ns; } __attribute__((aligned(64)));
+static idle_diag idle_diag_cpu[max_cpus];
+
 static bool idle_spin_adaptive();
 
 void cpu::init_idle_thread()
@@ -633,6 +638,7 @@ void cpu::send_wakeup_ipi()
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!idle_poll.load(std::memory_order_relaxed) && runqueue.size() <= 1) {
         trace_sched_ipi(id);
+        __atomic_fetch_add(&idle_diag_cpu[id].ipis, 1, __ATOMIC_RELAXED);
         wakeup_ipi.send(this);
     }
 }
@@ -677,6 +683,10 @@ void cpu::send_wakeup_ipi()
 // the idle CPU of the fixed 10000), so the high cap costs nothing when idle.
 // OSV_IDLE_SPIN_ADAPTIVE=0 pins the window at the cap (the old fixed-count
 // behavior at whatever OSV_IDLE_SPIN / the default is).
+// Diagnosis: the cap and the adaptive flag can be changed at run time by
+// sched_diag_set_idle(); 0 in the override means "use the boot value".
+static std::atomic<unsigned> idle_spin_max_override{0};
+static std::atomic<int> idle_spin_adaptive_override{-1};
 static unsigned idle_spin_max()
 {
     static unsigned n = []{
@@ -684,7 +694,8 @@ static unsigned idle_spin_max()
         unsigned v = e ? (unsigned)strtoul(e, nullptr, 10) : 100000;
         return v ? v : 100000;
     }();
-    return n;
+    unsigned o = idle_spin_max_override.load(std::memory_order_relaxed);
+    return o ? o : n;
 }
 static bool idle_spin_adaptive()
 {
@@ -692,7 +703,35 @@ static bool idle_spin_adaptive()
         const char* e = getenv("OSV_IDLE_SPIN_ADAPTIVE");
         return !(e && strtoul(e, nullptr, 10) == 0);
     }();
-    return a;
+    int o = idle_spin_adaptive_override.load(std::memory_order_relaxed);
+    return o >= 0 ? o : a;
+}
+
+extern "C" void sched_diag_set_idle(unsigned cap, int adaptive)
+{
+    idle_spin_max_override.store(cap, std::memory_order_relaxed);
+    idle_spin_adaptive_override.store(adaptive, std::memory_order_relaxed);
+    for (auto c : cpus) {
+        c->idle_spin_window = 0;
+    }
+}
+
+extern "C" int sched_diag_dump(char *buf, int len)
+{
+    int n = snprintf(buf, len, "idle cap=%u adaptive=%d\n", idle_spin_max(),
+                     idle_spin_adaptive() ? 1 : 0);
+    for (auto c : cpus) {
+        if (n >= len - 128) {
+            break;
+        }
+        auto &d = idle_diag_cpu[c->id];
+        n += snprintf(buf + n, len - n,
+                      "cpu %u halts=%lu ipis=%lu idles=%lu halt_ns=%lu idle_ns=%lu\n",
+                      c->id, d.halts, d.ipis, d.idles, d.halt_ns,
+                      (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          c->idle_thread->thread_clock()).count());
+    }
+    return n;
 }
 // Window floor: a genuinely-idle CPU decays to this many spin iterations before
 // halting -- small enough not to burn cycles, >0 so the idle_poll handshake
@@ -709,6 +748,7 @@ void cpu::do_idle()
 {
     const unsigned cap = idle_spin_max();
     const bool adaptive = idle_spin_adaptive();
+    idle_diag_cpu[id].idles++;
     // Per-CPU adaptive window persists across idle entries; seed at the cap so
     // the very first idle behaves like the historical fixed count until
     // history accumulates.
@@ -771,7 +811,11 @@ void cpu::do_idle()
             }
         }
         guard.release();
+        auto &dg = idle_diag_cpu[id];
+        dg.halts++;
+        auto h0 = osv::clock::uptime::now();
         arch::wait_for_interrupt(); // this unlocks irq_lock
+        dg.halt_ns += (osv::clock::uptime::now() - h0).count();
         handle_incoming_wakeups();
     } while (runqueue.empty());
 }
