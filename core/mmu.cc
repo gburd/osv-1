@@ -836,6 +836,7 @@ address_space *clone_address_space(address_space *parent)
     // The share/privatize range sets and their memos are global, and two
     // address spaces (AS0 and a fork child forking again) can clone at once,
     // each under its own vmas_mutex: one clone at a time uses them.
+    auto fd_t1 = osv::clock::uptime::now();
     PREVENT_STACK_PAGE_FAULT
     WITH_LOCK(clone_ranges_lock)
     WITH_LOCK(parent->vmas_mutex->for_write()) {
@@ -988,6 +989,7 @@ address_space *clone_address_space(address_space *parent)
         // this cannot fault under the lock.
         mmu::flush_tlb_all_cpus();
     } // release vmas_mutex
+    auto fd_t2 = osv::clock::uptime::now();
 
     live_child_address_spaces.fetch_add(1, std::memory_order_relaxed);
 
