@@ -827,9 +827,11 @@ pid_t fork(void)
     pid_t parent = getpid();
 
     void *stack_to_free = nullptr;
+    auto fd_f0 = osv::clock::uptime::now();
     // POSIX: run pthread_atfork prepare handlers in the parent before forking.
     __osv_run_atfork_prepare();
     sched::thread *child = fork_thread(caller_ret, caller_sp, resume_ctx, &stack_to_free);
+    mmu::fork_diag_ns_thread.fetch_add((osv::clock::uptime::now() - fd_f0).count(), std::memory_order_relaxed);
     if (!child) {
         __osv_run_atfork_parent();  // undo prepare-side locking
         errno = ENOMEM;
@@ -910,6 +912,7 @@ pid_t fork(void)
     // child runs its atfork child handlers in its own context, in the arch
     // fork_thread trampoline, before resuming user code.)
     __osv_run_atfork_parent();
+    mmu::fork_diag_ns_fork.fetch_add((osv::clock::uptime::now() - fd_f0).count(), std::memory_order_relaxed);
 
     // Parent path: return the child's pid.  (The child resumes in fork()'s
     // caller with return value 0, on its private stack.)

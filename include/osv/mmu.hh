@@ -423,6 +423,8 @@ phys pt_root_phys(address_space *as);
 // MAP_SHARED / shm VMAs are mapped to the same physical pages (truly shared).
 // The kernel half of the page table is shared with the parent.
 address_space *clone_address_space(address_space *parent);
+// Diagnosis: fork() and clone_address_space() time totals (fork_diag_dump()).
+extern std::atomic<u64> fork_diag_ns_fork, fork_diag_ns_thread;
 
 // Register a writable segment of an in-app-slot kernel module (e.g.
 // libsolaris.so / OpenZFS) so it is SHARED verbatim -- never COW -- across every
