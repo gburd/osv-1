@@ -475,6 +475,8 @@ int driver::identify_namespace(u32 nsid)
     _ns_data[nsid]->bpshift = NVME_PAGESHIFT - _ns_data[nsid]->blockshift;
     _ns_data[nsid]->id = nsid;
 
+    printf("NVME ns %d blocksize=%d blockcount=%lu\n", nsid, _ns_data[nsid]->blocksize,
+           (unsigned long)_ns_data[nsid]->blockcount);
     nvme_i("Identified namespace with nsid=%d, blockcount=%d, blocksize=%d",
         nsid, _ns_data[nsid]->blockcount, _ns_data[nsid]->blocksize);
     return 0;

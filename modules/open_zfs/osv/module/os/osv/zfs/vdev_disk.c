@@ -125,6 +125,26 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	return (0);
 }
 
+/*
+ * Diagnosis: read zios issued to the disk by size (bucket b = up to
+ * 512 << b bytes), optional (aggregation filler) and async-priority counts.
+ */
+uint64_t vdev_disk_diag_rd[16], vdev_disk_diag_rd_opt, vdev_disk_diag_rd_agg,
+    vdev_disk_diag_rd_async;
+
+int
+vdev_disk_diag_dump(char *buf, int len)
+{
+	int n = snprintf(buf, len, "zio_read opt=%llu agginh=%llu async=%llu sizes=",
+	    (u_longlong_t)vdev_disk_diag_rd_opt, (u_longlong_t)vdev_disk_diag_rd_agg,
+	    (u_longlong_t)vdev_disk_diag_rd_async);
+	for (int b = 0; b < 16 && n < len - 32; b++)
+		n += snprintf(buf + n, len - n, "%s%llu", b ? "," : "",
+		    (u_longlong_t)vdev_disk_diag_rd[b]);
+	n += snprintf(buf + n, len - n, "\n");
+	return (n);
+}
+
 static void
 vdev_disk_close(vdev_t *vd)
 {
@@ -255,6 +275,19 @@ vdev_disk_io_start(zio_t *zio)
 	 */
 	void *data;
 	size_t size = zio->io_size;
+	/* Diagnosis: count read zios by size and by ZIO_FLAG_OPTIONAL. */
+	if (zio->io_type == ZIO_TYPE_READ) {
+		int b = 0;
+		while (b < 15 && (size >> 9) > (1UL << b))
+			b++;
+		atomic_inc_64(&vdev_disk_diag_rd[b]);
+		if (zio->io_flags & ZIO_FLAG_OPTIONAL)
+			atomic_inc_64(&vdev_disk_diag_rd_opt);
+		if (zio->io_flags & ZIO_FLAG_AGG_INHERIT)
+			atomic_inc_64(&vdev_disk_diag_rd_agg);
+		if (zio->io_priority == ZIO_PRIORITY_ASYNC_READ)
+			atomic_inc_64(&vdev_disk_diag_rd_async);
+	}
 
 	if (zio->io_type == ZIO_TYPE_READ) {
 		data = abd_borrow_buf(zio->io_abd, size);

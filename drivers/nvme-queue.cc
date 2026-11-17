@@ -385,6 +385,7 @@ extern "C" int nvme_diag_dump(char *buf, int len)
 {
     static const char *nm[3] = {"read", "write", "flush"};
     int n = 0;
+
     for (int k = 0; k < 3 && n < len - 512; k++) {
         n += snprintf(buf + n, len - n, "nvme %s n=%lu ns=%lu infl_sum=%lu blocks=%lu hist=", nm[k],
                       nvme_diag_n[k].load(), nvme_diag_ns[k].load(), nvme_diag_infl_sum[k].load(),
