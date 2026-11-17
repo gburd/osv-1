@@ -1434,8 +1434,33 @@ ena_rss_configure(struct ena_adapter *adapter)
 	 * flushes the hash function to the device, so no separate
 	 * ena_com_set_hash_function() call is needed. Not fatal if unsupported.
 	 */
-	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, NULL,
-	    ENA_HASH_KEY_SIZE, 0x0);
+	{
+		/*
+		 * Report the key the device holds (fill_hash_function(NULL) keeps
+		 * it); an all-zero Toeplitz key hashes every flow to 0.
+		 */
+		u8 k[ENA_HASH_KEY_SIZE] = {0};
+		u32 nz = 0;
+		rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, NULL,
+		    ENA_HASH_KEY_SIZE, 0x0);
+		ena_com_get_hash_key(ena_dev, k);
+		for (unsigned j = 0; j < sizeof(k); j++)
+			nz |= k[j];
+		printf("ENA RSS key %02x%02x%02x%02x.. nonzero=%d func rc=%d\n",
+		    k[0], k[1], k[2], k[3], nz != 0, rc);
+		if (rc == 0 && nz == 0) {
+			/* the Microsoft RSS verification key */
+			static const u8 msk[40] = {
+			    0x6d, 0x5a, 0x56, 0xda, 0x25, 0x5b, 0x0e, 0xc2,
+			    0x41, 0x67, 0x25, 0x3d, 0x43, 0xa3, 0x8f, 0xb0,
+			    0xd0, 0xca, 0x2b, 0xcb, 0xae, 0x7b, 0x30, 0xb4,
+			    0x77, 0xcb, 0x2d, 0xa3, 0x80, 0x30, 0xf2, 0x0c,
+			    0x6a, 0x42, 0xb7, 0x3b, 0xbe, 0xac, 0x01, 0xfa};
+			rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ,
+			    msk, ENA_HASH_KEY_SIZE, 0x0);
+			printf("ENA RSS key was zero: set the default Toeplitz key rc=%d\n", rc);
+		}
+	}
 	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
 		ena_log(adapter->pdev, ERR, "Cannot fill hash function rc: %d", rc);
 		goto err_rss_destroy;
@@ -1449,6 +1474,25 @@ ena_rss_configure(struct ena_adapter *adapter)
 	if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
 		ena_log(adapter->pdev, ERR, "Cannot set indirect table rc: %d", rc);
 		goto err_rss_destroy;
+	}
+
+	/*
+	 * Select the header fields the device hashes (the 4-tuple for TCP/UDP).
+	 * Without this the hash input is whatever the device defaults to, and on
+	 * Nitro that puts every flow on the same indirection entry: all Rx lands
+	 * on one queue and one CPU.
+	 */
+	{
+		u16 tcp4_before = 0, tcp4_after = 0;
+		ena_com_get_hash_ctrl(ena_dev, ENA_ADMIN_RSS_TCP4, &tcp4_before);
+		rc = ena_com_set_default_hash_ctrl(ena_dev);
+		ena_com_get_hash_ctrl(ena_dev, ENA_ADMIN_RSS_TCP4, &tcp4_after);
+		printf("ENA RSS hash input tcp4 0x%x -> 0x%x rc=%d\n", tcp4_before,
+		    tcp4_after, rc);
+		if (unlikely(rc != 0 && rc != ENA_COM_UNSUPPORTED)) {
+			ena_log(adapter->pdev, ERR, "Cannot set hash input rc: %d", rc);
+			goto err_rss_destroy;
+		}
 	}
 
 	ENA_FLAG_SET_ATOMIC(ENA_FLAG_RSS_ACTIVE, adapter);
