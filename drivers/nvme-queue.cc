@@ -19,6 +19,8 @@
 
 #include "nvme-queue.hh"
 #include <atomic>
+#include <stdio.h>
+#include <stdlib.h>
 #include <osv/clock.hh>
 
 static u64 nvme_diag_t0[4][64][4096];
@@ -227,14 +229,34 @@ bool queue_pair::completion_queue_not_empty() const
     return a;
 }
 
+// Diagnosis lever OSV_NVME_NOMASK=1: leave the IO queues' MSI-X entries
+// unmasked; the completion thread's wait_until re-checks the CQ before it
+// sleeps, so an interrupt that arrives while it runs only costs a wakeup.
+static bool nvme_nomask_now()
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("OSV_NVME_NOMASK");
+        v = e && atoi(e) == 1;
+        printf("LEVER nvme_nomask=%d\n", v);
+    }
+    return v;
+}
+
 void queue_pair::enable_interrupts()
 {
+    if (_id != 0 && nvme_nomask_now()) {
+        return;
+    }
     _dev->msix_unmask_entry(_id);
     trace_nvme_enable_interrupts(_driver_id, _id);
 }
 
 void queue_pair::disable_interrupts()
 {
+    if (_id != 0 && nvme_nomask_now()) {
+        return;
+    }
     _dev->msix_mask_entry(_id);
     trace_nvme_disable_interrupts(_driver_id, _id);
 }
