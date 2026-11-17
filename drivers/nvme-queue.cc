@@ -18,6 +18,12 @@
 #include <osv/align.hh>
 
 #include "nvme-queue.hh"
+#include <atomic>
+#include <osv/clock.hh>
+
+static u64 nvme_diag_t0[4][64][4096];
+static std::atomic<long> nvme_diag_inflight{0};
+static std::atomic<u64> nvme_diag_ns[3], nvme_diag_n[3], nvme_diag_infl_sum[3], nvme_diag_hist[3][16];
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
 #include <osv/fork_arena.hh>
@@ -314,6 +320,9 @@ int io_queue_pair::make_request(struct bio* bio, u32 nsid = 1)
     }
     //Save bio
     _pending_bios[cid_to_row(cid)][cid_to_col(cid)] = bio;
+    // Diagnosis: per-cid submit timestamp (nvme_diag_dump).
+    nvme_diag_t0[_driver_id & 3][_id & 63][cid & 4095] = osv::clock::uptime::now().time_since_epoch().count();
+    nvme_diag_inflight.fetch_add(1, std::memory_order_relaxed);
 
     switch (bio->bio_cmd) {
     case BIO_READ:
@@ -336,6 +345,24 @@ int io_queue_pair::make_request(struct bio* bio, u32 nsid = 1)
         return ENOTBLK;
     }
     return 0;
+}
+
+// Diagnosis: NVMe command latency (submit to completion seen by req_done),
+// per command type (read, write, flush), the in-flight count at completion
+// and a log2(us) histogram.
+extern "C" int nvme_diag_dump(char *buf, int len)
+{
+    static const char *nm[3] = {"read", "write", "flush"};
+    int n = 0;
+    for (int k = 0; k < 3 && n < len - 512; k++) {
+        n += snprintf(buf + n, len - n, "nvme %s n=%lu ns=%lu infl_sum=%lu hist=", nm[k],
+                      nvme_diag_n[k].load(), nvme_diag_ns[k].load(), nvme_diag_infl_sum[k].load());
+        for (int b = 0; b < 16; b++) {
+            n += snprintf(buf + n, len - n, "%s%lu", b ? "," : "", nvme_diag_hist[k][b].load());
+        }
+        n += snprintf(buf + n, len - n, "\n");
+    }
+    return n;
 }
 
 void io_queue_pair::req_done()
@@ -381,6 +408,20 @@ void io_queue_pair::req_done()
                 // No bio outstanding for this cid (duplicate / spurious
                 // completion); ignore rather than dereference a null.
                 continue;
+            }
+            {
+                u64 t0 = nvme_diag_t0[_driver_id & 3][_id & 63][cid & 4095];
+                int k = pending_bio->bio_cmd == BIO_READ ? 0 : pending_bio->bio_cmd == BIO_WRITE ? 1 : 2;
+                long infl = nvme_diag_inflight.fetch_sub(1, std::memory_order_relaxed);
+                if (t0) {
+                    u64 d = osv::clock::uptime::now().time_since_epoch().count() - t0;
+                    nvme_diag_ns[k].fetch_add(d, std::memory_order_relaxed);
+                    nvme_diag_n[k].fetch_add(1, std::memory_order_relaxed);
+                    nvme_diag_infl_sum[k].fetch_add(infl, std::memory_order_relaxed);
+                    unsigned b = 0;
+                    while (b < 15 && (d >> 10) >= (1ull << b)) b++;   // log2(us) buckets, last = >= 16 ms
+                    nvme_diag_hist[k][b].fetch_add(1, std::memory_order_relaxed);
+                }
             }
             //
             // Save for future re-use or free PRP list saved under bio_private if any
