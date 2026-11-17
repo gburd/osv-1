@@ -232,15 +232,24 @@ bool queue_pair::completion_queue_not_empty() const
 // Diagnosis lever OSV_NVME_NOMASK=1: leave the IO queues' MSI-X entries
 // unmasked; the completion thread's wait_until re-checks the CQ before it
 // sleeps, so an interrupt that arrives while it runs only costs a wakeup.
+static std::atomic<int> nvme_nomask_v{-1};
 static bool nvme_nomask_now()
 {
-    static int v = -1;
+    int v = nvme_nomask_v.load(std::memory_order_relaxed);
     if (v < 0) {
         const char *e = getenv("OSV_NVME_NOMASK");
         v = e && atoi(e) == 1;
+        nvme_nomask_v.store(v, std::memory_order_relaxed);
         printf("LEVER nvme_nomask=%d\n", v);
     }
     return v;
+}
+
+// Diagnosis: switch the lever at run time.  Turning masking back on takes
+// effect at the next interrupt; an entry left unmasked is masked by it.
+extern "C" void nvme_diag_set_nomask(int v)
+{
+    nvme_nomask_v.store(v ? 1 : 0, std::memory_order_relaxed);
 }
 
 void queue_pair::enable_interrupts()
