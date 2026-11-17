@@ -948,6 +948,7 @@ ena_destroy_all_io_queues(struct ena_adapter *adapter)
 TRACEPOINT(trace_ena_cleanup_wake, "");
 
 unsigned ena_rx_irq_interval = ENA_RX_IRQ_INTERVAL;
+static bool ena_llq_disable_meta_caching;
 unsigned ena_tx_irq_interval = ENA_TX_IRQ_INTERVAL;
 static struct ena_adapter *whygap_ena_adapter;
 
@@ -1937,11 +1938,46 @@ ena_set_queues_placement_policy(pci::device *pdev, struct ena_com_dev *ena_dev,
     struct ena_admin_feature_llq_desc *llq,
     struct ena_llq_configurations *llq_default_configurations)
 {
-	//We do NOT support LLQ
+	/*
+	 * LLQ (device-memory Tx queue) is opt-in: OSV_ENA_LLQ=1.  The Tx
+	 * descriptors and the first tx_max_header_size bytes of each packet are
+	 * written into the device's memory BAR with the doorbell, instead of the
+	 * device fetching them from host memory after it.
+	 */
+	const char *e = getenv("OSV_ENA_LLQ");
+	bool want = e && atoi(e) == 1;
 	ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
-
-	ena_log(pdev, INFO,
-		"LLQ is not supported. Using the host mode policy.");
+	printf("LEVER ena_llq=%d\n", want ? 1 : 0);
+	if (!want)
+		return (0);
+	if (!(ena_dev->supported_features & BIT(ENA_ADMIN_LLQ)) ||
+	    llq->max_llq_num == 0) {
+		printf("ENA LLQ not offered by the device: host mode\n");
+		return (0);
+	}
+	pci::bar *mem = pdev->get_bar(ENA_MEM_BAR + 1);
+	if (mem == NULL || !mem->is_mmio()) {
+		printf("ENA LLQ: no memory BAR: host mode\n");
+		return (0);
+	}
+	mem->map();
+	ena_dev->mem_bar = (void __iomem *)mem->get_mmio();
+	struct ena_llq_configurations cfg;
+	cfg.llq_header_location = ENA_ADMIN_INLINE_HEADER;
+	cfg.llq_stride_ctrl = ENA_ADMIN_MULTIPLE_DESCS_PER_ENTRY;
+	cfg.llq_num_decs_before_header = ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2;
+	cfg.llq_ring_entry_size = ENA_ADMIN_LIST_ENTRY_SIZE_128B;
+	cfg.llq_ring_entry_size_value = 128;
+	int rc = ena_com_config_dev_mode(ena_dev, llq, &cfg);
+	printf("ENA LLQ rc=%d placement=%s max_llq_num=%u max_llq_depth=%u "
+	    "tx_max_header_size=%u mem_bar=%p size=%lu\n", rc,
+	    ena_dev->tx_mem_queue_type == ENA_ADMIN_PLACEMENT_POLICY_DEV ?
+	    "DEV" : "HOST", llq->max_llq_num, llq->max_llq_depth,
+	    ena_dev->tx_max_header_size, ena_dev->mem_bar, mem->get_size());
+	if (rc != 0)
+		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
+	else
+		ena_llq_disable_meta_caching = ena_dev->llq_info.disable_meta_caching;
 	return (0);
 }
 
@@ -1992,6 +2028,10 @@ ena_calc_io_queue_size(struct ena_calc_queue_size_ctx *ctx)
 		ctx->max_rx_sgl_size = min_t(uint16_t, ENA_PKT_MAX_BUFS,
 		    max_queues->max_packet_rx_descs);
 	}
+
+	if (ena_dev->tx_mem_queue_type == ENA_ADMIN_PLACEMENT_POLICY_DEV)
+		max_tx_queue_size = min_t(uint32_t, max_tx_queue_size,
+		    ctx->get_feat_ctx->llq.max_llq_depth);
 
 	/* round down to the nearest power of 2 */
 	max_tx_queue_size = 1 << (flsl(max_tx_queue_size) - 1);
@@ -2733,6 +2773,7 @@ ena_attach(pci::device* pdev, ena_adapter **_adapter)
 	adapter->buf_ring_size = ENA_DEFAULT_BUF_RING_SIZE;
 
 	adapter->max_mtu = get_feat_ctx.dev_attr.max_mtu;
+	adapter->disable_meta_caching = ena_llq_disable_meta_caching;
 
 	adapter->reset_reason = ENA_REGS_RESET_NORMAL;
 
