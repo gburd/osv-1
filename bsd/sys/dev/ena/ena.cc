@@ -947,6 +947,7 @@ ena_destroy_all_io_queues(struct ena_adapter *adapter)
 
 TRACEPOINT(trace_ena_cleanup_wake, "");
 
+std::atomic<u64> ena_diag_last_rx_ns{0}, ena_diag_turn_ns{0}, ena_diag_turn_n{0};
 unsigned ena_rx_irq_interval = ENA_RX_IRQ_INTERVAL;
 unsigned ena_tx_irq_interval = ENA_TX_IRQ_INTERVAL;
 static struct ena_adapter *whygap_ena_adapter;
@@ -958,15 +959,17 @@ extern "C" int ena_diag_dump(char *buf, int len)
 	int n = 0;
 	if (!a)
 		return snprintf(buf, len, "ena none\n");
-	n += snprintf(buf + n, len - n, "ena queues=%d rx_iv=%u tx_iv=%u res=%u\n",
+	n += snprintf(buf + n, len - n, "ena queues=%d rx_iv=%u tx_iv=%u res=%u turn_ns=%lu turn_n=%lu\n",
 	    a->num_io_queues, ena_rx_irq_interval, ena_tx_irq_interval,
-	    a->ena_dev->intr_delay_resolution);
+	    a->ena_dev->intr_delay_resolution, ena_diag_turn_ns.load(), ena_diag_turn_n.load());
 	for (int i = 0; i < a->num_io_queues && n < len - 128; i++) {
 		struct ena_que *q = &a->que[i];
 		n += snprintf(buf + n, len - n,
-		    "enaq %d irq=%lu cleanup=%lu rx=%lu tx=%lu irqcpu=%u\n", i,
+		    "enaq %d irq=%lu cleanup=%lu rx=%lu tx=%lu irqcpu=%u txlat_ns=%lu txlat_n=%lu wake_ns=%lu wake_n=%lu clean_ns=%lu input_ns=%lu input_n=%lu\n", i,
 		    q->diag_irq, q->diag_cleanup, q->diag_rx, q->diag_tx,
-		    q->diag_irq_cpu);
+		    q->diag_irq_cpu, q->diag_txlat_ns, q->diag_txlat_n,
+		    q->diag_wake_ns, q->diag_wake_n, q->diag_clean_ns,
+		    q->diag_input_ns, q->diag_input_n);
 	}
 	return n;
 }
@@ -1139,6 +1142,7 @@ ena_handle_msix(void *arg)
 
 	queue->diag_irq++;
 	queue->diag_irq_cpu = sched::cpu::current()->id;
+	queue->diag_isr_ns = osv::clock::uptime::now().time_since_epoch().count();
 	queue->cleanup_thread->wake_with_irq_or_preemption_disabled([queue] { queue->cleanup_pending++; });
 
 	return 0;

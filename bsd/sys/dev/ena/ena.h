@@ -41,6 +41,8 @@
 #include <bsd/porting/callout.h>
 #include <osv/msi.hh>
 #include "drivers/pci-device.hh"
+#include <atomic>
+#include <osv/clock.hh>
 
 #define ENA_DRV_MODULE_VER_MAJOR	2
 #define ENA_DRV_MODULE_VER_MINOR	6
@@ -119,6 +121,8 @@
 /* Re-arm delays written by ena_cleanup(), in device delay units; default
  * ENA_{RX,TX}_IRQ_INTERVAL, overridden by OSV_ENA_IRQ_INTERVAL="rx,tx". */
 extern unsigned ena_rx_irq_interval, ena_tx_irq_interval;
+/* diagnosis: last Rx packet seen (ns) and the time from it to the next Tx doorbell */
+extern std::atomic<u64> ena_diag_last_rx_ns, ena_diag_turn_ns, ena_diag_turn_n;
 
 #define ENA_MIN_MTU		128
 
@@ -268,6 +272,11 @@ struct ena_que {
 	/* diagnosis counters: interrupts, cleanup passes, packets, last irq cpu */
 	u64 diag_irq, diag_cleanup, diag_rx, diag_tx;
 	unsigned diag_irq_cpu;
+	/* diagnosis timers (ns): Tx submit->completion seen in cleanup, ISR->cleanup
+	 * thread running, cleanup pass; and the ISR's timestamp */
+	u64 diag_txlat_ns, diag_txlat_n, diag_wake_ns, diag_wake_n, diag_clean_ns;
+	u64 diag_isr_ns;
+	u64 diag_input_ns, diag_input_n;
 
 };
 

@@ -94,6 +94,12 @@ ena_cleanup(struct ena_que *que)
 
 	tx_ring->first_interrupt.store(1);
 	rx_ring->first_interrupt.store(1);
+	u64 diag_t0 = osv::clock::uptime::now().time_since_epoch().count();
+	if (que->diag_isr_ns) {
+		que->diag_wake_ns += diag_t0 - que->diag_isr_ns;
+		que->diag_wake_n++;
+		que->diag_isr_ns = 0;
+	}
 
 	for (i = 0; i < ENA_CLEAN_BUDGET; ++i) {
 		rxc = ena_rx_cleanup(rx_ring);
@@ -109,6 +115,7 @@ ena_cleanup(struct ena_que *que)
 	}
 
 	que->diag_cleanup++;
+	que->diag_clean_ns += osv::clock::uptime::now().time_since_epoch().count() - diag_t0;
 	/* Signal that work is done and unmask interrupt */
 	ena_com_update_intr_reg(&intr_reg, ena_rx_irq_interval,
 	    ena_tx_irq_interval, true);
@@ -270,6 +277,10 @@ ena_tx_cleanup(struct ena_ring *tx_ring)
 
 		mbuf = tx_info->mbuf;
 
+		if (tx_info->timestamp) {
+			tx_ring->que->diag_txlat_ns += osv::clock::uptime::now().time_since_epoch().count() - tx_info->timestamp;
+			tx_ring->que->diag_txlat_n++;
+		}
 		tx_info->mbuf = NULL;
 		tx_info->timestamp = 0;
 
@@ -579,12 +590,16 @@ ena_rx_cleanup(struct ena_ring *rx_ring)
 		if (do_if_input != 0) {
 			ena_log_io(adapter->pdev, DBG,
 			    "calling if_input() with mbuf %p", mbuf);
+			u64 diag_i0 = osv::clock::uptime::now().time_since_epoch().count();
+			ena_diag_last_rx_ns.store(diag_i0, std::memory_order_relaxed);
 			bool fast_path = if_net_channel_input(ifp, mbuf);
 			if (!fast_path) {
 				(*ifp->if_input)(ifp, mbuf);
 			} else {
 				trace_ena_rx_cleanup_fast_path(rx_ring->qid);
 			}
+			rx_ring->que->diag_input_ns += osv::clock::uptime::now().time_since_epoch().count() - diag_i0;
+			rx_ring->que->diag_input_n++;
 		}
 
 		counter_enter();
@@ -989,6 +1004,11 @@ ena_start_xmit(struct ena_ring *tx_ring, bool deferred)
 	}
 
 	if (likely(tx_ring->acum_pkts != 0)) {
+		u64 diag_r = ena_diag_last_rx_ns.exchange(0, std::memory_order_relaxed);
+		if (diag_r) {
+			ena_diag_turn_ns.fetch_add(osv::clock::uptime::now().time_since_epoch().count() - diag_r, std::memory_order_relaxed);
+			ena_diag_turn_n.fetch_add(1, std::memory_order_relaxed);
+		}
 		/* Trigger the dma engine */
 		ena_ring_tx_doorbell(tx_ring);
 		ena_log(adapter->pdev, DBG, "Rang TX doorbell, tx_ring->running:%d", tx_ring->running);
