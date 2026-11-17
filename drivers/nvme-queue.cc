@@ -23,7 +23,7 @@
 
 static u64 nvme_diag_t0[4][64][4096];
 static std::atomic<long> nvme_diag_inflight{0};
-static std::atomic<u64> nvme_diag_ns[3], nvme_diag_n[3], nvme_diag_infl_sum[3], nvme_diag_hist[3][16];
+static std::atomic<u64> nvme_diag_ns[3], nvme_diag_n[3], nvme_diag_infl_sum[3], nvme_diag_hist[3][16], nvme_diag_blocks[3];
 #include <osv/kernel_config_fork.h>
 #if CONF_fork
 #include <osv/fork_arena.hh>
@@ -355,8 +355,9 @@ extern "C" int nvme_diag_dump(char *buf, int len)
     static const char *nm[3] = {"read", "write", "flush"};
     int n = 0;
     for (int k = 0; k < 3 && n < len - 512; k++) {
-        n += snprintf(buf + n, len - n, "nvme %s n=%lu ns=%lu infl_sum=%lu hist=", nm[k],
-                      nvme_diag_n[k].load(), nvme_diag_ns[k].load(), nvme_diag_infl_sum[k].load());
+        n += snprintf(buf + n, len - n, "nvme %s n=%lu ns=%lu infl_sum=%lu blocks=%lu hist=", nm[k],
+                      nvme_diag_n[k].load(), nvme_diag_ns[k].load(), nvme_diag_infl_sum[k].load(),
+                      nvme_diag_blocks[k].load());
         for (int b = 0; b < 16; b++) {
             n += snprintf(buf + n, len - n, "%s%lu", b ? "," : "", nvme_diag_hist[k][b].load());
         }
@@ -418,6 +419,7 @@ void io_queue_pair::req_done()
                     nvme_diag_ns[k].fetch_add(d, std::memory_order_relaxed);
                     nvme_diag_n[k].fetch_add(1, std::memory_order_relaxed);
                     nvme_diag_infl_sum[k].fetch_add(infl, std::memory_order_relaxed);
+                    nvme_diag_blocks[k].fetch_add(pending_bio->bio_bcount, std::memory_order_relaxed);
                     unsigned b = 0;
                     while (b < 15 && (d >> 10) >= (1ull << b)) b++;   // log2(us) buckets, last = >= 16 ms
                     nvme_diag_hist[k][b].fetch_add(1, std::memory_order_relaxed);
