@@ -134,12 +134,40 @@ arc_apply_env_max(void)
 	zfs_arc_max = (uint64_t)v;
 }
 
+/*
+ * Diagnosis levers for the read path, read once at ARC init:
+ * OSV_ZFS_AGG_NONROT=<bytes> sets zfs_vdev_aggregation_limit_non_rotating
+ * (default 128 KiB), OSV_ZFS_READ_GAP=<bytes> sets zfs_vdev_read_gap_limit
+ * (default 32 KiB) and OSV_ZFS_PREFETCH_DISABLE=1 sets zfs_prefetch_disable.
+ * Each is printed as a LEVER line.
+ */
+extern uint_t zfs_vdev_aggregation_limit_non_rotating;
+extern uint_t zfs_vdev_read_gap_limit;
+extern int zfs_prefetch_disable;
+
+static void
+arc_apply_env_read_levers(void)
+{
+	const char *e;
+
+	if ((e = getenv("OSV_ZFS_AGG_NONROT")) != NULL && *e != '\0')
+		zfs_vdev_aggregation_limit_non_rotating = (uint_t)strtoul(e, NULL, 0);
+	if ((e = getenv("OSV_ZFS_READ_GAP")) != NULL && *e != '\0')
+		zfs_vdev_read_gap_limit = (uint_t)strtoul(e, NULL, 0);
+	if ((e = getenv("OSV_ZFS_PREFETCH_DISABLE")) != NULL && *e != '\0')
+		zfs_prefetch_disable = (int)strtoul(e, NULL, 0);
+	printf("LEVER zfs_read agg_nonrot=%u read_gap=%u prefetch_disable=%d\n",
+	    zfs_vdev_aggregation_limit_non_rotating, zfs_vdev_read_gap_limit,
+	    zfs_prefetch_disable);
+}
+
 uint64_t
 arc_default_max(uint64_t min, uint64_t allmem)
 {
 	uint64_t size;
 
 	arc_apply_env_max();
+	arc_apply_env_read_levers();
 
 	if (allmem >= (1ULL << 30))
 		size = MAX(allmem * 5 / 8, allmem - (1ULL << 30));

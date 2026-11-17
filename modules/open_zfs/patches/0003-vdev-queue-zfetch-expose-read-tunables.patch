@@ -1,0 +1,37 @@
+From: Greg Burd <greg@burd.me>
+Subject: [PATCH] vdev_queue, zfetch: give the read tunables external linkage
+
+zfs_vdev_aggregation_limit_non_rotating, zfs_vdev_read_gap_limit and
+zfs_prefetch_disable are module parameters on other platforms; OSv's
+ZFS_MODULE_PARAM is a no-op, so make them visible to the OSv glue, which
+sets them from the environment for diagnosis.
+
+---
+diff --git a/module/zfs/dmu_zfetch.c b/module/zfs/dmu_zfetch.c
+index 51165d0bf..09cba51f3 100644
+--- a/module/zfs/dmu_zfetch.c
++++ b/module/zfs/dmu_zfetch.c
+@@ -45,7 +45,7 @@
+  * so it can't hurt performance.
+  */
+ 
+-static int zfs_prefetch_disable = B_FALSE;
++int zfs_prefetch_disable = B_FALSE;
+ 
+ /* max # of streams per zfetch */
+ static unsigned int	zfetch_max_streams = 8;
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index c12713b10..dcc23e008 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -200,8 +200,8 @@ static uint_t zfs_vdev_nia_credit = 5;
+  * they aren't able to help us aggregate at this level.
+  */
+ static uint_t zfs_vdev_aggregation_limit = 1 << 20;
+-static uint_t zfs_vdev_aggregation_limit_non_rotating = SPA_OLD_MAXBLOCKSIZE;
+-static uint_t zfs_vdev_read_gap_limit = 32 << 10;
++uint_t zfs_vdev_aggregation_limit_non_rotating = SPA_OLD_MAXBLOCKSIZE;
++uint_t zfs_vdev_read_gap_limit = 32 << 10;
+ static uint_t zfs_vdev_write_gap_limit = 4 << 10;
+ 
+ static int
