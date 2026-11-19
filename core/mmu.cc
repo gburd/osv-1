@@ -530,12 +530,43 @@ static bool addr_is_privatize(uintptr_t va)
     return sorted_ranges_contain(cow_privatize_sorted, va, memo_privatize);
 }
 
+// True if every address in [start, end) lies in one share range and none in a
+// privatize range, so the per-leaf range tests below would all give the same
+// answer for a page table covering it.
+static bool range_wholly_shared(uintptr_t start, uintptr_t end)
+{
+    if (!addr_is_shared(start) || end > memo_share.end) {
+        return false;
+    }
+    for (auto &r : cow_privatize_sorted) {
+        if (r.start < end && start < r.end) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A leaf a fork already shares and that the clone below would copy unchanged
+// into both tables: a writable frame owned by its file or the shared-anon
+// registry (pte_shared), neither COW nor page cache.
+static bool pte_plain_shared(pt_element<0> pte)
+{
+    return pte.writable() && pte.sw_bit(pte_shared) && !pte_is_cow(pte) &&
+           !pte.sw_bit(pte_pagecache);
+}
+
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
 static __thread u64 fork_diag_tl_leaves0, fork_diag_tl_pt_pages;
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
                             uintptr_t base_virt)
 {
+    // Most of a forking server's leaves are in its shared memory, and after
+    // its first fork each of them is plain shared, for which the addr_is_shared()
+    // case below writes the parent's PTE back as it was and copies it to the
+    // child.  When the range tests cannot differ within this table, copy those
+    // directly and leave the rest to the per-leaf cases.
+    bool shared = range_wholly_shared(base_virt, base_virt + huge_page_size);
     for (unsigned i = 0; i < pte_per_page; i++) {
         pt_element<0> ppte = parent_pt[i];
         if (ppte.empty()) {
@@ -543,6 +574,10 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             continue;
         }
         fork_diag_tl_leaves0++;
+        if (shared && pte_plain_shared(ppte)) {
+            child_pt[i] = ppte;
+            continue;
+        }
         uintptr_t va = base_virt + (uintptr_t)i * page_size;
         if (ppte.sw_bit(pte_pagecache)) {
             // A page-cache page (already read-only/COW for a private mapping,
