@@ -776,6 +776,17 @@ std::atomic<u64> fork_diag_ns_clone{0}, fork_diag_ns_ptcopy{0}, fork_diag_ns_vma
     fork_diag_n_clone{0}, fork_diag_pt_pages{0}, fork_diag_leaves{0},
     fork_diag_cow_faults{0}, fork_diag_ns_fork{0}, fork_diag_ns_thread{0};
 
+// Diagnosis: clone_address_space sub-phases, ns totals: lock wait, range
+// build + module pre-pass, PT walk, vma snapshot, TLB flush, child vma
+// rebuild, child page-cache registration.
+std::atomic<u64> fork_diag_sub[7];
+static inline void fork_diag_mark(int i, osv::clock::uptime::time_point &t)
+{
+    auto n = osv::clock::uptime::now();
+    fork_diag_sub[i].fetch_add((n - t).count(), std::memory_order_relaxed);
+    t = n;
+}
+
 address_space *clone_address_space(address_space *parent)
 {
     // Force every allocation done while cloning (the child's anon_vma copies,
@@ -847,6 +858,8 @@ address_space *clone_address_space(address_space *parent)
     PREVENT_STACK_PAGE_FAULT
     WITH_LOCK(clone_ranges_lock)
     WITH_LOCK(parent->vmas_mutex->for_write()) {
+        auto fd_m = fd_t1;
+        fork_diag_mark(0, fd_m);
         // Build the "share, don't COW" ranges: stack VMAs (OSv runs kernel code
         // on the app stack, so its pages must stay writable -- see the note on
         // clone_pt_level0) and MAP_SHARED VMAs (sharing must be preserved).
@@ -926,6 +939,7 @@ address_space *clone_address_space(address_space *parent)
             }
         }
 
+        fork_diag_mark(1, fd_m);
         for (unsigned slot = 0; slot < pte_per_page; slot++) {
             if (slot >= pml4_app_first && slot <= pml4_app_last) {
                 pt_element<3> pslot = parent_pml4[slot];
@@ -952,6 +966,7 @@ address_space *clone_address_space(address_space *parent)
         }
         cow_share_ranges = nullptr;
         cow_privatize_ranges = nullptr;
+        fork_diag_mark(2, fd_m);
 
         // The child AS was pre-reserved above.  Snapshot the parent's private
         // VMAs into `snap` while still under the lock (reads only; the
@@ -994,7 +1009,9 @@ address_space *clone_address_space(address_space *parent)
         // drops references held in a dead child's thread object).  The
         // TLB-flush state is kernel .bss and identity heap, never COW, so
         // this cannot fault under the lock.
+        fork_diag_mark(3, fd_m);
         mmu::flush_tlb_all_cpus();
+        fork_diag_mark(4, fd_m);
     } // release vmas_mutex
     auto fd_t2 = osv::clock::uptime::now();
 
@@ -1023,9 +1040,12 @@ address_space *clone_address_space(address_space *parent)
             child->ranges->insert(vma_range(nv));
         }
     }
+    auto fd_v = fd_t2;
+    fork_diag_mark(5, fd_v);
     // The walk copied the parent's page-cache PTEs: register the child's
     // copies with the page cache (the child has not started yet).
     child_pagecache_mappings(child, pagecache::inherit_mappings);
+    fork_diag_mark(6, fd_v);
     auto fd_t3 = osv::clock::uptime::now();
     fork_diag_ns_ptcopy.fetch_add((fd_t2 - fd_t1).count(), std::memory_order_relaxed);
     fork_diag_ns_vmas.fetch_add((fd_t3 - fd_t2).count(), std::memory_order_relaxed);
@@ -1038,13 +1058,17 @@ address_space *clone_address_space(address_space *parent)
 
 extern "C" int fork_diag_dump(char *buf, int len)
 {
-    return snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
+    int n = snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
                     "cow_faults=%lu fork_ns=%lu thread_ns=%lu leaf_pc=%lu leaf_priv=%lu leaf_share=%lu leaf_shared=%lu leaf_cow=%lu\n",
                     fork_diag_n_clone.load(), fork_diag_ns_clone.load(), fork_diag_ns_ptcopy.load(),
                     fork_diag_ns_vmas.load(), fork_diag_pt_pages.load(), fork_diag_leaves.load(),
                     fork_diag_cow_faults.load(), fork_diag_ns_fork.load(), fork_diag_ns_thread.load(),
                     fork_diag_leaf_kind[0].load(), fork_diag_leaf_kind[1].load(), fork_diag_leaf_kind[2].load(),
                     fork_diag_leaf_kind[3].load(), fork_diag_leaf_kind[4].load());
+    n += snprintf(buf + n, len - n, "forksub lockwait=%lu ranges=%lu walk=%lu snap=%lu flush=%lu rebuild=%lu pcreg=%lu\n",
+                  fork_diag_sub[0].load(), fork_diag_sub[1].load(), fork_diag_sub[2].load(), fork_diag_sub[3].load(),
+                  fork_diag_sub[4].load(), fork_diag_sub[5].load(), fork_diag_sub[6].load());
+    return n;
 }
 
 // --- fork COW page-table teardown ------------------------------------------
