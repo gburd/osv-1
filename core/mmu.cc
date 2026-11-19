@@ -645,6 +645,36 @@ template<int N>
 static void clone_pt_level(pt_element<N> *parent_pt, pt_element<N> *child_pt,
                            uintptr_t base_virt);
 
+// Diagnosis: PT pages a plain copy would clone exactly like clone_pt_level0
+// (the whole 2 MB in one share range, no privatize overlap, every present leaf
+// already writable, pte_shared, not COW, not page cache), and their leaves.
+std::atomic<u64> fork_diag_pt_copyable{0}, fork_diag_leaves_copyable{0};
+static void diag_copyable(pt_element<0> *pt, uintptr_t base)
+{
+    uintptr_t end = base + huge_page_size;
+    if (!addr_is_shared(base) || !(memo_share.start <= base && end <= memo_share.end)) {
+        return;
+    }
+    for (auto &r : cow_privatize_sorted) {
+        if (r.start < end && base < r.end) {
+            return;
+        }
+    }
+    u64 n = 0;
+    for (unsigned i = 0; i < pte_per_page; i++) {
+        pt_element<0> e = pt[i];
+        if (e.empty()) {
+            continue;
+        }
+        if (!e.sw_bit(pte_shared) || !e.writable() || pte_is_cow(e) || e.sw_bit(pte_pagecache)) {
+            return;
+        }
+        n++;
+    }
+    fork_diag_pt_copyable.fetch_add(1, std::memory_order_relaxed);
+    fork_diag_leaves_copyable.fetch_add(n, std::memory_order_relaxed);
+}
+
 template<>
 void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
                        uintptr_t base_virt)
@@ -671,6 +701,7 @@ void clone_pt_level<1>(pt_element<1> *parent_pt, pt_element<1> *child_pt,
         memset(child_sub, 0, page_size);
         fork_diag_tl_pt_pages++;
         auto parent_sub = phys_cast<pt_element<0>>(ppte.next_pt_addr());
+        diag_copyable(parent_sub, base_virt + (uintptr_t)i * step);
         clone_pt_level0(parent_sub, static_cast<pt_element<0>*>(child_sub),
                         base_virt + (uintptr_t)i * step);
         pt_element<1> cpte = ppte;
@@ -1041,12 +1072,13 @@ address_space *clone_address_space(address_space *parent)
 extern "C" int fork_diag_dump(char *buf, int len)
 {
     return snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
-                    "cow_faults=%lu fork_ns=%lu thread_ns=%lu leaf_pc=%lu leaf_priv=%lu leaf_share=%lu leaf_shared=%lu leaf_cow=%lu leaf_share_tagged=%lu\n",
+                    "cow_faults=%lu fork_ns=%lu thread_ns=%lu leaf_pc=%lu leaf_priv=%lu leaf_share=%lu leaf_shared=%lu leaf_cow=%lu leaf_share_tagged=%lu pt_copyable=%lu leaves_copyable=%lu\n",
                     fork_diag_n_clone.load(), fork_diag_ns_clone.load(), fork_diag_ns_ptcopy.load(),
                     fork_diag_ns_vmas.load(), fork_diag_pt_pages.load(), fork_diag_leaves.load(),
                     fork_diag_cow_faults.load(), fork_diag_ns_fork.load(), fork_diag_ns_thread.load(),
                     fork_diag_leaf_kind[0].load(), fork_diag_leaf_kind[1].load(), fork_diag_leaf_kind[2].load(),
-                    fork_diag_leaf_kind[3].load(), fork_diag_leaf_kind[4].load(), fork_diag_leaf_kind[5].load());
+                    fork_diag_leaf_kind[3].load(), fork_diag_leaf_kind[4].load(), fork_diag_leaf_kind[5].load(),
+                    fork_diag_pt_copyable.load(), fork_diag_leaves_copyable.load());
 }
 
 // --- fork COW page-table teardown ------------------------------------------
