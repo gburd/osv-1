@@ -533,8 +533,6 @@ static bool addr_is_privatize(uintptr_t va)
 // The parent must hold vma_list_mutex for write while this runs.  base_virt is
 // the virtual address that leaf entry 0 of this PT maps.
 static __thread u64 fork_diag_tl_leaves0, fork_diag_tl_pt_pages;
-// leaf PTEs by kind: page cache, privatized (copied), shared, already-shared, private-to-COW
-std::atomic<u64> fork_diag_leaf_kind[5];
 static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
                             uintptr_t base_virt)
 {
@@ -547,7 +545,6 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
         fork_diag_tl_leaves0++;
         uintptr_t va = base_virt + (uintptr_t)i * page_size;
         if (ppte.sw_bit(pte_pagecache)) {
-            fork_diag_leaf_kind[0].fetch_add(1, std::memory_order_relaxed);
             // A page-cache page (already read-only/COW for a private mapping,
             // or a MAP_SHARED write-cache page): the child maps it as the
             // parent does, and the page cache learns of the child's slot after
@@ -555,7 +552,6 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             // writable here: writes must reach the page cache through a fault.
             child_pt[i] = ppte;
         } else if (addr_is_privatize(va)) {
-            fork_diag_leaf_kind[1].fetch_add(1, std::memory_order_relaxed);
             // Forking thread's live stack: give the child its OWN physical
             // page (byte-copy of the parent's), mapped at the SAME VA, plain
             // writable (no COW bit, no shared bit).  The parent's PTE is left
@@ -572,7 +568,6 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             pv.set_addr(virt_to_phys(child_page), false);
             child_pt[i] = pv;
         } else if (addr_is_shared(va)) {
-            fork_diag_leaf_kind[2].fetch_add(1, std::memory_order_relaxed);
             // Stack / MAP_SHARED page: must stay genuinely shared + writable in
             // both parent and child (never COW).  Clear any COW bit and grant
             // write so both sides see each other's writes to the same phys
@@ -597,7 +592,6 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
             sh.set_sw_bit(pte_shared, true);
             child_pt[i] = sh;
         } else if (ppte.sw_bit(pte_shared)) {
-            fork_diag_leaf_kind[3].fetch_add(1, std::memory_order_relaxed);
             // A frame that belongs to its file (a MAP_PRIVATE mapping of a shm
             // or io_uring object, tagged by the file's map_page()): each side
             // copies it on its first write, but it is the file's to free, so
@@ -612,7 +606,6 @@ static void clone_pt_level0(pt_element<0> *parent_pt, pt_element<0> *child_pt,
                 child_pt[i] = ppte;
             }
         } else if (ppte.writable() && !pte_is_cow(ppte)) {
-            fork_diag_leaf_kind[4].fetch_add(1, std::memory_order_relaxed);
             // Private writable page: make it COW (write-protect + cow bit) in
             // BOTH parent and child.
             pt_element<0> cow = pte_mark_cow(ppte, true);
@@ -1059,12 +1052,10 @@ address_space *clone_address_space(address_space *parent)
 extern "C" int fork_diag_dump(char *buf, int len)
 {
     int n = snprintf(buf, len, "fork n=%lu clone_ns=%lu ptcopy_ns=%lu vmas_ns=%lu pt_pages=%lu leaves=%lu "
-                    "cow_faults=%lu fork_ns=%lu thread_ns=%lu leaf_pc=%lu leaf_priv=%lu leaf_share=%lu leaf_shared=%lu leaf_cow=%lu\n",
+                    "cow_faults=%lu fork_ns=%lu thread_ns=%lu\n",
                     fork_diag_n_clone.load(), fork_diag_ns_clone.load(), fork_diag_ns_ptcopy.load(),
                     fork_diag_ns_vmas.load(), fork_diag_pt_pages.load(), fork_diag_leaves.load(),
-                    fork_diag_cow_faults.load(), fork_diag_ns_fork.load(), fork_diag_ns_thread.load(),
-                    fork_diag_leaf_kind[0].load(), fork_diag_leaf_kind[1].load(), fork_diag_leaf_kind[2].load(),
-                    fork_diag_leaf_kind[3].load(), fork_diag_leaf_kind[4].load());
+                    fork_diag_cow_faults.load(), fork_diag_ns_fork.load(), fork_diag_ns_thread.load());
     n += snprintf(buf + n, len - n, "forksub lockwait=%lu ranges=%lu walk=%lu snap=%lu flush=%lu rebuild=%lu pcreg=%lu\n",
                   fork_diag_sub[0].load(), fork_diag_sub[1].load(), fork_diag_sub[2].load(), fork_diag_sub[3].load(),
                   fork_diag_sub[4].load(), fork_diag_sub[5].load(), fork_diag_sub[6].load());
