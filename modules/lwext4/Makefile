@@ -29,7 +29,7 @@ lwext4: upstream/lwext4/build_lib_only/src/liblwext4.so
 # which one.  That makes any ext4 measurement or bug report unreproducible after
 # the fork moves.  Override with `make lwext4_commit=<sha>` to test another
 # revision.
-lwext4_commit?=6f6d8f7c509da696e71e80cc5a59abfc48e4971b
+lwext4_commit?=dd1cd4c4bcac5b390df4b323cbb9f5f7b1a75bff
 
 # Fixes not yet in lwext4 or the osvunikernel fork, applied in order to the
 # pinned checkout. Each patch says where it comes from; drop it once the
