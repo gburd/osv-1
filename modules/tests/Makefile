@@ -232,11 +232,15 @@ endif
 tests += testrunner.so
 
 tests += tst-libaio.so
+tests += tst-bsd-synch.so
+tests += misc-bsd-taskq-bench.so
 tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa.so
 tests += tst-random-flush.so
 internal-api-tests += tst-random-flush.so
+internal-api-tests += tst-bsd-synch.so
+internal-api-tests += misc-bsd-taskq-bench.so
 
 # Tests with special compilation parameters needed...
 $(out)/tests/tst-mmap.so: COMMON += -Wl,-z,now
