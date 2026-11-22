@@ -135,7 +135,7 @@ conf_zfs ?= bsd
 
 zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 	tst-concurrent-read.so tst-solaris-taskq.so tst-zfs-crucible-stress.so \
-	tst-fork-zfs-write.so
+	tst-fork-zfs-write.so tst-zfs-unlink-space.so
 
 # ZFS tests that drive the OpenZFS userspace C API (libzfs / libzfs_core) via
 # dlopen("libzfs.so").  Those libraries are only built in conf_zfs=openzfs; in
