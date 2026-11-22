@@ -753,6 +753,9 @@ zfs_osv_unmount(struct mount *mp, int flags)
 	}
 	mutex_exit(&zfsvfs->z_znodes_lock);
 
+	/* Commit the frees of any unlinked files the drain removed. */
+	txg_wait_synced(dmu_objset_pool(zfsvfs->z_os), 0);
+
 	dmu_objset_disown(zfsvfs->z_os, B_TRUE, zfsvfs);
 
 	zfs_exit(zfsvfs, FTAG);
