@@ -360,6 +360,7 @@ tests += tst-locale-numeric.so
 tests += tst-locale-messages.so
 tests += misc-locale-dump.so
 tests += tst-locale-collate.so
+tests += tst-listen-backlog.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
 internal-api-tests += tst-umount-release.so
