@@ -280,6 +280,7 @@ tests += tst-close-range.so
 tests += tst-numa-mempolicy.so
 tests += tst-numa.so
 tests += tst-random-flush.so
+tests += tst-signalfd.so
 internal-api-tests += tst-random-flush.so
 tests += tst-umount-release.so
 internal-api-tests += tst-umount-release.so
