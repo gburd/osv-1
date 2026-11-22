@@ -294,6 +294,11 @@ public:
     static void do_free_large_buffer(void* buffer);
 
     bool ack_irq();
+    // Wake the Tx xmitters to reap HW completions.  Used by the shared IRQ
+    // (virtio-MMIO and legacy PCI, which service only Rx in ack_irq()); with
+    // MSI-X each queue's Tx vector wakes its own xmitter instead.  The shared
+    // IRQ path has a single queue pair, so this wakes one xmitter there.
+    void wake_tx_reaper();
 
     static hw_driver* probe(hw_device* dev);
 
@@ -470,6 +475,22 @@ private:
         }
 
         void start() { _xmitter.start(); }
+
+        // Reap completed HW Tx descriptors, then arm the completion interrupt
+        // and re-check the used ring once (the enable-then-recheck idiom from
+        // wait_for_queue): if the device posted a completion in the enable
+        // window, reap it too and loop.  Called by the xmitter worker right
+        // before it sleeps so it NEVER sleeps with unreaped Tx completions and
+        // the completion interrupt disabled -- the lost-wake that stalls Tx on
+        // both virtio-MMIO (no Tx IRQ at all) and virtio-PCI (the Tx MSI-X
+        // handler disables interrupts and nothing re-enables them).
+        void reap_and_rearm();
+
+        // Wake this queue's xmitter worker (IRQ-safe) so it reaps Tx
+        // completions.  Wired into the Tx MSI-X vector (virtio-PCI) and the
+        // shared IRQ (virtio-MMIO); both deliver Tx completions that must
+        // drive a reap even when the packet queue is empty.
+        void wake_tx_reaper() { _xmitter.wake_for_reap(); }
 
         int qsize() { return vqueue->size(); }
 
