@@ -291,6 +291,7 @@ tests += tst-rlimit.so
 tests += tst-close-range.so
 tests += tst-numa-mempolicy.so
 tests += tst-numa-alloc.so
+tests += tst-blk-all-devices.so
 tests += tst-numa.so
 tests += tst-random-flush.so
 tests += tst-signalfd.so
