@@ -812,6 +812,9 @@ zfs_osv_unmount(struct mount *mp, int flags)
 	}
 	mutex_exit(&zfsvfs->z_znodes_lock);
 
+	/* Commit the frees of any unlinked files the drain removed. */
+	txg_wait_synced(dmu_objset_pool(zfsvfs->z_os), 0);
+
 	/*
 	 * Release the mount's root and covered dentries, as bsd ZFS does.
 	 * Without this the covered dentry keeps the parent mount busy, so a
