@@ -19,9 +19,14 @@
 // single fault.  The "kept" arm does the same without the unlink, as the
 // control.  It prints the munmap() time and the worst fault for each arm.
 //
-// Usage: misc-zfs-munmap-unlinked.so [-d DIR] [-s SIZE_MIB] [-t FAULTERS] [-r ROUNDS]
+// Usage: misc-zfs-munmap-unlinked.so [-d DIR] [-s SIZE_MIB] [-t FAULTERS] [-r ROUNDS] [-C] [-W DIR] [-b MIB]
+// -C creates osv/mu4m (recordsize=4M) at /mu4m; -W DIR runs a writer that writes -b MiB chunks with fsync in DIR
+// during every munmap(), so record-sized buffers are allocated on the txg sync path meanwhile.
 
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +44,51 @@ static std::string dir = "/";
 static long size_mib = 1024;
 static int faulters = 3;
 static int rounds = 3;
+static std::string wdir;      // -W: a writer thread writes and fsyncs here while munmap() runs
+static long wchunk_mib = 4;
+
+// -W writer: rewrite a 64 MiB file in wchunk_mib MiB writes with fsync, so the txg sync and the zio pipeline
+// run (and allocate record-sized buffers) while munmap() holds the VMA lock.
+static void* writer(void*)
+{
+    std::string p = wdir + "/misc-zfs-munmap-writer.dat";
+    int fd = open(p.c_str(), O_CREAT | O_RDWR, 0644);
+    std::vector<unsigned long long> buf((wchunk_mib << 20) / 8);
+    unsigned long long x = 0x1234567;
+    long off = 0;
+    while (fd >= 0 && !stop) {
+        for (auto& w : buf) {
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            w = x;
+        }
+        pwrite(fd, buf.data(), buf.size() * 8, off);
+        fsync(fd);
+        off = (off + (wchunk_mib << 20)) % (64 << 20);
+    }
+    close(fd);
+    return nullptr;
+}
+
+// -C: create <pool>/mu4m with recordsize=4M and mount it at /mu4m through libzfs, for -W /mu4m.
+static int make_bigrec_dataset()
+{
+    void* h = dlopen("libzfs.so", RTLD_LAZY | RTLD_GLOBAL);
+    if (!h) { printf("SKIP: no libzfs.so\n"); return -1; }
+    auto init = (void* (*)())dlsym(h, "libzfs_init");
+    auto create = (int (*)(void*, const char*, int, void*))dlsym(h, "zfs_create");
+    auto zopen = (void* (*)(void*, const char*, int))dlsym(h, "zfs_open");
+    auto setp = (int (*)(void*, const char*, const char*))dlsym(h, "zfs_prop_set");
+    void* hdl = init ? init() : nullptr;
+    if (!hdl || !create || !zopen || !setp) { printf("SKIP: libzfs symbols\n"); return -1; }
+    create(hdl, "osv/mu4m", 1, nullptr);
+    void* zh = zopen(hdl, "osv/mu4m", 1);
+    int rc = zh ? setp(zh, "recordsize", "4M") : -1;
+    mkdir("/mu4m", 0755);
+    umount("/mu4m");
+    int mrc = mount("osv/mu4m", "/mu4m", "zfs", 0, "");
+    printf("dataset osv/mu4m recordsize=4M: set rc=%d, mount rc=%d\n", rc, mrc);
+    return rc == 0 && mrc == 0 ? 0 : -1;
+}
 
 static std::atomic<bool> stop;
 static std::atomic<bool> measuring;
@@ -132,6 +182,10 @@ static void run_arm(const std::string& path, bool unlink_it)
     for (int i = 0; i < faulters; i++) {
         pthread_create(&th[i], nullptr, faulter, &worst[i]);
     }
+    pthread_t wt;
+    if (!wdir.empty()) {
+        pthread_create(&wt, nullptr, writer, nullptr);
+    }
     printf("  faulters started\n"); fflush(stdout);
     usleep(200 * 1000);
     double base_worst = 0;
@@ -149,6 +203,9 @@ static void run_arm(const std::string& path, bool unlink_it)
     for (auto& t : th) {
         pthread_join(t, nullptr);
     }
+    if (!wdir.empty()) {
+        pthread_join(wt, nullptr);
+    }
     double w = *std::max_element(worst.begin(), worst.end());
     printf("%s: munmap %.1f ms, worst fault during it %.1f ms (%.2f ms before it)\n",
            unlink_it ? "unlinked" : "kept", unmap_ms, w, base_worst);
@@ -162,16 +219,23 @@ static void run_arm(const std::string& path, bool unlink_it)
 int main(int argc, char** argv)
 {
     int opt;
-    while ((opt = getopt(argc, argv, "d:s:t:r:")) != -1) {
+    bool mk = false;
+    while ((opt = getopt(argc, argv, "d:s:t:r:W:b:C")) != -1) {
         switch (opt) {
         case 'd': dir = optarg; break;
         case 's': size_mib = atol(optarg); break;
         case 't': faulters = atoi(optarg); break;
         case 'r': rounds = atoi(optarg); break;
+        case 'W': wdir = optarg; break;
+        case 'b': wchunk_mib = atol(optarg); break;
+        case 'C': mk = true; break;
         default:
             fprintf(stderr, "usage: %s [-d dir] [-s MiB] [-t faulters] [-r rounds]\n", argv[0]);
             return 2;
         }
+    }
+    if (mk && make_bigrec_dataset() != 0) {
+        return 0;
     }
     std::string path = dir + (dir.back() == '/' ? "" : "/") + "misc-zfs-munmap-unlinked.dat";
     printf("dir %s, %ld MiB, %d faulters, %d rounds\n", dir.c_str(), size_mib, faulters, rounds);
