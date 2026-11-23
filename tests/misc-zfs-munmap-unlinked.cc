@@ -21,7 +21,8 @@
 //
 // Usage: misc-zfs-munmap-unlinked.so [-d DIR] [-s SIZE_MIB] [-t FAULTERS] [-r ROUNDS] [-C] [-W DIR] [-b MIB]
 // -C creates osv/mu4m (recordsize=4M) at /mu4m; -W DIR runs a writer that writes -b MiB chunks with fsync in DIR
-// during every munmap(), so record-sized buffers are allocated on the txg sync path meanwhile.
+// during every munmap(), so record-sized buffers are allocated on the txg sync path meanwhile.  -F: the writer
+// does not fsync (dirty data reaches the txg limits, so the free waits for syncs); -Z: compression of osv/mu4m.
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -48,6 +49,8 @@ static std::atomic<bool> stop;
 static std::atomic<bool> measuring;
 static std::string wdir;      // -W: a writer thread writes and fsyncs here while munmap() runs
 static long wchunk_mib = 4;
+static bool wsync = true;     // -F: the writer does not fsync, so dirty data builds up to the txg limits
+static const char* wcomp = "off";  // -Z: compression of osv/mu4m (lz4 makes the zio pipeline allocate record-sized buffers)
 
 // -W writer: rewrite a 64 MiB file in wchunk_mib MiB writes with fsync, so the txg sync and the zio pipeline
 // run (and allocate record-sized buffers) while munmap() holds the VMA lock.
@@ -64,8 +67,10 @@ static void* writer(void*)
             w = x;
         }
         pwrite(fd, buf.data(), buf.size() * 8, off);
-        fsync(fd);
-        off = (off + (wchunk_mib << 20)) % (64 << 20);
+        if (wsync) {
+            fsync(fd);
+        }
+        off = (off + (wchunk_mib << 20)) % (1024L << 20);
     }
     close(fd);
     return nullptr;
@@ -85,10 +90,13 @@ static int make_bigrec_dataset()
     create(hdl, "osv/mu4m", 1, nullptr);
     void* zh = zopen(hdl, "osv/mu4m", 1);
     int rc = zh ? setp(zh, "recordsize", "4M") : -1;
+    if (zh && rc == 0) {
+        rc = setp(zh, "compression", wcomp);
+    }
     mkdir("/mu4m", 0755);
     umount("/mu4m");
     int mrc = mount("osv/mu4m", "/mu4m", "zfs", 0, "");
-    printf("dataset osv/mu4m recordsize=4M: set rc=%d, mount rc=%d\n", rc, mrc);
+    printf("dataset osv/mu4m recordsize=4M compression=%s: set rc=%d, mount rc=%d\n", wcomp, rc, mrc);
     return rc == 0 && mrc == 0 ? 0 : -1;
 }
 
@@ -220,7 +228,7 @@ int main(int argc, char** argv)
 {
     int opt;
     bool mk = false;
-    while ((opt = getopt(argc, argv, "d:s:t:r:W:b:C")) != -1) {
+    while ((opt = getopt(argc, argv, "d:s:t:r:W:b:CFZ:")) != -1) {
         switch (opt) {
         case 'd': dir = optarg; break;
         case 's': size_mib = atol(optarg); break;
@@ -229,6 +237,8 @@ int main(int argc, char** argv)
         case 'W': wdir = optarg; break;
         case 'b': wchunk_mib = atol(optarg); break;
         case 'C': mk = true; break;
+        case 'F': wsync = false; break;
+        case 'Z': wcomp = optarg; break;
         default:
             fprintf(stderr, "usage: %s [-d dir] [-s MiB] [-t faulters] [-r rounds]\n", argv[0]);
             return 2;
