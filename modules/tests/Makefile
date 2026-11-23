@@ -42,6 +42,9 @@ $(out)/%.so: $(out)/%.o
 	$(call quiet, $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(LIBS), LD $*.so)
 
 $(out)/tests/tst-non-fpic.o: CXXFLAGS:=$(subst -fPIC,-fno-pic -mcmodel=large,$(CXXFLAGS))
+# This test deliberately has text relocations, which some linkers (e.g.,
+# Fedora 44's) reject by default.
+$(out)/tests/tst-non-fpic.so: LDFLAGS += -Wl,-z,notext
 
 $(out)/tests/tst-getopt-pie.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS))
 $(out)/tests/tst-getopt-pie.o: $(src)/tests/tst-getopt.cc
@@ -125,6 +128,8 @@ zfs-only-tests := tst-readdir.so tst-fallocate.so tst-fs-link.so \
 # below), so a conf_zfs=bsd test run does not include them.
 zfs-openzfs-only-tests := tst-zfs-recordsize.so tst-zfs-direct-io.so \
 	tst-zfs-encryption.so misc-zfs-db-sim.so tst-zfs-trim.so misc-zfs-mmap-bench.so
+zfs-openzfs-only-tests += tst-zfs-unlink-space.so
+zfs-openzfs-only-tests += tst-zfs-unlinked-readonly.so
 
 # OpenZFS user-space libraries needed by the dlopen("libzfs.so") tests above.
 # libsolaris.so is already resident as the mounted fs driver, so only these six.
@@ -136,6 +141,7 @@ zfs-only-tests += $(zfs-openzfs-only-tests)
 endif
 
 ext-only-tests := tst-readdir.so tst-concurrent-read.so tst-fs-link.so
+ext-only-tests += tst-ext-readlink.so
 ext-only-tests += tst-ext4-rw.so
 
 specific-fs-tests := $($(fs_type)-only-tests)
@@ -164,7 +170,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 	misc-tcp-sendonly.so tst-tcp-nbwrite.so misc-tcp-hash-srv.so \
 	misc-loadbalance.so misc-scheduler.so tst-console.so tst-app.so \
 	misc-setpriority.so misc-timeslice.so misc-tls.so misc-gtod.so \
-	tst-dns-resolver.so tst-kill.so tst-truncate.so \
+	tst-dns-resolver.so tst-dns-decname.so tst-kill.so tst-truncate.so \
 	misc-panic.so tst-utimes.so tst-utimensat.so tst-futimesat.so \
 	misc-tcp.so tst-strerror_r.so misc-random.so misc-urandom.so \
 	tst-commands.so tst-options.so tst-threadcomplete.so tst-timerfd.so \
@@ -209,7 +215,7 @@ tests := tst-iovcnt-guard.so tst-pthread.so misc-ramdisk.so tst-vblk.so tst-mq-s
 #This is a list of the tests that interact with the internal C++ or C
 #api which is unavailable when kernel is built with all but glibc symbols
 #hidden.
-internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
+internal-api-tests := tst-app.so tst-async.so tst-dns-decname.so tst-bsd-evh.so \
 	tst-bsd-kthread.so tst-bsd-taskqueue.so tst-bsd-tcp1-zrcv.so \
 	tst-bsd-tcp1-zsnd.so tst-bsd-tcp1-zsndrcv.so tst-clock.so \
 	tst-condvar.so tst-dax.so tst-fpu.so tst-fs-link.so tst-hub.so \
@@ -221,6 +227,8 @@ internal-api-tests := tst-app.so tst-async.so tst-bsd-evh.so \
 
 ifeq ($(arch),x64)
 tests += tst-mmx-fpu.so tst-tls-desc.so tst-tls-pie-desc.so libtls_desc.so
+tests += tst-tls-pie-dlopen-desc.so tst-tls-pie-dlopen-desc-needed.so libtls_desc_user.so
+tests += tst-tls-dlopen-gd.so libtls_gd.so libtls_gd_user.so
 endif
 
 tests += testrunner.so
@@ -248,6 +256,8 @@ $(out)/tests/tst-tls-pie.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls-desc.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls-pie-desc.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls-pie-dlopen.so: COMMON += -fuse-ld=bfd
+$(out)/tests/tst-tls-pie-dlopen-desc.so: COMMON += -fuse-ld=bfd
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.so: COMMON += -fuse-ld=bfd
 
 $(out)/tests/tst-dlfcn.so: COMMON += -rdynamic -ldl
 
@@ -300,6 +310,53 @@ $(out)/tests/tst-tls-pie-dlopen.so: \
 		$(out)/tests/tst-tls-pie-dlopen.o
 	$(makedir)
 	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -export-dynamic -pthread -fpie -o $@ $< $(LIBS), LD tests/tst-tls-pie-dlopen.so)
+
+# Like tst-tls-pie-dlopen.so, but dlopen() libraries that use TLS descriptors
+# regardless of the compiler's default TLS dialect. tst-tls-pie-dlopen-desc.so
+# dlopen()s libtls_desc.so, which accesses its own thread-local variables.
+# tst-tls-pie-dlopen-desc-needed.so dlopen()s libtls_desc_user.so, which
+# accesses thread-local variables defined in its DT_NEEDED libtls_desc.so.
+$(out)/tests/tst-tls-pie-dlopen-desc.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS)) -D__DLOPEN__=1 -D__DLOPEN_LIB__='"/tests/libtls_desc.so"'
+$(out)/tests/tst-tls-pie-dlopen-desc.o: $(src)/tests/tst-tls.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-tls.cc => tests/tst-tls-pie-dlopen-desc.o)
+$(out)/tests/tst-tls-pie-dlopen-desc.so: \
+		$(out)/tests/tst-tls-pie-dlopen-desc.o
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -export-dynamic -pthread -fpie -o $@ $< $(LIBS), LD tests/tst-tls-pie-dlopen-desc.so)
+
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS)) -D__DLOPEN__=1 -D__DLOPEN_LIB__='"/tests/libtls_desc_user.so"'
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.o: $(src)/tests/tst-tls.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-tls.cc => tests/tst-tls-pie-dlopen-desc-needed.o)
+$(out)/tests/tst-tls-pie-dlopen-desc-needed.so: \
+		$(out)/tests/tst-tls-pie-dlopen-desc-needed.o
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -export-dynamic -pthread -fpie -o $@ $< $(LIBS), LD tests/tst-tls-pie-dlopen-desc-needed.so)
+
+$(out)/tests/libtls_desc_user.so: CXXFLAGS += -mtls-dialect=gnu2
+$(out)/tests/libtls_desc_user.so: \
+		$(src)/tests/libtls_user.cc \
+		$(out)/tests/libtls_desc.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(LIBS) tests/libtls_desc.so, LD tests/libtls_desc_user.so)
+
+# tst-tls-dlopen-gd.so is linked with libtls_gd.so, which accesses its
+# thread-local variable only through __tls_get_addr() so it has no static TLS
+# block, and dlopen()s libtls_gd_user.so, which accesses the same variable
+# through a TLS descriptor.
+$(out)/tests/libtls_gd.o: CXXFLAGS += -mtls-dialect=gnu
+$(out)/tests/libtls_gd_user.so: CXXFLAGS += -mtls-dialect=gnu2
+$(out)/tests/libtls_gd_user.so: \
+		$(src)/tests/libtls_gd_user.cc \
+		$(out)/tests/libtls_gd.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -shared -o $@ $< $(LIBS) tests/libtls_gd.so, LD tests/libtls_gd_user.so)
+$(out)/tests/tst-tls-dlopen-gd.so: \
+		$(src)/tests/tst-tls-dlopen-gd.cc \
+		$(out)/tests/libtls_gd.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) $(LDFLAGS) -pthread -shared -o $@ $< tests/libtls_gd.so, CXX tests/tst-tls-dlopen-gd.cc)
 
 $(out)/tests/libtls_gold.so: COMMON += -fuse-ld=gold
 $(out)/tests/libtls_gold.so: $(out)/tests/libtls.o
