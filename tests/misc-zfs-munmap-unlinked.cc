@@ -106,6 +106,7 @@ static void run_arm(const std::string& path, bool unlink_it)
 {
     write_file(path);
     sync();
+    printf("  written\n"); fflush(stdout);
     int fd = open(path.c_str(), O_RDONLY);
     size_t len = size_mib << 20;
     char* m = static_cast<char*>(mmap(nullptr, len, PROT_READ, MAP_SHARED, fd, 0));
@@ -113,11 +114,13 @@ static void run_arm(const std::string& path, bool unlink_it)
         perror("mmap file");
         exit(1);
     }
+    printf("  mapped\n"); fflush(stdout);
     volatile char sink = 0;
     for (size_t off = 0; off < len; off += 4096) {
         sink += m[off];
     }
     (void)sink;
+    printf("  touched\n"); fflush(stdout);
     close(fd);
     if (unlink_it) {
         unlink(path.c_str());
@@ -129,6 +132,7 @@ static void run_arm(const std::string& path, bool unlink_it)
     for (int i = 0; i < faulters; i++) {
         pthread_create(&th[i], nullptr, faulter, &worst[i]);
     }
+    printf("  faulters started\n"); fflush(stdout);
     usleep(200 * 1000);
     double base_worst = 0;
     measuring = true;
@@ -138,6 +142,7 @@ static void run_arm(const std::string& path, bool unlink_it)
     double t0 = now_ms();
     munmap(m, len);
     double unmap_ms = now_ms() - t0;
+    printf("  unmapped\n"); fflush(stdout);
     usleep(200 * 1000);
     measuring = false;
     stop = true;
