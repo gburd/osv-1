@@ -44,6 +44,8 @@ static std::string dir = "/";
 static long size_mib = 1024;
 static int faulters = 3;
 static int rounds = 3;
+static std::atomic<bool> stop;
+static std::atomic<bool> measuring;
 static std::string wdir;      // -W: a writer thread writes and fsyncs here while munmap() runs
 static long wchunk_mib = 4;
 
@@ -90,8 +92,6 @@ static int make_bigrec_dataset()
     return rc == 0 && mrc == 0 ? 0 : -1;
 }
 
-static std::atomic<bool> stop;
-static std::atomic<bool> measuring;
 
 static double now_ms()
 {
