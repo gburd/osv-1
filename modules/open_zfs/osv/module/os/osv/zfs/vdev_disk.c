@@ -121,6 +121,7 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	 * from a Linux guest for virtio-blk.
 	 */
 	vd->vdev_nonrot = !(dvd->device->flags & D_ROTATIONAL);
+	printf("R1125I vdev_disk_open %s flags=0x%x nonrot=%d\n", vd->vdev_path, dvd->device->flags, (int)vd->vdev_nonrot);
 
 	return (0);
 }
