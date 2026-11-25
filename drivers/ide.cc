@@ -96,6 +96,7 @@ ide_drive::ide_drive(pci::device& pci_dev)
     if (_rotational) {
         dev->flags |= D_ROTATIONAL;
     }
+    printf("R1125I ide %s flags=0x%x\n", dev_name.c_str(), dev->flags);
     read_partition_table(dev);
 
     debugf("ide: Add ide device instances %d as %s, devsize=%lld\n", _id, dev_name.c_str(), dev->size);

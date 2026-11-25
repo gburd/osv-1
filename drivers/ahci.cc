@@ -534,6 +534,7 @@ void hba::scan()
         prv->port = p;
         prv->strategy = hba_strategy;
         dev->size = p->get_devsize();
+        printf("R1125I ahci %s flags=0x%x\n", dev_name.c_str(), dev->flags);
         dev->max_io_size = 4 * 1024 * 1024; // one PRDT entry contains 4MB at most
 
         add_port(pnr, p);
