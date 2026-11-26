@@ -44,10 +44,72 @@ if host_arch == 'aarch64':
 else:
     linux_ld = '/lib64/ld-linux-x86-64.so.2'
 
+<<<<<<< ours
+||||||| base
+# Tests that need a scratch NVMe disk, with the arguments they get.  Such a test
+# boots from NVMe (vblk0) and gets a fresh scratch image as a second NVMe disk
+# (vblk1); with another hypervisor it runs without arguments and SKIPs.
+scratch_nvme_tests = {
+    "tst-blk-inflight.so": "vblk1 100000 32",
+}
+
+=======
+# Tests that need a scratch NVMe disk, with the arguments they get.  Such a test
+# boots from NVMe (vblk0) and gets a fresh scratch image as a second NVMe disk
+# (vblk1); with another hypervisor it runs without arguments and SKIPs.
+scratch_nvme_tests = {
+    "tst-blk-inflight.so": "vblk1 100000 32",
+}
+
+# Tests that also run on a root disk with four virtio-blk queues: once with an
+# MSI-X vector per queue, and once with vectors=0, where the device has no
+# MSI-X and one shared interrupt must wake every queue's completion thread.
+# The default run, with one queue, reaches neither path.
+multiqueue_blk_tests = ["tst-mq-smoke.so"]
+multiqueue_blk_args = [
+    ['--virtio-blk-queues', '4'],
+    ['--virtio-blk-queues', '4', '--pass-args=-global virtio-blk-pci.vectors=0'],
+]
+
+>>>>>>> theirs
 class TestRunnerTest(SingleCommandTest):
     def __init__(self, name):
         super(TestRunnerTest, self).__init__(name, '%s /tests/%s' % (linux_ld if cmdargs.linux_ld else '', name))
 
+<<<<<<< ours
+||||||| base
+    def run(self):
+        scratch_args = scratch_nvme_tests.get(self.name)
+        if scratch_args is None or self.hypervisor != 'qemu':
+            super(TestRunnerTest, self).run()
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            image = os.path.join(tmp, 'scratch.qcow2')
+            subprocess.check_call(['qemu-img', 'create', '-q', '-f', 'qcow2', image, '128M'])
+            args = self.run_py_args + ['--nvme', '--second-nvme-image', image]
+            run_command_in_guest(self.command + ' ' + scratch_args, hypervisor=self.hypervisor,
+                                 run_py_args=args).join()
+
+=======
+    def run(self):
+        if self.name in multiqueue_blk_tests and self.hypervisor == 'qemu':
+            super(TestRunnerTest, self).run()
+            for extra in multiqueue_blk_args:
+                run_command_in_guest(self.command, hypervisor=self.hypervisor,
+                                     run_py_args=self.run_py_args + extra).join()
+            return
+        scratch_args = scratch_nvme_tests.get(self.name)
+        if scratch_args is None or self.hypervisor != 'qemu':
+            super(TestRunnerTest, self).run()
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            image = os.path.join(tmp, 'scratch.qcow2')
+            subprocess.check_call(['qemu-img', 'create', '-q', '-f', 'qcow2', image, '128M'])
+            args = self.run_py_args + ['--nvme', '--second-nvme-image', image]
+            run_command_in_guest(self.command + ' ' + scratch_args, hypervisor=self.hypervisor,
+                                 run_py_args=args).join()
+
+>>>>>>> theirs
 # Not all files in build/release/tests/tst-*.so may be on the test image
 # (e.g., some may have actually remain there from old builds) - so lets take
 # the list of tests actually in the image form the image's manifest file.
