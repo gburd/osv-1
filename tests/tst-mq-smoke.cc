@@ -6,7 +6,8 @@
  */
 
 // Small multiqueue completion smoke test: drive concurrent writes+reads from
-// several threads (so bios are steered across all virtio-blk queues by CPU),
+// several threads, each pinned to its own CPU (make_request() picks the queue
+// by CPU, so the bios are steered across all virtio-blk queues),
 // with a bounded total size, and assert they all COMPLETE.  This distinguishes
 // a real multiqueue-completion hang (a bio submitted to queue N whose interrupt
 // is never serviced) from mere throughput slowness: the data here is tiny, so
@@ -19,6 +20,8 @@
 #include <vector>
 #include <atomic>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 
 static const char *DIR = "/tmp";   // writable on the zfs image root
@@ -30,6 +33,13 @@ static std::atomic<int> failures{0};
 
 static void worker(int id)
 {
+    // A new thread starts on its creator's CPU, and the load balancer moves it
+    // only slowly, so without pinning most of the I/O stays on one queue.
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(id % sysconf(_SC_NPROCESSORS_ONLN), &set);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0) { failures++; return; }
+
     char path[64];
     snprintf(path, sizeof(path), "%s/mq-smoke-%d", DIR, id);
     int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
