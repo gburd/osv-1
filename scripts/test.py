@@ -44,9 +44,24 @@ if host_arch == 'aarch64':
 else:
     linux_ld = '/lib64/ld-linux-x86-64.so.2'
 
+multiqueue_blk_tests = ["tst-mq-smoke.so"]
+multiqueue_blk_args = [
+    ['--virtio-blk-queues', '4'],
+    ['--virtio-blk-queues', '4', '--pass-args=-global virtio-blk-pci.vectors=0'],
+]
+
 class TestRunnerTest(SingleCommandTest):
     def __init__(self, name):
         super(TestRunnerTest, self).__init__(name, '%s /tests/%s' % (linux_ld if cmdargs.linux_ld else '', name))
+
+    def run(self):
+        if self.name in multiqueue_blk_tests and self.hypervisor == 'qemu':
+            super(TestRunnerTest, self).run()
+            for extra in multiqueue_blk_args:
+                run_command_in_guest(self.command, hypervisor=self.hypervisor,
+                                     run_py_args=self.run_py_args + extra).join()
+            return
+        super(TestRunnerTest, self).run()
 
 # Not all files in build/release/tests/tst-*.so may be on the test image
 # (e.g., some may have actually remain there from old builds) - so lets take
