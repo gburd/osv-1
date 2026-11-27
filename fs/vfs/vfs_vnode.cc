@@ -426,9 +426,8 @@ vn_setmode(struct vnode *vp, mode_t new_mode)
     vattr.va_mode = new_mode;
     vattr.va_mask = AT_MODE;
     vn_lock(vp);
+    vp->v_mode = new_mode;
     int error = VOP_SETATTR(vp, &vattr);
-    if (!error)
-        vp->v_mode = new_mode;
     vn_unlock(vp);
     return error;
 }
